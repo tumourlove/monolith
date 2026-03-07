@@ -27,3 +27,6 @@ Thumbs.db
 
 # Nexus worktrees
 .nexus-worktrees/
+
+# Internal docs/plans
+Docs/plans/

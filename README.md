@@ -27,6 +27,7 @@ Monolith is built for UE developers using **Claude Code**, **Cursor**, or any ot
 - **9 Claude Code skills** — Domain-specific workflow guides bundled with the plugin
 - **Live Coding integration** — Compile output capture with time-windowed error filtering
 - **Pure C++** — Direct UE API access, embedded Streamable HTTP MCP server
+- **Windows-only** — Mac and Linux support coming soon
 
 ---
 
@@ -35,6 +36,9 @@ Monolith is built for UE developers using **Claude Code**, **Cursor**, or any ot
 ### Prerequisites
 
 - **Unreal Engine 5.7+** — Launcher or source build ([unrealengine.com](https://unrealengine.com))
+
+> **Platform:** Windows only. Mac and Linux support is coming soon.
+
 - **Claude Code, Cursor, or another MCP client** — Any tool that supports the Model Context Protocol
 - **(Optional) Python 3.10+** — Only needed if you want engine source code lookups
 
@@ -207,6 +211,7 @@ Monolith includes a built-in auto-updater:
 | **Claude can't find any tools** | Check that `.mcp.json` has `"type": "streamableHttp"` (not `"http"` or `"sse"`). Restart Claude Code after creating the file. |
 | **Tools fail on first try** | Restart Claude Code to refresh the MCP connection. This is a known quirk with initial connection timing. |
 | **Port 9316 already in use** | Change the port in Editor Preferences > Plugins > Monolith, then update the port in `.mcp.json` to match. |
+| **Mac/Linux not working** | Monolith currently supports Windows only. Mac and Linux support is planned for a future release. |
 
 ---
 
