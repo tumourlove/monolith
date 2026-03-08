@@ -693,12 +693,22 @@ void UMonolithUpdateSubsystem::OnPreExit()
 	ScriptPath = FPaths::ConvertRelativePathToFull(FPaths::Combine(ScriptDir, TEXT("monolith_swap.bat")));
 	ScriptPath.ReplaceInline(TEXT("/"), TEXT("\\"));
 
-	FString Args = FString::Printf(TEXT("/c \"%s\""), *ScriptPath);
+	// Write a tiny launcher script that opens the real script in a new, independent window.
+	// This ensures the terminal survives editor shutdown.
+	FString LauncherPath = FPaths::ConvertRelativePathToFull(FPaths::Combine(ScriptDir, TEXT("monolith_launch.bat")));
+	LauncherPath.ReplaceInline(TEXT("/"), TEXT("\\"));
+	FString LauncherContent = FString::Printf(
+		TEXT("@echo off\r\nstart \"Monolith Updater\" cmd /c \"%s\"\r\n"),
+		*ScriptPath
+	);
+	FFileHelper::SaveStringToFile(LauncherContent, *LauncherPath);
+
+	FString Args = FString::Printf(TEXT("/c \"%s\""), *LauncherPath);
 	uint32 ProcessId = 0;
 	FProcHandle Proc = FPlatformProcess::CreateProc(
 		TEXT("cmd.exe"), *Args,
 		true,  // bLaunchDetached
-		false, // bLaunchHidden — visible so user can confirm
+		true,  // bLaunchHidden — launcher is hidden, it spawns the visible window
 		false, // bLaunchReallyHidden
 		&ProcessId,
 		0,     // PriorityModifier
@@ -764,8 +774,12 @@ bool UMonolithUpdateSubsystem::WriteSwapScript(const FString& StagingDir, const 
 		TEXT("echo   Monolith Update Ready\r\n")
 		TEXT("echo  ========================================\r\n")
 		TEXT("echo.\r\n")
-		TEXT("echo  Please close the Unreal Editor completely\r\n")
-		TEXT("echo  before proceeding.\r\n")
+		TEXT("echo  Waiting for Unreal Editor to close...\r\n")
+		TEXT("echo.\r\n")
+		TEXT("for /L %%%%i in (10,-1,1) do (\r\n")
+		TEXT("    echo  %%%%i seconds remaining...\r\n")
+		TEXT("    timeout /t 1 /nobreak > nul\r\n")
+		TEXT(")\r\n")
 		TEXT("echo.\r\n")
 		TEXT("set /p CONFIRM=\"  Install update? (Y/N): \"\r\n")
 		TEXT("if /i not \"%%CONFIRM%%\"==\"Y\" (\r\n")
@@ -775,8 +789,6 @@ bool UMonolithUpdateSubsystem::WriteSwapScript(const FString& StagingDir, const 
 		TEXT("    exit /b 0\r\n")
 		TEXT(")\r\n")
 		TEXT("echo.\r\n")
-		TEXT("echo  Waiting for editor to release file locks...\r\n")
-		TEXT("timeout /t 5 /nobreak > nul\r\n")
 		TEXT("echo  Backing up current installation...\r\n")
 		TEXT("if exist \"%s\" rmdir /s /q \"%s\"\r\n")
 		TEXT("cd /d \"%s\"\r\n")
