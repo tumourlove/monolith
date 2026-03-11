@@ -35,9 +35,20 @@ foreach ($file in $trackedFiles) {
 Pop-Location
 
 # Copy Binaries (gitignored but needed for Blueprint-only users)
+# Exclude .pdb (debug symbols) and .patch_* (Live Coding artifacts)
 $binDir = Join-Path $PluginDir "Binaries"
 if (Test-Path $binDir) {
-    Copy-Item $binDir -Destination (Join-Path $TempDir "Binaries") -Recurse -Force
+    $destBin = Join-Path $TempDir "Binaries"
+    New-Item -ItemType Directory -Path $destBin -Force | Out-Null
+    Get-ChildItem $binDir -Recurse -File |
+        Where-Object { $_.Extension -ne '.pdb' -and $_.Name -notmatch '\.patch_' } |
+        ForEach-Object {
+            $rel = $_.FullName.Substring($binDir.Length)
+            $dest = Join-Path $destBin $rel
+            $destParent = Split-Path -Parent $dest
+            if (-not (Test-Path $destParent)) { New-Item -ItemType Directory -Path $destParent -Force | Out-Null }
+            Copy-Item $_.FullName -Destination $dest -Force
+        }
     Write-Host "  Included Binaries/ for Blueprint-only compatibility" -ForegroundColor Green
 } else {
     Write-Host "  WARNING: No Binaries/ found" -ForegroundColor Yellow
