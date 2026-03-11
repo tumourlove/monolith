@@ -1,6 +1,6 @@
 # Monolith — TODO
 
-Last updated: 2026-03-10
+Last updated: 2026-03-11
 
 ---
 
@@ -188,6 +188,12 @@ Priority features identified for future waves:
 - [x] NEW: Material `get_compilation_stats` — returns sampler count, texture estimates, UV scalars, blend mode, expression count. API corrected for UE 5.7 FMaterialResource (2026-03-10)
 - [x] NEW: Material `set_expression_property` — sets properties on expression nodes (e.g., DefaultValue on scalar param) (2026-03-10)
 - [x] NEW: Material `connect_expressions` — wires expression outputs to expression inputs or material property inputs. Supports expr-to-expr and expr-to-material-property (2026-03-10)
+- [x] **Niagara `get_module_inputs` returns all input types** — IMPLEMENTED (2026-03-11). Now uses engine's `FNiagaraStackGraphUtilities::GetStackFunctionInputs` with `FCompileConstantResolver`. Returns floats, vectors, colors, data interfaces, enums, bools — not just static switch pins. Output uses short names (no `Module.` prefix).
+- [x] **Niagara `batch_execute` missing write ops** — FIXED (2026-03-11). Dispatch table now covers all 23 write op types. Previously missing 8: `remove_user_parameter`, `set_parameter_default`, `set_module_input_di`, `set_curve_value`, `reorder_emitters`, `duplicate_emitter`, `set_renderer_binding`, `request_compile`.
+- [x] **Niagara `set_module_input_di` validation** — FIXED (2026-03-11). Now validates input exists and is DataInterface type before applying. Rejects nonexistent inputs and non-DI type inputs with descriptive errors. `config` param now accepts JSON object (not just string).
+- [x] **Niagara `create_system_from_spec` functional** — FIXED (2026-03-11). Was broken — now uses `UNiagaraSystemFactoryNew::InitializeSystem` for proper system creation.
+- [x] **Niagara `FindEmitterHandleIndex` auto-select removed** — FIXED (2026-03-11). Was silently auto-selecting the single emitter when a specific non-matching name was passed. Now requires the name to match if one is provided, returning a clear error instead.
+- [x] **Niagara write actions accept both short and prefixed input names** — IMPLEMENTED (2026-03-11). `set_module_input_value`, `set_module_input_binding`, `set_module_input_di`, `set_curve_value` all accept both `InputName` (short) and `Module.InputName` (prefixed) forms.
 - [x] **CRASH: `add_virtual_bone` no bone validation** — FIXED (2026-03-10). Added `FReferenceSkeleton::FindBoneIndex()` validation for both source and target bones before calling `AddNewVirtualBone()`. Previously created bogus virtual bones with non-existent bones, causing array OOB crash on skeleton access.
 - [x] **`set_notify_time` / `set_notify_duration` reject AnimMontage** — FIXED (2026-03-10). Changed `LoadAssetByPath<UAnimSequence>` to `LoadAssetByPath<UAnimSequenceBase>` so montages and composites are accepted. Also made `set_notify_duration` error message include `(total: N)` to match `set_notify_time`.
 - [x] **`remove_virtual_bones` false success for non-existent bones** — FIXED (2026-03-10). Now validates each bone name against actual virtual bones before removal. Returns `not_found` array and errors if all names are invalid.

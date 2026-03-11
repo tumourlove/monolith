@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "monolith": {
-      "type": "streamableHttp",
+      "type": "http",
       "url": "http://localhost:9316/mcp"
     }
   }

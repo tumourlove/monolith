@@ -210,6 +210,24 @@ Monolith.uplugin
 | `project` | `project_query` | 5 | Deep project search — FTS5 across all indexed assets |
 | `source` | `source_query` | 10 | Engine source lookup, call graphs, class hierarchy |
 
+### What Can the AI Actually Do?
+
+**Blueprint** — Read any Blueprint's graph structure, trace execution flow between nodes, list variables with defaults, search for specific node types, and get a lightweight summary. Useful for understanding existing logic, auditing complexity, or planning a Blueprint-to-C++ migration.
+
+**Material** — Create materials and material instances from scratch, add and connect expression nodes, set parameters (scalars, vectors, textures), build full PBR graphs programmatically, recompile, validate for errors, and inspect compiled shader stats. The AI can build a complete material from a text description.
+
+**Animation** — Inspect and modify animation sequences, montages, blend spaces, Animation Blueprints, state machines, skeletons, and PoseSearch databases. Read bone hierarchies, add/remove notifies, edit montage sections, create blend space samples, and trace ABP state transitions. Covers the full animation pipeline.
+
+**Niagara** — Create particle systems from specs, add/remove emitters and modules, set module input values and bindings, configure data interfaces and renderers, edit parameters, read compiled GPU HLSL, and batch-execute multiple operations atomically. The AI can build a complete VFX system from a text description.
+
+**Editor** — Trigger builds (full UBT or Live Coding), read build errors and compiler output, search editor logs, get crash context after failures, and query editor state. The AI can compile your code and diagnose build failures without you touching the editor.
+
+**Config** — Read, search, and diff INI configuration files with full resolution chain awareness (Base → Platform → Project → User). Explain what a setting does and where it's overridden. Useful for performance tuning and debugging config issues.
+
+**Project** — Full-text search across every indexed asset in your project. Find assets by name, type, path, or content. Trace references between assets. The search index updates automatically when assets change.
+
+**Source** — Look up any Unreal Engine C++ API: read function implementations, search across the entire engine source, get class hierarchies, trace call graphs (callers and callees), and verify include paths. The AI never has to guess a function signature — it can check the actual source.
+
 ---
 
 ## Auto-Updater

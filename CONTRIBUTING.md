@@ -24,14 +24,13 @@ git clone https://github.com/tumourlove/monolith.git C:\Projects\Monolith
 
 Generate project files and build from your UE project as usual. Monolith is an editor-only plugin — all 9 modules have `Type: "Editor"`.
 
-### Dual-Location Workflow
+### Development Workflow
 
-Development happens in two locations that must stay in sync:
+Clone the repo into your UE project's `Plugins/` folder and develop in-place:
 
-1. **Source of truth:** `C:\Projects\Monolith\` — standalone repo
-2. **Build-testable copy:** `D:\Unreal Projects\Leviathan\Plugins\Monolith\` — where the editor loads it
-
-After making changes at the source of truth, copy to the Leviathan location to compile and test in-editor.
+```
+YourProject/Plugins/Monolith/   — edit, build, commit, push from here
+```
 
 ---
 
@@ -277,9 +276,7 @@ Then use Claude Code or any MCP-compatible client to interact with the tools.
 
 1. **Branch from `master`** — Use descriptive branch names: `feature/niagara-scalability`, `fix/material-connection-crash`
 
-2. **Keep both locations in sync** — Changes must work at both `C:\Projects\Monolith\` and `D:\Unreal Projects\Leviathan\Plugins\Monolith\`
-
-3. **Test in-editor** — Build and run in the Leviathan project. Verify with curl or an MCP client that your changes work
+2. **Test in-editor** — Build and run in your UE project. Verify with curl or an MCP client that your changes work
 
 4. **Update docs** — If you add actions, update:
    - The relevant skill in `Skills/`

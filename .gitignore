@@ -6,3 +6,5 @@ DerivedDataCache/
 *.patch_*
 __pycache__/
 *.pyc
+Docs/plans/
+Docs/TESTING.md

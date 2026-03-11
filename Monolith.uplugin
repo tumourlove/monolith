@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "0.7.0",
+	"VersionName": "0.7.1",
 	"FriendlyName": "Monolith",
 	"Description": "Unified Unreal Engine MCP server consolidating 9 domains into one plugin — Blueprints, Materials, Animation, Niagara, Editor, Config, Project Index, and Engine Source intelligence.",
 	"Category": "Editor",

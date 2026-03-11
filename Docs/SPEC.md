@@ -326,11 +326,15 @@ These exist because Epic's `FNiagaraStackGraphUtilities` functions lack `NIAGARA
 3. `GetModuleIsEnabled` — Module enabled state
 4. `RemoveModuleFromStack` — Module removal
 5. `GetParametersForContext` — System user store params
-6. `GetStackFunctionInputs` — Input pin enumeration (best-effort type reconstruction)
+6. `GetStackFunctionInputs` — Full input enumeration via engine's `FNiagaraStackGraphUtilities::GetStackFunctionInputs` with `FCompileConstantResolver`. Returns all input types (floats, vectors, colors, data interfaces, enums, bools) — not just static switch pins
 
 #### Actions (41 — namespace: "niagara")
 
 > **Note:** All Niagara actions accept `asset_path` (preferred) or `system_path` (backward compatible) for the system asset path parameter.
+>
+> **Input name conventions:** `get_module_inputs` returns short names (no `Module.` prefix). All write actions that accept input names (`set_module_input_value`, `set_module_input_binding`, `set_module_input_di`, `set_curve_value`) accept both short names and `Module.`-prefixed names.
+>
+> **Emitter name matching:** `FindEmitterHandleIndex` does NOT auto-select a single emitter when a specific non-matching name is passed. If a name is provided it must match exactly (case-insensitive).
 
 **System (10)**
 | Action | Description |
@@ -350,7 +354,7 @@ These exist because Epic's `FNiagaraStackGraphUtilities` functions lack `NIAGARA
 | Action | Description |
 |--------|-------------|
 | `get_ordered_modules` | Get ordered modules in a script stage |
-| `get_module_inputs` | Get inputs with override values and linked params |
+| `get_module_inputs` | Get all inputs (floats, vectors, colors, data interfaces, enums, bools) with override values and linked params. Uses engine's `FNiagaraStackGraphUtilities::GetStackFunctionInputs`. Returns short names (no `Module.` prefix) |
 | `get_module_graph` | Node graph of a module script |
 | `add_module` | Add module to script stage (uses FNiagaraStackGraphUtilities) |
 | `remove_module` | Remove module from stack |
@@ -358,7 +362,7 @@ These exist because Epic's `FNiagaraStackGraphUtilities` functions lack `NIAGARA
 | `set_module_enabled` | Enable/disable a module |
 | `set_module_input_value` | Set input value (float, int, bool, vec2/3/4, color, string) |
 | `set_module_input_binding` | Bind input to a parameter |
-| `set_module_input_di` | Set data interface on input (with optional config JSON) |
+| `set_module_input_di` | Set data interface on input. Validates input exists and is DataInterface type. `config` param accepts a JSON object. Accepts both short names and `Module.`-prefixed names |
 | `create_module_from_hlsl` | **STUB — returns error** (NiagaraEditor APIs not exported) |
 | `create_function_from_hlsl` | **STUB — returns error** |
 
@@ -388,8 +392,8 @@ These exist because Epic's `FNiagaraStackGraphUtilities` functions lack `NIAGARA
 **Batch (2)**
 | Action | Description |
 |--------|-------------|
-| `batch_execute` | Execute multiple operations in one undo transaction (15 sub-op types) |
-| `create_system_from_spec` | Full declarative system builder from JSON spec |
+| `batch_execute` | Execute multiple operations in one undo transaction (23 sub-op types — all write ops including: remove_user_parameter, set_parameter_default, set_module_input_di, set_curve_value, reorder_emitters, duplicate_emitter, set_renderer_binding, request_compile) |
+| `create_system_from_spec` | Full declarative system builder from JSON spec. Uses `UNiagaraSystemFactoryNew::InitializeSystem` for proper system creation |
 
 **Data Interface (1)**
 | Action | Description |
@@ -641,7 +645,7 @@ All skills follow a common structure: YAML frontmatter, Discovery section, Asset
 ## 8. File Structure
 
 ```
-D:\Unreal Projects\Leviathan\Plugins\Monolith\
+YourProject/Plugins/Monolith/
   Monolith.uplugin
   README.md
   LICENSE                          (MIT)
@@ -695,7 +699,7 @@ D:\Unreal Projects\Leviathan\Plugins\Monolith\
 
 ### Development & Release Workflow
 
-Everything lives in one place: `D:\Unreal Projects\Leviathan\Plugins\Monolith\`
+Everything lives in one place: `YourProject/Plugins/Monolith/`
 
 This folder is both the working copy and the git repo (`git@github.com:tumourlove/monolith.git`). Edit, build, commit, push, and release all happen here — no file copying.
 

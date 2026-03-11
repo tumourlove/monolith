@@ -47,7 +47,7 @@ Try calling Monolith MCP: `editor_query({action: 'get_build_status'})` or `monol
 **When editor is confirmed closed, run:**
 
 ```bash
-'C:\Program Files (x86)\UE_5.7\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.exe' LeviathanEditor Win64 Development '-Project=D:\Unreal Projects\Leviathan\Leviathan.uproject' -waitmutex
+'C:\Program Files (x86)\UE_5.7\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.exe' YourProjectEditor Win64 Development '-Project=D:\Path\To\YourProject.uproject' -waitmutex
 ```
 
 > **IMPORTANT:** Use single quotes around the UBT path — bash can't handle `(x86)` in parentheses unquoted. Do NOT use `Build.bat`.

@@ -19,15 +19,20 @@ Write-Host "Building Monolith v$Version release zip..." -ForegroundColor Cyan
 if (Test-Path $TempDir) { Remove-Item $TempDir -Recurse -Force }
 New-Item -ItemType Directory -Path $TempDir | Out-Null
 
-# Copy plugin files, excluding build artifacts and git
-$exclude = @('Intermediate', 'Saved', 'DerivedDataCache', '.git', '__pycache__')
-$items = Get-ChildItem -Path $PluginDir -Force | Where-Object { $exclude -notcontains $_.Name }
-foreach ($item in $items) {
-    if ($item.PSIsContainer) {
-        Copy-Item $item.FullName -Destination (Join-Path $TempDir $item.Name) -Recurse -Force
-    } else {
-        Copy-Item $item.FullName -Destination (Join-Path $TempDir $item.Name) -Force
-    }
+# Use git archive to export only tracked files (respects .gitignore)
+# This ensures internal docs (plans/, TESTING.md) and build artifacts don't leak into releases
+Write-Host "  Exporting tracked files via git archive..." -ForegroundColor Yellow
+Push-Location $PluginDir
+git archive HEAD --format=tar | tar -xf - -C $TempDir
+Pop-Location
+
+# Copy Binaries (gitignored but needed for Blueprint-only users)
+$binDir = Join-Path $PluginDir "Binaries"
+if (Test-Path $binDir) {
+    Copy-Item $binDir -Destination (Join-Path $TempDir "Binaries") -Recurse -Force
+    Write-Host "  Included Binaries/ for Blueprint-only compatibility" -ForegroundColor Green
+} else {
+    Write-Host "  WARNING: No Binaries/ found — C++ projects must rebuild" -ForegroundColor Yellow
 }
 
 # Patch .uplugin: set "Installed": true for Blueprint-only users

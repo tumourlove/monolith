@@ -4,6 +4,26 @@ All notable changes to Monolith will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.1] - 2026-03-11
+
+Niagara write testing: all 41 actions verified. 12 bugs found and fixed, plus a major improvement to `get_module_inputs`.
+
+### Fixed
+
+- **CRASH: Niagara** — `GetAssetPath` infinite recursion: fallback called itself instead of reading `system_path`. Crashed `create_system_from_spec` and any action using `system_path` param
+- **CRASH: Niagara** — `HandleCreateSystem` used raw `NewObject<UNiagaraSystem>` without initialization. `AddEmitterHandle` crashed with array-out-of-bounds on the uninitialized system. Fixed: calls `UNiagaraSystemFactoryNew::InitializeSystem()` after creation
+- **CRASH: Niagara** — `HandleAddEmitter` crashed when emitter asset had no versions. Added version count guard before `AddEmitterHandle`
+- **CRASH: Niagara** — `set_module_input_di` crashed with assertion `OverridePin.LinkedTo.Num() == 0` when pin already had links. Added `BreakAllPinLinks()` guard before `SetDataInterfaceValueForFunctionInput`
+- **Niagara** — `set_module_input_di` accepted nonexistent input names silently. Now validates input exists using full engine input enumeration
+- **Niagara** — `set_module_input_di` accepted non-DataInterface types (e.g. setting a curve DI on a Vector3f input). Now validates `IsDataInterface()` on the input type
+- **Niagara** — `set_module_input_di` `config` param was parsed as string, not JSON object. Now accepts both JSON object (correct) and string (legacy)
+- **Niagara** — `get_module_inputs` only returned static switch pins from the FunctionCall node. Now uses `FNiagaraStackGraphUtilities::GetStackFunctionInputs` with `FCompileConstantResolver` to return ALL inputs (floats, vectors, colors, DIs, enums, bools, positions, quaternions)
+- **Niagara** — `GetStackFunctionInputOverridePin` helper only searched FunctionCall node pins. Now also walks upstream to ParameterMapSet override node (mirrors engine logic), so `has_override` correctly detects data input overrides
+- **Niagara** — `get_module_inputs` returned `Module.`-prefixed names (e.g. `Module.Gravity`). Now strips prefix for consistency with write actions. Write actions accept both short and prefixed names
+- **Niagara** — `batch_execute` dispatch table was missing 8 write ops: `remove_user_parameter`, `set_parameter_default`, `set_module_input_di`, `set_curve_value`, `reorder_emitters`, `duplicate_emitter`, `set_renderer_binding`, `request_compile`
+- **Niagara** — `FindEmitterHandleIndex` auto-selected the only emitter even when a specific non-matching name was passed. Now only auto-selects when caller passes an empty string
+- **Niagara** — `set_module_input_value` and `set_curve_value` didn't break existing pin links before setting literal values. Added `BreakAllPinLinks()` guard so literal values take effect when overriding a previous binding
+
 ## [0.7.0] - 2026-03-10
 
 Animation Wave 2: 44 new actions across animation and PoseSearch, bringing the module from 23 to 67 actions and the plugin total to 177.
