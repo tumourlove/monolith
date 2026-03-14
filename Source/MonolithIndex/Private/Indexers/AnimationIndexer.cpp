@@ -1,4 +1,5 @@
 #include "Indexers/AnimationIndexer.h"
+#include "MonolithSettings.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimMontage.h"
 #include "Animation/BlendSpace.h"
@@ -82,7 +83,10 @@ bool FAnimationIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedA
 	{
 		TArray<FAssetData> Assets;
 		FARFilter Filter;
-		Filter.PackagePaths.Add(FName(TEXT("/Game")));
+		for (const FName& ContentPath : UMonolithSettings::GetIndexedContentPaths())
+		{
+			Filter.PackagePaths.Add(ContentPath);
+		}
 		Filter.bRecursivePaths = true;
 		Filter.ClassPaths.Add(Class->GetClassPathName());
 		Registry.GetAssets(Filter, Assets);

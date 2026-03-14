@@ -1,4 +1,5 @@
 #include "Indexers/DependencyIndexer.h"
+#include "MonolithSettings.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
 
@@ -9,7 +10,10 @@ bool FDependencyIndexer::IndexAsset(const FAssetData& AssetData, UObject* Loaded
 
 	TArray<FAssetData> AllAssets;
 	FARFilter Filter;
-	Filter.PackagePaths.Add(FName(TEXT("/Game")));
+	for (const FName& ContentPath : UMonolithSettings::GetIndexedContentPaths())
+	{
+		Filter.PackagePaths.Add(ContentPath);
+	}
 	Filter.bRecursivePaths = true;
 	Registry.GetAssets(Filter, AllAssets);
 
@@ -29,7 +33,7 @@ bool FDependencyIndexer::IndexAsset(const FAssetData& AssetData, UObject* Loaded
 		for (const FAssetIdentifier& Dep : HardDeps)
 		{
 			FString DepPath = Dep.PackageName.ToString();
-			if (!DepPath.StartsWith(TEXT("/Game/"))) continue;
+			if (!UMonolithSettings::IsIndexedContentPath(DepPath)) continue;
 
 			int64 TargetId = DB.GetAssetId(DepPath);
 			if (TargetId < 0) continue;
@@ -51,7 +55,7 @@ bool FDependencyIndexer::IndexAsset(const FAssetData& AssetData, UObject* Loaded
 		for (const FAssetIdentifier& Dep : SoftDeps)
 		{
 			FString DepPath = Dep.PackageName.ToString();
-			if (!DepPath.StartsWith(TEXT("/Game/"))) continue;
+			if (!UMonolithSettings::IsIndexedContentPath(DepPath)) continue;
 
 			int64 TargetId = DB.GetAssetId(DepPath);
 			if (TargetId < 0) continue;

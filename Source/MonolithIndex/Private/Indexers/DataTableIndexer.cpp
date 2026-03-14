@@ -1,4 +1,5 @@
 #include "Indexers/DataTableIndexer.h"
+#include "MonolithSettings.h"
 #include "Engine/DataTable.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
@@ -13,7 +14,10 @@ bool FDataTableIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedA
 
 	TArray<FAssetData> DataTableAssets;
 	FARFilter Filter;
-	Filter.PackagePaths.Add(FName(TEXT("/Game")));
+	for (const FName& ContentPath : UMonolithSettings::GetIndexedContentPaths())
+	{
+		Filter.PackagePaths.Add(ContentPath);
+	}
 	Filter.bRecursivePaths = true;
 	Filter.ClassPaths.Add(UDataTable::StaticClass()->GetClassPathName());
 	Registry.GetAssets(Filter, DataTableAssets);

@@ -1,4 +1,5 @@
 #include "Indexers/GameplayTagIndexer.h"
+#include "MonolithSettings.h"
 #include "GameplayTagsManager.h"
 #include "GameplayTagContainer.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -76,7 +77,10 @@ void FGameplayTagIndexer::ScanAssetTagReferences(FMonolithIndexDatabase& DB)
 
 	TArray<FAssetData> AllAssets;
 	FARFilter Filter;
-	Filter.PackagePaths.Add(FName(TEXT("/Game")));
+	for (const FName& ContentPath : UMonolithSettings::GetIndexedContentPaths())
+	{
+		Filter.PackagePaths.Add(ContentPath);
+	}
 	Filter.bRecursivePaths = true;
 	Registry.GetAssets(Filter, AllAssets);
 

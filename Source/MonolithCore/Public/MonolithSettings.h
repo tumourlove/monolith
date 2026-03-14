@@ -35,6 +35,10 @@ public:
 
 	// --- Indexing ---
 
+	/** Content paths to index in addition to /Game. Add plugin mount points like /MyPlugin. */
+	UPROPERTY(config, EditAnywhere, Category="Indexing")
+	TArray<FString> AdditionalContentPaths;
+
 	/** Override path for ProjectIndex.db (empty = default Saved/ location) */
 	UPROPERTY(config, EditAnywhere, Category="Indexing", meta=(RelativePath))
 	FDirectoryPath DatabasePathOverride;
@@ -140,6 +144,12 @@ public:
 	// --- Helpers ---
 
 	static const UMonolithSettings* Get();
+
+	/** Returns /Game plus all AdditionalContentPaths as FName array for FARFilter usage */
+	static TArray<FName> GetIndexedContentPaths();
+
+	/** Returns true if the given package path starts with any indexed content path */
+	static bool IsIndexedContentPath(const FString& PackagePath);
 
 	/** Settings category path */
 	virtual FName GetCategoryName() const override { return FName(TEXT("Plugins")); }

@@ -1,4 +1,5 @@
 #include "Indexers/LevelIndexer.h"
+#include "MonolithSettings.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
 #include "Engine/World.h"
@@ -14,10 +15,13 @@ bool FLevelIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedAsset
 {
 	IAssetRegistry& Registry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
 
-	// Find all World assets under /Game
+	// Find all World assets across indexed content paths
 	TArray<FAssetData> WorldAssets;
 	FARFilter Filter;
-	Filter.PackagePaths.Add(FName(TEXT("/Game")));
+	for (const FName& ContentPath : UMonolithSettings::GetIndexedContentPaths())
+	{
+		Filter.PackagePaths.Add(ContentPath);
+	}
 	Filter.bRecursivePaths = true;
 	Filter.ClassPaths.Add(UWorld::StaticClass()->GetClassPathName());
 	Registry.GetAssets(Filter, WorldAssets);

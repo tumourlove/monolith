@@ -1,4 +1,5 @@
 #include "Indexers/NiagaraIndexer.h"
+#include "MonolithSettings.h"
 #include "NiagaraSystem.h"
 #include "NiagaraEmitter.h"
 #include "NiagaraRendererProperties.h"
@@ -13,7 +14,10 @@ bool FNiagaraIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedAss
 
 	TArray<FAssetData> NiagaraAssets;
 	FARFilter Filter;
-	Filter.PackagePaths.Add(FName(TEXT("/Game")));
+	for (const FName& ContentPath : UMonolithSettings::GetIndexedContentPaths())
+	{
+		Filter.PackagePaths.Add(ContentPath);
+	}
 	Filter.bRecursivePaths = true;
 	Filter.ClassPaths.Add(UNiagaraSystem::StaticClass()->GetClassPathName());
 	Registry.GetAssets(Filter, NiagaraAssets);
