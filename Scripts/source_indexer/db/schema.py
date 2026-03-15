@@ -130,7 +130,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.commit()
     except sqlite3.OperationalError as e:
         if "readonly" in str(e).lower():
-            # DB exists but is locked by another process — schema is already there
-            pass
+            import logging
+            logging.warning(f"Database is read-only, schema already exists: {e}")
         else:
             raise

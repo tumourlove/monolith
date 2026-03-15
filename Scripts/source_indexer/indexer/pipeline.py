@@ -181,7 +181,7 @@ class IndexingPipeline:
                 on_progress(mod_name, i + 1, total_modules, total_files, total_symbols)
 
         if on_progress:
-            on_progress("Finalizing...", total_modules, total_modules, total_files, total_symbols)
+            on_progress("Finalizing (inheritance + references)...", total_modules, total_modules, total_files, total_symbols)
         self._finalize()
 
         return {
