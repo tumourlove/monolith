@@ -123,7 +123,7 @@ All asset paths follow UE content browser format (no .uasset extension):
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
 | `add_event_handler` | `asset_path`, `emitter`, `event_name`, `source_emitter`? | Add inter-emitter event handler (death, collision, location) |
-| `add_simulation_stage` | — | Stub — returns informative error (private API, no exported setter) |
+| `add_simulation_stage` | `asset_path`, `emitter`, `name`, `iteration_source`?, `num_iterations`? | Add GPU simulation stage (particles or data_interface iteration) |
 
 ### Renderers (6)
 | Action | Key Params | Purpose |

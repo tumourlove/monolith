@@ -43,6 +43,7 @@
 // NiagaraEffectType.h — needed for UNiagaraEffectType (SetEffectType, GetEffectType)
 // Forward-declared in NiagaraSystem.h; full definition needed for LoadObject<>
 #include "NiagaraEffectType.h"
+#include "NiagaraSimulationStageBase.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
@@ -6710,9 +6711,54 @@ FMonolithActionResult FMonolithNiagaraActions::HandleValidateSystem(const TShare
 
 FMonolithActionResult FMonolithNiagaraActions::HandleAddSimulationStage(const TSharedPtr<FJsonObject>& Params)
 {
-	// Stub — SimulationStages array on FVersionedNiagaraEmitterData has no exported setter.
-	return FMonolithActionResult::Error(
-		TEXT("Simulation stages cannot be added programmatically — the SimulationStages array on "
-			 "FVersionedNiagaraEmitterData has no exported setter. Add simulation stages manually in the "
-			 "Niagara editor: right-click the emitter > Add Stage. This limitation may be resolved in a future UE version."));
+	FString SystemPath = GetAssetPath(Params);
+	UNiagaraSystem* System = LoadSystem(SystemPath);
+	if (!System) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to load system '%s'"), *SystemPath));
+
+	FString EmitterName = Params->GetStringField(TEXT("emitter"));
+	int32 HandleIdx = FindEmitterHandleIndex(System, EmitterName);
+	if (HandleIdx == INDEX_NONE) return FMonolithActionResult::Error(FString::Printf(TEXT("Emitter '%s' not found"), *EmitterName));
+
+	FNiagaraEmitterHandle& Handle = System->GetEmitterHandles()[HandleIdx];
+	FVersionedNiagaraEmitter VersionedEmitter = Handle.GetInstance();
+	UNiagaraEmitter* Emitter = VersionedEmitter.Emitter;
+	FVersionedNiagaraEmitterData* ED = Emitter->GetLatestEmitterData();
+	if (!ED) return FMonolithActionResult::Error(TEXT("Failed to get emitter data"));
+
+	// Get source — the emitter's GraphSource is the shared script source for all stages
+	UNiagaraScriptSource* Source = Cast<UNiagaraScriptSource>(ED->GraphSource);
+
+	GEditor->BeginTransaction(FText::FromString(TEXT("Add Simulation Stage")));
+	Emitter->Modify();
+
+	// Create the simulation stage UObject (UNiagaraSimulationStageGeneric is the standard type)
+	UNiagaraSimulationStageGeneric* NewStage = NewObject<UNiagaraSimulationStageGeneric>(Emitter, NAME_None, RF_Transactional);
+	NewStage->Script = NewObject<UNiagaraScript>(NewStage, MakeUniqueObjectName(NewStage, UNiagaraScript::StaticClass(), TEXT("SimulationStage")), EObjectFlags::RF_Transactional);
+	NewStage->Script->SetUsage(ENiagaraScriptUsage::ParticleSimulationStageScript);
+	NewStage->Script->SetUsageId(NewStage->GetMergeId());
+	if (Source)
+	{
+		NewStage->Script->SetLatestSource(Source);
+	}
+
+	// Set optional properties
+	FString IterSourceStr = Params->HasField(TEXT("iteration_source")) ? Params->GetStringField(TEXT("iteration_source")) : TEXT("particles");
+	if (IterSourceStr.Equals(TEXT("data_interface"), ESearchCase::IgnoreCase))
+	{
+		NewStage->IterationSource = ENiagaraIterationSource::DataInterface;
+	}
+
+	// Add to emitter via exported API
+	Emitter->AddSimulationStage(NewStage, VersionedEmitter.Version);
+
+	GEditor->EndTransaction();
+	System->RequestCompile(false);
+	Emitter->MarkPackageDirty();
+
+	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
+	R->SetBoolField(TEXT("success"), true);
+	R->SetStringField(TEXT("stage_name"), NewStage->SimulationStageName.ToString());
+	R->SetStringField(TEXT("stage_id"), NewStage->GetMergeId().ToString());
+	R->SetStringField(TEXT("iteration_source"), IterSourceStr);
+	return FMonolithActionResult::Success(R);
 }
