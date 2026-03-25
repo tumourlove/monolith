@@ -21,6 +21,8 @@
 #include "Materials/MaterialExpressionFunctionOutput.h"
 #include "Materials/MaterialExpressionStaticBoolParameter.h"
 #include "Materials/MaterialExpressionStaticSwitchParameter.h"
+#include "Materials/MaterialExpressionScalarParameter.h"
+#include "Materials/MaterialExpressionVectorParameter.h"
 #include "MaterialExpressionIO.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "EditorAssetLibrary.h"
@@ -8020,8 +8022,45 @@ FMonolithActionResult FMonolithMaterialActions::CreateFunctionInstance(const TSh
 	// Set parent — this sets Parent, caches Base, syncs usage
 	MFI->SetParent(ParentFunc);
 
-	// Populate parameter arrays from parent — MUST be called before applying overrides
-	MFI->UpdateParameterSet();
+	// Build parameter lookup from base function expressions.
+	// UpdateParameterSet() only syncs names on EXISTING entries — it does NOT populate
+	// empty arrays. We must manually create entries with the correct ExpressionGUIDs.
+	UMaterialFunction* BaseFunc = MFI->GetBaseFunction();
+	TMap<FName, FGuid> ScalarParamGUIDs;
+	TMap<FName, FGuid> VectorParamGUIDs;
+	TMap<FName, FGuid> TextureParamGUIDs;
+	TMap<FName, FGuid> SwitchParamGUIDs;
+
+	if (BaseFunc)
+	{
+		for (UMaterialExpression* Expr : BaseFunc->GetExpressions())
+		{
+			if (auto* SP = Cast<UMaterialExpressionScalarParameter>(Expr))
+			{
+				ScalarParamGUIDs.Add(SP->ParameterName, SP->ExpressionGUID);
+			}
+			else if (auto* VP = Cast<UMaterialExpressionVectorParameter>(Expr))
+			{
+				VectorParamGUIDs.Add(VP->ParameterName, VP->ExpressionGUID);
+			}
+			else if (auto* TP = Cast<UMaterialExpressionTextureSampleParameter>(Expr))
+			{
+				TextureParamGUIDs.Add(TP->ParameterName, TP->ExpressionGUID);
+			}
+			else if (auto* SWP = Cast<UMaterialExpressionStaticSwitchParameter>(Expr))
+			{
+				SwitchParamGUIDs.Add(SWP->ParameterName, SWP->ExpressionGUID);
+			}
+			else if (auto* SBP = Cast<UMaterialExpressionStaticBoolParameter>(Expr))
+			{
+				// StaticBoolParameter without switch — still a switch override in MFI
+				if (!Cast<UMaterialExpressionStaticSwitchParameter>(Expr))
+				{
+					SwitchParamGUIDs.Add(SBP->ParameterName, SBP->ExpressionGUID);
+				}
+			}
+		}
+	}
 
 	// Track override counts and errors
 	int32 ScalarCount = 0;
@@ -8030,28 +8069,25 @@ FMonolithActionResult FMonolithMaterialActions::CreateFunctionInstance(const TSh
 	int32 SwitchCount = 0;
 	TArray<TSharedPtr<FJsonValue>> Errors;
 
-	// Apply scalar overrides — find existing entries populated by UpdateParameterSet
+	// Apply scalar overrides — create entries with GUIDs from base function
 	const TSharedPtr<FJsonObject>* ScalarOverrides = nullptr;
 	if (Params->TryGetObjectField(TEXT("scalar_overrides"), ScalarOverrides))
 	{
 		for (const auto& Pair : (*ScalarOverrides)->Values)
 		{
 			FName ParamName(*Pair.Key);
-			bool bFound = false;
-			for (FScalarParameterValue& Entry : MFI->ScalarParameterValues)
-			{
-				if (Entry.ParameterInfo.Name == ParamName)
-				{
-					Entry.ParameterValue = static_cast<float>(Pair.Value->AsNumber());
-					bFound = true;
-					ScalarCount++;
-					break;
-				}
-			}
-			if (!bFound)
+			FGuid* FoundGUID = ScalarParamGUIDs.Find(ParamName);
+			if (!FoundGUID)
 			{
 				Errors.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("Scalar param '%s' not found in parent"), *Pair.Key)));
+				continue;
 			}
+			FScalarParameterValue NewEntry;
+			NewEntry.ParameterInfo = FMaterialParameterInfo(ParamName);
+			NewEntry.ExpressionGUID = *FoundGUID;
+			NewEntry.ParameterValue = static_cast<float>(Pair.Value->AsNumber());
+			MFI->ScalarParameterValues.Add(NewEntry);
+			ScalarCount++;
 		}
 	}
 
@@ -8068,27 +8104,23 @@ FMonolithActionResult FMonolithMaterialActions::CreateFunctionInstance(const TSh
 				Errors.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("Vector param '%s' value must be an object with r,g,b,a"), *Pair.Key)));
 				continue;
 			}
-
-			bool bFound = false;
-			for (FVectorParameterValue& Entry : MFI->VectorParameterValues)
-			{
-				if (Entry.ParameterInfo.Name == ParamName)
-				{
-					FLinearColor Color;
-					Color.R = (*ColorObj)->HasField(TEXT("r")) ? static_cast<float>((*ColorObj)->GetNumberField(TEXT("r"))) : 0.f;
-					Color.G = (*ColorObj)->HasField(TEXT("g")) ? static_cast<float>((*ColorObj)->GetNumberField(TEXT("g"))) : 0.f;
-					Color.B = (*ColorObj)->HasField(TEXT("b")) ? static_cast<float>((*ColorObj)->GetNumberField(TEXT("b"))) : 0.f;
-					Color.A = (*ColorObj)->HasField(TEXT("a")) ? static_cast<float>((*ColorObj)->GetNumberField(TEXT("a"))) : 1.f;
-					Entry.ParameterValue = Color;
-					bFound = true;
-					VectorCount++;
-					break;
-				}
-			}
-			if (!bFound)
+			FGuid* FoundGUID = VectorParamGUIDs.Find(ParamName);
+			if (!FoundGUID)
 			{
 				Errors.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("Vector param '%s' not found in parent"), *Pair.Key)));
+				continue;
 			}
+			FLinearColor Color;
+			Color.R = (*ColorObj)->HasField(TEXT("r")) ? static_cast<float>((*ColorObj)->GetNumberField(TEXT("r"))) : 0.f;
+			Color.G = (*ColorObj)->HasField(TEXT("g")) ? static_cast<float>((*ColorObj)->GetNumberField(TEXT("g"))) : 0.f;
+			Color.B = (*ColorObj)->HasField(TEXT("b")) ? static_cast<float>((*ColorObj)->GetNumberField(TEXT("b"))) : 0.f;
+			Color.A = (*ColorObj)->HasField(TEXT("a")) ? static_cast<float>((*ColorObj)->GetNumberField(TEXT("a"))) : 1.f;
+			FVectorParameterValue NewEntry;
+			NewEntry.ParameterInfo = FMaterialParameterInfo(ParamName);
+			NewEntry.ExpressionGUID = *FoundGUID;
+			NewEntry.ParameterValue = Color;
+			MFI->VectorParameterValues.Add(NewEntry);
+			VectorCount++;
 		}
 	}
 
@@ -8106,22 +8138,18 @@ FMonolithActionResult FMonolithMaterialActions::CreateFunctionInstance(const TSh
 				Errors.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("Failed to load texture '%s' for param '%s'"), *TexPath, *Pair.Key)));
 				continue;
 			}
-
-			bool bFound = false;
-			for (FTextureParameterValue& Entry : MFI->TextureParameterValues)
-			{
-				if (Entry.ParameterInfo.Name == ParamName)
-				{
-					Entry.ParameterValue = Tex;
-					bFound = true;
-					TextureCount++;
-					break;
-				}
-			}
-			if (!bFound)
+			FGuid* FoundGUID = TextureParamGUIDs.Find(ParamName);
+			if (!FoundGUID)
 			{
 				Errors.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("Texture param '%s' not found in parent"), *Pair.Key)));
+				continue;
 			}
+			FTextureParameterValue NewEntry;
+			NewEntry.ParameterInfo = FMaterialParameterInfo(ParamName);
+			NewEntry.ExpressionGUID = *FoundGUID;
+			NewEntry.ParameterValue = Tex;
+			MFI->TextureParameterValues.Add(NewEntry);
+			TextureCount++;
 		}
 	}
 
@@ -8133,25 +8161,24 @@ FMonolithActionResult FMonolithMaterialActions::CreateFunctionInstance(const TSh
 		{
 			FName ParamName(*Pair.Key);
 			bool bValue = Pair.Value->AsBool();
-
-			bool bFound = false;
-			for (FStaticSwitchParameter& Entry : MFI->StaticSwitchParameterValues)
-			{
-				if (Entry.ParameterInfo.Name == ParamName)
-				{
-					Entry.Value = bValue;
-					Entry.bOverride = true;
-					bFound = true;
-					SwitchCount++;
-					break;
-				}
-			}
-			if (!bFound)
+			FGuid* FoundGUID = SwitchParamGUIDs.Find(ParamName);
+			if (!FoundGUID)
 			{
 				Errors.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("Static switch param '%s' not found in parent"), *Pair.Key)));
+				continue;
 			}
+			FStaticSwitchParameter NewEntry;
+			NewEntry.ParameterInfo = FMaterialParameterInfo(ParamName);
+			NewEntry.ExpressionGUID = *FoundGUID;
+			NewEntry.Value = bValue;
+			NewEntry.bOverride = true;
+			MFI->StaticSwitchParameterValues.Add(NewEntry);
+			SwitchCount++;
 		}
 	}
+
+	// Sync names after manual population
+	MFI->UpdateParameterSet();
 
 	// Register with asset registry and mark dirty
 	FAssetRegistryModule::AssetCreated(MFI);
@@ -8194,8 +8221,26 @@ FMonolithActionResult FMonolithMaterialActions::SetFunctionInstanceParameter(con
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to load material function instance at '%s'"), *AssetPath));
 	}
 
-	// Ensure parameter arrays are populated from parent
-	MFI->UpdateParameterSet();
+	// Build parameter GUID lookup from base function expressions
+	// UpdateParameterSet() only syncs names on existing entries — doesn't populate empty arrays
+	UMaterialFunction* BaseFunc = MFI->GetBaseFunction();
+	TMap<FName, FGuid> ScalarGUIDs, VectorGUIDs, TextureGUIDs, SwitchGUIDs;
+	if (BaseFunc)
+	{
+		for (UMaterialExpression* Expr : BaseFunc->GetExpressions())
+		{
+			if (auto* SP = Cast<UMaterialExpressionScalarParameter>(Expr))
+				ScalarGUIDs.Add(SP->ParameterName, SP->ExpressionGUID);
+			else if (auto* VP = Cast<UMaterialExpressionVectorParameter>(Expr))
+				VectorGUIDs.Add(VP->ParameterName, VP->ExpressionGUID);
+			else if (auto* TP = Cast<UMaterialExpressionTextureSampleParameter>(Expr))
+				TextureGUIDs.Add(TP->ParameterName, TP->ExpressionGUID);
+			else if (auto* SWP = Cast<UMaterialExpressionStaticSwitchParameter>(Expr))
+				SwitchGUIDs.Add(SWP->ParameterName, SWP->ExpressionGUID);
+			else if (auto* SBP = Cast<UMaterialExpressionStaticBoolParameter>(Expr))
+				SwitchGUIDs.Add(SBP->ParameterName, SBP->ExpressionGUID);
+		}
+	}
 
 	// Determine which param type to set (mutually exclusive)
 	int32 TypeCount = 0;
@@ -8216,14 +8261,16 @@ FMonolithActionResult FMonolithMaterialActions::SetFunctionInstanceParameter(con
 	MFI->Modify();
 	FString SetType;
 	FString SetValue;
+	FName ParamFName(*ParamName);
 
 	if (Params->HasField(TEXT("scalar_value")))
 	{
 		float Val = static_cast<float>(Params->GetNumberField(TEXT("scalar_value")));
+		// Try to find existing entry first, then create if not found
 		bool bFound = false;
 		for (FScalarParameterValue& Entry : MFI->ScalarParameterValues)
 		{
-			if (Entry.ParameterInfo.Name == *ParamName)
+			if (Entry.ParameterInfo.Name == ParamFName)
 			{
 				Entry.ParameterValue = Val;
 				bFound = true;
@@ -8232,7 +8279,16 @@ FMonolithActionResult FMonolithMaterialActions::SetFunctionInstanceParameter(con
 		}
 		if (!bFound)
 		{
-			return FMonolithActionResult::Error(FString::Printf(TEXT("Scalar parameter '%s' not found in MFI. Available scalars: %d"), *ParamName, MFI->ScalarParameterValues.Num()));
+			FGuid* FoundGUID = ScalarGUIDs.Find(ParamFName);
+			if (!FoundGUID)
+			{
+				return FMonolithActionResult::Error(FString::Printf(TEXT("Scalar parameter '%s' not found in base function"), *ParamName));
+			}
+			FScalarParameterValue NewEntry;
+			NewEntry.ParameterInfo = FMaterialParameterInfo(ParamFName);
+			NewEntry.ExpressionGUID = *FoundGUID;
+			NewEntry.ParameterValue = Val;
+			MFI->ScalarParameterValues.Add(NewEntry);
 		}
 		SetType = TEXT("scalar");
 		SetValue = FString::SanitizeFloat(Val);
@@ -8254,7 +8310,7 @@ FMonolithActionResult FMonolithMaterialActions::SetFunctionInstanceParameter(con
 		bool bFound = false;
 		for (FVectorParameterValue& Entry : MFI->VectorParameterValues)
 		{
-			if (Entry.ParameterInfo.Name == *ParamName)
+			if (Entry.ParameterInfo.Name == ParamFName)
 			{
 				Entry.ParameterValue = Color;
 				bFound = true;
@@ -8263,7 +8319,16 @@ FMonolithActionResult FMonolithMaterialActions::SetFunctionInstanceParameter(con
 		}
 		if (!bFound)
 		{
-			return FMonolithActionResult::Error(FString::Printf(TEXT("Vector parameter '%s' not found in MFI. Available vectors: %d"), *ParamName, MFI->VectorParameterValues.Num()));
+			FGuid* FoundGUID = VectorGUIDs.Find(ParamFName);
+			if (!FoundGUID)
+			{
+				return FMonolithActionResult::Error(FString::Printf(TEXT("Vector parameter '%s' not found in base function"), *ParamName));
+			}
+			FVectorParameterValue NewEntry;
+			NewEntry.ParameterInfo = FMaterialParameterInfo(ParamFName);
+			NewEntry.ExpressionGUID = *FoundGUID;
+			NewEntry.ParameterValue = Color;
+			MFI->VectorParameterValues.Add(NewEntry);
 		}
 		SetType = TEXT("vector");
 		SetValue = FString::Printf(TEXT("(%.3f, %.3f, %.3f, %.3f)"), Color.R, Color.G, Color.B, Color.A);
@@ -8280,7 +8345,7 @@ FMonolithActionResult FMonolithMaterialActions::SetFunctionInstanceParameter(con
 		bool bFound = false;
 		for (FTextureParameterValue& Entry : MFI->TextureParameterValues)
 		{
-			if (Entry.ParameterInfo.Name == *ParamName)
+			if (Entry.ParameterInfo.Name == ParamFName)
 			{
 				Entry.ParameterValue = Tex;
 				bFound = true;
@@ -8289,7 +8354,16 @@ FMonolithActionResult FMonolithMaterialActions::SetFunctionInstanceParameter(con
 		}
 		if (!bFound)
 		{
-			return FMonolithActionResult::Error(FString::Printf(TEXT("Texture parameter '%s' not found in MFI. Available textures: %d"), *ParamName, MFI->TextureParameterValues.Num()));
+			FGuid* FoundGUID = TextureGUIDs.Find(ParamFName);
+			if (!FoundGUID)
+			{
+				return FMonolithActionResult::Error(FString::Printf(TEXT("Texture parameter '%s' not found in base function"), *ParamName));
+			}
+			FTextureParameterValue NewEntry;
+			NewEntry.ParameterInfo = FMaterialParameterInfo(ParamFName);
+			NewEntry.ExpressionGUID = *FoundGUID;
+			NewEntry.ParameterValue = Tex;
+			MFI->TextureParameterValues.Add(NewEntry);
 		}
 		SetType = TEXT("texture");
 		SetValue = TexPath;
@@ -8301,7 +8375,7 @@ FMonolithActionResult FMonolithMaterialActions::SetFunctionInstanceParameter(con
 		bool bFound = false;
 		for (FStaticSwitchParameter& Entry : MFI->StaticSwitchParameterValues)
 		{
-			if (Entry.ParameterInfo.Name == *ParamName)
+			if (Entry.ParameterInfo.Name == ParamFName)
 			{
 				Entry.bOverride = true;
 				Entry.Value = Val;
@@ -8311,7 +8385,17 @@ FMonolithActionResult FMonolithMaterialActions::SetFunctionInstanceParameter(con
 		}
 		if (!bFound)
 		{
-			return FMonolithActionResult::Error(FString::Printf(TEXT("Static switch parameter '%s' not found in MFI. Available switches: %d"), *ParamName, MFI->StaticSwitchParameterValues.Num()));
+			FGuid* FoundGUID = SwitchGUIDs.Find(ParamFName);
+			if (!FoundGUID)
+			{
+				return FMonolithActionResult::Error(FString::Printf(TEXT("Static switch parameter '%s' not found in base function"), *ParamName));
+			}
+			FStaticSwitchParameter NewEntry;
+			NewEntry.ParameterInfo = FMaterialParameterInfo(ParamFName);
+			NewEntry.ExpressionGUID = *FoundGUID;
+			NewEntry.Value = Val;
+			NewEntry.bOverride = true;
+			MFI->StaticSwitchParameterValues.Add(NewEntry);
 		}
 		SetType = TEXT("static_switch");
 		SetValue = Val ? TEXT("true") : TEXT("false");
