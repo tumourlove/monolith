@@ -44,7 +44,7 @@ Most MCP integrations register every action as a separate tool, which floods the
 
 ## Features
 
-- **Blueprint mastery (86 actions)** — Full CRUD, node graph manipulation, JSON-to-Blueprint building, auto-layout, CDO property access, data tables, structs, enums, template system, Blueprint comparison
+- **Blueprint mastery (86 actions) `BLUEPRINT ASSIST`** — Full CRUD, node graph manipulation, JSON-to-Blueprint building, auto-layout (Sugiyama), CDO property access, data tables, structs, enums, template system, Blueprint comparison. Integrates with AI assistants as a complete Blueprint co-pilot — describe what you want and it builds the graph
 - **Material authoring (57 actions)** — Programmatic PBR graph building, custom HLSL, material functions, texture import, batch operations, preview rendering, compilation stats
 - **Animation pipeline (115 actions) `ABP GRAPH WRITING`** — Sequences, montages, blend spaces, full Animation Blueprint graph authoring (add states, transitions, set rules, wire anim graph nodes), PoseSearch, Control Rig, Physics Assets, IK Rigs, Retargeters, skeleton management — the full stack
 - **Niagara VFX (96 actions)** — System/emitter lifecycle, dynamic inputs, event handlers, sim stages, Parameter Collections, Effect Types, renderer presets, data interfaces, system diffing, batch execute
