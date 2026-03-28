@@ -42,6 +42,10 @@ void FMonolithMeshFloorPlanGenerator::RegisterActions(FMonolithToolRegistry& Reg
 			.Optional(TEXT("min_room_aspect"), TEXT("number"), TEXT("Minimum acceptable room aspect ratio (width/height). Rooms worse than this get rebalanced"), TEXT("3.0"))
 			.Optional(TEXT("floor_index"), TEXT("number"), TEXT("Floor index for per-floor room filtering: 0=ground, 1+=upper, -1=all floors (default)"), TEXT("-1"))
 			.Optional(TEXT("horror_level"), TEXT("number"), TEXT("Horror intensity 0.0-1.0. Controls door locking, dead-end ratio, loop breaking, wrong-room injection. 0=normal, 1=maximum horror. Hospice mode caps at 0.3."), TEXT("0.0"))
+			.Optional(TEXT("template"), TEXT("string"), TEXT("Specific template name to load (e.g. 'small_ranch_01'). Must exist in the template_category directory."))
+			.Optional(TEXT("template_category"), TEXT("string"), TEXT("Template category to select from (e.g. 'residential', 'commercial', 'horror'). A matching template is chosen randomly."))
+			.Optional(TEXT("use_templates"), TEXT("boolean"), TEXT("Enable template-based floor plans. When false, always uses algorithmic treemap. Default true."), TEXT("true"))
+			.Optional(TEXT("genre"), TEXT("string"), TEXT("Game genre hint. When 'horror', overrides template_category to 'horror'."))
 			.Build());
 
 	Registry.RegisterAction(TEXT("mesh"), TEXT("list_building_archetypes"),
@@ -2089,8 +2093,33 @@ TArray<FDoorDef> FMonolithMeshFloorPlanGenerator::PlaceDoors(
 				Door.DoorId = FString::Printf(TEXT("door_%02d"), ++DoorCounter);
 				Door.RoomA = Rooms[Fi].RoomId;
 				Door.RoomB = Rooms[Ti].RoomId;
-				Door.EdgeStart = DoorCell;
-				Door.EdgeEnd = (NeighborCell.X != INDEX_NONE) ? NeighborCell : DoorCell;
+
+				// WP-B: Convert room cells to wall boundary coordinates (R1-C2)
+				// create_building_from_grid treats grid coordinates as left/top edges —
+				// the wall boundary IS at the max coordinate between the two adjacent cells.
+				if (NeighborCell.X != INDEX_NONE)
+				{
+					if (DoorCell.X != NeighborCell.X)
+					{
+						// Vertical wall: boundary at max X
+						int32 WallX = FMath::Max(DoorCell.X, NeighborCell.X);
+						Door.EdgeStart = FIntPoint(WallX, DoorCell.Y);
+						Door.EdgeEnd = FIntPoint(WallX, DoorCell.Y);
+					}
+					else
+					{
+						// Horizontal wall: boundary at max Y
+						int32 WallY = FMath::Max(DoorCell.Y, NeighborCell.Y);
+						Door.EdgeStart = FIntPoint(DoorCell.X, WallY);
+						Door.EdgeEnd = FIntPoint(DoorCell.X, WallY);
+					}
+				}
+				else
+				{
+					Door.EdgeStart = DoorCell;
+					Door.EdgeEnd = DoorCell;
+				}
+
 				Door.Wall = WallDir;
 				Door.Width = DoorWidth;
 				Door.Height = 220.0f;
@@ -2150,8 +2179,29 @@ TArray<FDoorDef> FMonolithMeshFloorPlanGenerator::PlaceDoors(
 			Door.DoorId = FString::Printf(TEXT("door_%02d"), ++DoorCounter);
 			Door.RoomA = Rooms[i].RoomId;
 			Door.RoomB = TEXT("corridor");
-			Door.EdgeStart = DoorCell;
-			Door.EdgeEnd = (NeighborCell.X != INDEX_NONE) ? NeighborCell : DoorCell;
+
+			// WP-B: Convert room cells to wall boundary coordinates
+			if (NeighborCell.X != INDEX_NONE)
+			{
+				if (DoorCell.X != NeighborCell.X)
+				{
+					int32 WallX = FMath::Max(DoorCell.X, NeighborCell.X);
+					Door.EdgeStart = FIntPoint(WallX, DoorCell.Y);
+					Door.EdgeEnd = FIntPoint(WallX, DoorCell.Y);
+				}
+				else
+				{
+					int32 WallY = FMath::Max(DoorCell.Y, NeighborCell.Y);
+					Door.EdgeStart = FIntPoint(DoorCell.X, WallY);
+					Door.EdgeEnd = FIntPoint(DoorCell.X, WallY);
+				}
+			}
+			else
+			{
+				Door.EdgeStart = DoorCell;
+				Door.EdgeEnd = DoorCell;
+			}
+
 			Door.Wall = WallDir;
 			Door.Width = DoorWidth;
 			Door.Height = 220.0f;
@@ -2202,8 +2252,21 @@ TArray<FDoorDef> FMonolithMeshFloorPlanGenerator::PlaceDoors(
 					Door.DoorId = FString::Printf(TEXT("door_%02d"), ++DoorCounter);
 					Door.RoomA = Rooms[i].RoomId;
 					Door.RoomB = Rooms[Neighbor].RoomId;
-					Door.EdgeStart = Cell;
-					Door.EdgeEnd = FIntPoint(NX, NY);
+
+					// WP-B: Convert room cells to wall boundary coordinates
+					if (Cell.X != NX)
+					{
+						int32 WallX = FMath::Max(Cell.X, NX);
+						Door.EdgeStart = FIntPoint(WallX, Cell.Y);
+						Door.EdgeEnd = FIntPoint(WallX, Cell.Y);
+					}
+					else
+					{
+						int32 WallY = FMath::Max(Cell.Y, NY);
+						Door.EdgeStart = FIntPoint(Cell.X, WallY);
+						Door.EdgeEnd = FIntPoint(Cell.X, WallY);
+					}
+
 					Door.Wall = WallDir;
 					Door.Width = DoorWidth;
 					Door.Height = 220.0f;
@@ -2444,12 +2507,36 @@ static void EnsureExteriorEntrance(const TArray<TArray<int32>>& Grid, int32 Grid
 	}
 
 	// 7. Create exterior entrance door
+	// WP-B: Compute wall boundary coordinates for exterior entrance.
+	// For exterior walls, the boundary is at the grid edge:
+	//   South (Y==0):       boundary at Y=0 (wall is at min Y edge)
+	//   North (Y==GridH-1): boundary at Y=GridH (wall is at max Y edge, one past grid)
+	//   West  (X==0):       boundary at X=0
+	//   East  (X==GridW-1): boundary at X=GridW
+	FIntPoint EdgePt = BestCell;
+	if (BestWall == TEXT("south"))
+	{
+		EdgePt = FIntPoint(BestCell.X, 0);
+	}
+	else if (BestWall == TEXT("north"))
+	{
+		EdgePt = FIntPoint(BestCell.X, GridH);
+	}
+	else if (BestWall == TEXT("west"))
+	{
+		EdgePt = FIntPoint(0, BestCell.Y);
+	}
+	else if (BestWall == TEXT("east"))
+	{
+		EdgePt = FIntPoint(GridW, BestCell.Y);
+	}
+
 	FDoorDef EntDoor;
 	EntDoor.DoorId = TEXT("entrance_01");
 	EntDoor.RoomA = Rooms[BestRoomIdx].RoomId;
 	EntDoor.RoomB = TEXT("exterior");
-	EntDoor.EdgeStart = BestCell;
-	EntDoor.EdgeEnd = BestCell;
+	EntDoor.EdgeStart = EdgePt;
+	EntDoor.EdgeEnd = EdgePt;
 	EntDoor.Wall = BestWall;
 	EntDoor.Width = bHospiceMode ? 120.0f : 110.0f;   // Exterior entrance matches interior width minimum
 	EntDoor.Height = 240.0f;   // Taller exterior entrance
@@ -2675,6 +2762,518 @@ TSharedPtr<FJsonObject> FMonolithMeshFloorPlanGenerator::BuildOutputJson(
 }
 
 // ============================================================================
+// Template System (WP-A)
+// ============================================================================
+
+FString FMonolithMeshFloorPlanGenerator::GetTemplateDirectory()
+{
+	return FPaths::Combine(FPaths::ProjectPluginsDir(), TEXT("Monolith"), TEXT("Saved"), TEXT("Monolith"), TEXT("FloorPlanTemplates"));
+}
+
+FString FMonolithMeshFloorPlanGenerator::ArchetypeToTemplateCategory(const FString& ArchetypeName)
+{
+	// Map archetype names to template categories
+	FString Lower = ArchetypeName.ToLower();
+
+	if (Lower.Contains(TEXT("residential")) || Lower.Contains(TEXT("house")) || Lower.Contains(TEXT("home"))
+		|| Lower.Contains(TEXT("cabin")) || Lower.Contains(TEXT("bungalow")) || Lower.Contains(TEXT("ranch"))
+		|| Lower.Contains(TEXT("colonial")) || Lower.Contains(TEXT("farmhouse")) || Lower.Contains(TEXT("duplex"))
+		|| Lower.Contains(TEXT("townhouse")) || Lower.Contains(TEXT("apartment")) || Lower.Contains(TEXT("cottage")))
+	{
+		return TEXT("residential");
+	}
+
+	if (Lower.Contains(TEXT("horror")) || Lower.Contains(TEXT("abandoned")) || Lower.Contains(TEXT("haunted")))
+	{
+		return TEXT("horror");
+	}
+
+	// Everything else: office, warehouse, clinic, police, church, restaurant, school, shop, garage, store
+	return TEXT("commercial");
+}
+
+bool FMonolithMeshFloorPlanGenerator::LoadFloorPlanTemplate(
+	const FString& TemplateName, const FString& Category,
+	TArray<TArray<int32>>& OutGrid, int32& OutGridW, int32& OutGridH,
+	TArray<FRoomDef>& OutRooms, TArray<FDoorDef>& OutDoors,
+	TArray<FStairwellDef>& OutStairwells, FString& OutError)
+{
+	// Build file path: {TemplateDir}/{category}/{name}.json
+	FString FilePath = FPaths::Combine(GetTemplateDirectory(), Category, TemplateName + TEXT(".json"));
+
+	FString JsonString;
+	if (!FFileHelper::LoadFileToString(JsonString, *FilePath))
+	{
+		OutError = FString::Printf(TEXT("Could not load template file: %s"), *FilePath);
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> Json = FMonolithJsonUtils::Parse(JsonString);
+	if (!Json.IsValid())
+	{
+		OutError = FString::Printf(TEXT("Failed to parse template JSON: %s"), *FilePath);
+		return false;
+	}
+
+	// Parse floors array — use first floor for now
+	const TArray<TSharedPtr<FJsonValue>>* FloorsArr = nullptr;
+	if (!Json->TryGetArrayField(TEXT("floors"), FloorsArr) || FloorsArr->Num() == 0)
+	{
+		OutError = FString::Printf(TEXT("Template '%s' has no floors array"), *TemplateName);
+		return false;
+	}
+
+	// Get template-level grid dimensions
+	OutGridW = static_cast<int32>(Json->GetNumberField(TEXT("grid_width")));
+	OutGridH = static_cast<int32>(Json->GetNumberField(TEXT("grid_height")));
+
+	if (OutGridW <= 0 || OutGridH <= 0)
+	{
+		OutError = FString::Printf(TEXT("Template '%s' has invalid grid dimensions %dx%d"), *TemplateName, OutGridW, OutGridH);
+		return false;
+	}
+
+	// Parse floor 0
+	const TSharedPtr<FJsonObject>& FloorObj = (*FloorsArr)[0]->AsObject();
+	if (!FloorObj.IsValid())
+	{
+		OutError = FString::Printf(TEXT("Template '%s' floor 0 is not a valid JSON object"), *TemplateName);
+		return false;
+	}
+
+	// Parse grid
+	const TArray<TSharedPtr<FJsonValue>>* GridArr = nullptr;
+	if (!FloorObj->TryGetArrayField(TEXT("grid"), GridArr) || GridArr->Num() == 0)
+	{
+		OutError = FString::Printf(TEXT("Template '%s' floor 0 has no grid array"), *TemplateName);
+		return false;
+	}
+
+	OutGrid.SetNum(OutGridH);
+	for (int32 Y = 0; Y < OutGridH && Y < GridArr->Num(); ++Y)
+	{
+		const TArray<TSharedPtr<FJsonValue>>& RowArr = (*GridArr)[Y]->AsArray();
+		OutGrid[Y].SetNum(OutGridW);
+		for (int32 X = 0; X < OutGridW && X < RowArr.Num(); ++X)
+		{
+			OutGrid[Y][X] = static_cast<int32>(RowArr[X]->AsNumber());
+		}
+	}
+
+	// Parse rooms — get room_id and room_type from JSON, but reconstruct GridCells from grid (R1-C1)
+	const TArray<TSharedPtr<FJsonValue>>* RoomsArr = nullptr;
+	if (FloorObj->TryGetArrayField(TEXT("rooms"), RoomsArr))
+	{
+		// First pass: load room metadata from JSON
+		TMap<int32, int32> RoomIndexToArrayIndex;  // room_index_in_grid -> index in OutRooms
+		for (int32 i = 0; i < RoomsArr->Num(); ++i)
+		{
+			const TSharedPtr<FJsonObject>& RoomObj = (*RoomsArr)[i]->AsObject();
+			if (!RoomObj.IsValid()) continue;
+
+			FRoomDef Room;
+			RoomObj->TryGetStringField(TEXT("room_id"), Room.RoomId);
+			RoomObj->TryGetStringField(TEXT("room_type"), Room.RoomType);
+			// GridCells will be reconstructed from grid scan below
+
+			OutRooms.Add(MoveTemp(Room));
+			RoomIndexToArrayIndex.Add(i, i);
+		}
+
+		// Second pass: reconstruct GridCells by scanning the grid (R1-C1: grid is the source of truth)
+		for (int32 Y = 0; Y < OutGridH; ++Y)
+		{
+			for (int32 X = 0; X < OutGridW; ++X)
+			{
+				int32 CellVal = OutGrid[Y][X];
+				if (CellVal >= 0 && CellVal < OutRooms.Num())
+				{
+					OutRooms[CellVal].GridCells.Add(FIntPoint(X, Y));
+				}
+			}
+		}
+	}
+
+	// Parse doors
+	const TArray<TSharedPtr<FJsonValue>>* DoorsArr = nullptr;
+	if (FloorObj->TryGetArrayField(TEXT("doors"), DoorsArr))
+	{
+		for (int32 i = 0; i < DoorsArr->Num(); ++i)
+		{
+			const TSharedPtr<FJsonObject>& DoorObj = (*DoorsArr)[i]->AsObject();
+			if (!DoorObj.IsValid()) continue;
+
+			FDoorDef Door;
+			DoorObj->TryGetStringField(TEXT("door_id"), Door.DoorId);
+			DoorObj->TryGetStringField(TEXT("room_a"), Door.RoomA);
+			DoorObj->TryGetStringField(TEXT("room_b"), Door.RoomB);
+
+			// Normalize EXTERIOR -> exterior for consistency with EnsureExteriorEntrance
+			if (Door.RoomA.ToUpper() == TEXT("EXTERIOR")) Door.RoomA = TEXT("exterior");
+			if (Door.RoomB.ToUpper() == TEXT("EXTERIOR")) Door.RoomB = TEXT("exterior");
+
+			// Parse edge_start
+			const TArray<TSharedPtr<FJsonValue>>* EdgeStartArr = nullptr;
+			if (DoorObj->TryGetArrayField(TEXT("edge_start"), EdgeStartArr) && EdgeStartArr->Num() >= 2)
+			{
+				Door.EdgeStart.X = static_cast<int32>((*EdgeStartArr)[0]->AsNumber());
+				Door.EdgeStart.Y = static_cast<int32>((*EdgeStartArr)[1]->AsNumber());
+			}
+
+			// Parse edge_end
+			const TArray<TSharedPtr<FJsonValue>>* EdgeEndArr = nullptr;
+			if (DoorObj->TryGetArrayField(TEXT("edge_end"), EdgeEndArr) && EdgeEndArr->Num() >= 2)
+			{
+				Door.EdgeEnd.X = static_cast<int32>((*EdgeEndArr)[0]->AsNumber());
+				Door.EdgeEnd.Y = static_cast<int32>((*EdgeEndArr)[1]->AsNumber());
+			}
+
+			DoorObj->TryGetStringField(TEXT("wall"), Door.Wall);
+
+			double WidthDbl = 110.0;
+			if (DoorObj->TryGetNumberField(TEXT("width"), WidthDbl))
+				Door.Width = static_cast<float>(WidthDbl);
+			double HeightDbl = 220.0;
+			if (DoorObj->TryGetNumberField(TEXT("height"), HeightDbl))
+				Door.Height = static_cast<float>(HeightDbl);
+
+			// Validate door edge coordinates (R1-C1): must be axis-aligned
+			if (Door.EdgeStart.X != Door.EdgeEnd.X && Door.EdgeStart.Y != Door.EdgeEnd.Y)
+			{
+				UE_LOG(LogMonolithFloorPlan, Warning,
+					TEXT("Template '%s' door '%s' has non-axis-aligned edge: (%d,%d)->(%d,%d) — correcting to EdgeStart"),
+					*TemplateName, *Door.DoorId,
+					Door.EdgeStart.X, Door.EdgeStart.Y, Door.EdgeEnd.X, Door.EdgeEnd.Y);
+				Door.EdgeEnd = Door.EdgeStart;
+			}
+
+			OutDoors.Add(MoveTemp(Door));
+		}
+	}
+
+	// Parse stairwells
+	const TArray<TSharedPtr<FJsonValue>>* StairArr = nullptr;
+	if (FloorObj->TryGetArrayField(TEXT("stairwells"), StairArr))
+	{
+		for (int32 i = 0; i < StairArr->Num(); ++i)
+		{
+			const TSharedPtr<FJsonObject>& StairObj = (*StairArr)[i]->AsObject();
+			if (!StairObj.IsValid()) continue;
+
+			FStairwellDef Stair;
+			StairObj->TryGetStringField(TEXT("stairwell_id"), Stair.StairwellId);
+
+			const TArray<TSharedPtr<FJsonValue>>* CellsArr = nullptr;
+			if (StairObj->TryGetArrayField(TEXT("grid_cells"), CellsArr))
+			{
+				for (const auto& CellVal : *CellsArr)
+				{
+					const TArray<TSharedPtr<FJsonValue>>& Pair = CellVal->AsArray();
+					if (Pair.Num() >= 2)
+					{
+						Stair.GridCells.Add(FIntPoint(
+							static_cast<int32>(Pair[0]->AsNumber()),
+							static_cast<int32>(Pair[1]->AsNumber())));
+					}
+				}
+			}
+
+			const TArray<TSharedPtr<FJsonValue>>* FloorsConnArr = nullptr;
+			if (StairObj->TryGetArrayField(TEXT("connects_floors"), FloorsConnArr) && FloorsConnArr->Num() >= 2)
+			{
+				Stair.ConnectsFloorA = static_cast<int32>((*FloorsConnArr)[0]->AsNumber());
+				Stair.ConnectsFloorB = static_cast<int32>((*FloorsConnArr)[1]->AsNumber());
+			}
+
+			FString AccessStr;
+			if (StairObj->TryGetStringField(TEXT("vertical_access"), AccessStr))
+			{
+				if (AccessStr == TEXT("elevator")) Stair.VerticalAccess = EVerticalAccessType::Elevator;
+				else if (AccessStr == TEXT("both")) Stair.VerticalAccess = EVerticalAccessType::Both;
+			}
+
+			OutStairwells.Add(MoveTemp(Stair));
+		}
+	}
+
+	UE_LOG(LogMonolithFloorPlan, Log, TEXT("Loaded template '%s/%s': grid=%dx%d, %d rooms, %d doors, %d stairwells"),
+		*Category, *TemplateName, OutGridW, OutGridH, OutRooms.Num(), OutDoors.Num(), OutStairwells.Num());
+
+	return true;
+}
+
+FString FMonolithMeshFloorPlanGenerator::SelectTemplate(
+	const FString& Category, float FootprintW, float FootprintH,
+	FRandomStream& Rng, FString& OutError)
+{
+	FString TemplateDir = FPaths::Combine(GetTemplateDirectory(), Category);
+
+	TArray<FString> Files;
+	IFileManager::Get().FindFiles(Files, *FPaths::Combine(TemplateDir, TEXT("*.json")), true, false);
+
+	if (Files.Num() == 0)
+	{
+		OutError = FString::Printf(TEXT("No templates found in category '%s' (dir: %s)"), *Category, *TemplateDir);
+		return FString();
+	}
+
+	// Score each template by footprint compatibility
+	struct FTemplateCandidate
+	{
+		FString Name;
+		float Score;  // Lower = better fit
+	};
+
+	TArray<FTemplateCandidate> Candidates;
+
+	for (const FString& File : Files)
+	{
+		FString Name = FPaths::GetBaseFilename(File);
+		FString FullPath = FPaths::Combine(TemplateDir, File);
+
+		// Load just the metadata (don't parse full grid)
+		FString JsonStr;
+		if (!FFileHelper::LoadFileToString(JsonStr, *FullPath)) continue;
+
+		TSharedPtr<FJsonObject> Json = FMonolithJsonUtils::Parse(JsonStr);
+		if (!Json.IsValid()) continue;
+
+		double TemplateW = 0, TemplateH = 0;
+		Json->TryGetNumberField(TEXT("footprint_width"), TemplateW);
+		Json->TryGetNumberField(TEXT("footprint_height"), TemplateH);
+
+		if (TemplateW <= 0 || TemplateH <= 0) continue;
+
+		// Check 50% scale tolerance: template footprint must be within [0.5x, 2.0x] of requested
+		float ScaleX = FootprintW / static_cast<float>(TemplateW);
+		float ScaleY = FootprintH / static_cast<float>(TemplateH);
+
+		if (ScaleX < 0.5f || ScaleX > 2.0f || ScaleY < 0.5f || ScaleY > 2.0f)
+			continue;
+
+		// Score: how close is the aspect ratio match? (1.0 = perfect)
+		float TemplateRatio = static_cast<float>(TemplateW / TemplateH);
+		float RequestedRatio = FootprintW / FootprintH;
+		float RatioScore = FMath::Abs(TemplateRatio - RequestedRatio) / FMath::Max(TemplateRatio, RequestedRatio);
+
+		// Also factor in scale proximity (prefer templates that need less scaling)
+		float ScaleScore = FMath::Abs(ScaleX - 1.0f) + FMath::Abs(ScaleY - 1.0f);
+
+		float TotalScore = RatioScore * 2.0f + ScaleScore;
+
+		Candidates.Add({ Name, TotalScore });
+	}
+
+	if (Candidates.Num() == 0)
+	{
+		OutError = FString::Printf(TEXT("No templates in category '%s' fit footprint %.0fx%.0f (within 50%% scale tolerance)"),
+			*Category, FootprintW, FootprintH);
+		return FString();
+	}
+
+	// Sort by score (best first)
+	Candidates.Sort([](const FTemplateCandidate& A, const FTemplateCandidate& B) { return A.Score < B.Score; });
+
+	// Weighted random from top 3 (or fewer)
+	int32 PoolSize = FMath::Min(3, Candidates.Num());
+
+	// Weight: inverse of score (better = higher weight). Use softmax-ish weighting.
+	TArray<float> Weights;
+	float TotalWeight = 0.0f;
+	for (int32 i = 0; i < PoolSize; ++i)
+	{
+		float W = 1.0f / (1.0f + Candidates[i].Score * 10.0f);
+		Weights.Add(W);
+		TotalWeight += W;
+	}
+
+	float Roll = Rng.FRand() * TotalWeight;
+	float Accum = 0.0f;
+	for (int32 i = 0; i < PoolSize; ++i)
+	{
+		Accum += Weights[i];
+		if (Roll <= Accum)
+		{
+			UE_LOG(LogMonolithFloorPlan, Log, TEXT("Selected template '%s' from category '%s' (score=%.3f, pool=%d)"),
+				*Candidates[i].Name, *Category, Candidates[i].Score, Candidates.Num());
+			return Candidates[i].Name;
+		}
+	}
+
+	// Fallback to best
+	return Candidates[0].Name;
+}
+
+bool FMonolithMeshFloorPlanGenerator::ScaleTemplateGrid(
+	TArray<TArray<int32>>& InOutGrid, int32& InOutGridW, int32& InOutGridH,
+	TArray<FRoomDef>& InOutRooms, TArray<FDoorDef>& InOutDoors,
+	TArray<FStairwellDef>& InOutStairwells,
+	int32 TargetGridW, int32 TargetGridH,
+	FString& OutError)
+{
+	int32 OldW = InOutGridW;
+	int32 OldH = InOutGridH;
+
+	if (TargetGridW <= 0 || TargetGridH <= 0)
+	{
+		OutError = TEXT("Invalid target grid dimensions for scaling");
+		return false;
+	}
+
+	// If no scaling needed, just return
+	if (TargetGridW == OldW && TargetGridH == OldH)
+		return true;
+
+	float ScaleX = static_cast<float>(TargetGridW) / static_cast<float>(OldW);
+	float ScaleY = static_cast<float>(TargetGridH) / static_cast<float>(OldH);
+
+	// Build new grid using nearest-neighbor sampling
+	TArray<TArray<int32>> NewGrid;
+	NewGrid.SetNum(TargetGridH);
+	for (int32 Y = 0; Y < TargetGridH; ++Y)
+	{
+		NewGrid[Y].SetNum(TargetGridW);
+		int32 SrcY = FMath::Clamp(FMath::RoundToInt32(static_cast<float>(Y) / ScaleY), 0, OldH - 1);
+		for (int32 X = 0; X < TargetGridW; ++X)
+		{
+			int32 SrcX = FMath::Clamp(FMath::RoundToInt32(static_cast<float>(X) / ScaleX), 0, OldW - 1);
+			NewGrid[Y][X] = InOutGrid[SrcY][SrcX];
+		}
+	}
+
+	// Reconstruct room GridCells from the new grid
+	for (FRoomDef& Room : InOutRooms)
+	{
+		Room.GridCells.Empty();
+	}
+	for (int32 Y = 0; Y < TargetGridH; ++Y)
+	{
+		for (int32 X = 0; X < TargetGridW; ++X)
+		{
+			int32 CellVal = NewGrid[Y][X];
+			if (CellVal >= 0 && CellVal < InOutRooms.Num())
+			{
+				InOutRooms[CellVal].GridCells.Add(FIntPoint(X, Y));
+			}
+		}
+	}
+
+	// Scale door positions
+	for (FDoorDef& Door : InOutDoors)
+	{
+		Door.EdgeStart.X = FMath::Clamp(FMath::RoundToInt32(Door.EdgeStart.X * ScaleX), 0, TargetGridW - 1);
+		Door.EdgeStart.Y = FMath::Clamp(FMath::RoundToInt32(Door.EdgeStart.Y * ScaleY), 0, TargetGridH - 1);
+		Door.EdgeEnd.X = FMath::Clamp(FMath::RoundToInt32(Door.EdgeEnd.X * ScaleX), 0, TargetGridW - 1);
+		Door.EdgeEnd.Y = FMath::Clamp(FMath::RoundToInt32(Door.EdgeEnd.Y * ScaleY), 0, TargetGridH - 1);
+
+		// Re-enforce axis alignment after scaling
+		if (Door.EdgeStart.X != Door.EdgeEnd.X && Door.EdgeStart.Y != Door.EdgeEnd.Y)
+		{
+			// Snap to the dominant axis
+			if (FMath::Abs(Door.EdgeEnd.X - Door.EdgeStart.X) >= FMath::Abs(Door.EdgeEnd.Y - Door.EdgeStart.Y))
+				Door.EdgeEnd.Y = Door.EdgeStart.Y;  // Horizontal door
+			else
+				Door.EdgeEnd.X = Door.EdgeStart.X;  // Vertical door
+		}
+	}
+
+	// Scale stairwell positions
+	for (FStairwellDef& Stair : InOutStairwells)
+	{
+		TArray<FIntPoint> NewCells;
+		for (const FIntPoint& Cell : Stair.GridCells)
+		{
+			int32 NX = FMath::Clamp(FMath::RoundToInt32(Cell.X * ScaleX), 0, TargetGridW - 1);
+			int32 NY = FMath::Clamp(FMath::RoundToInt32(Cell.Y * ScaleY), 0, TargetGridH - 1);
+			NewCells.AddUnique(FIntPoint(NX, NY));
+		}
+		Stair.GridCells = MoveTemp(NewCells);
+	}
+
+	// Apply scaled grid
+	InOutGrid = MoveTemp(NewGrid);
+	InOutGridW = TargetGridW;
+	InOutGridH = TargetGridH;
+
+	// ---- Post-scaling validation (R2-I1, R2-I2, R2-I3) ----
+
+	// R2-I1: Corridors still >= 3 cells wide
+	for (int32 i = 0; i < InOutRooms.Num(); ++i)
+	{
+		if (InOutRooms[i].RoomType != TEXT("corridor") && InOutRooms[i].RoomType != TEXT("hallway"))
+			continue;
+
+		if (InOutRooms[i].GridCells.Num() == 0) continue;
+
+		// Compute bounding box width/height
+		int32 MinX = INT_MAX, MaxX = INT_MIN, MinY = INT_MAX, MaxY = INT_MIN;
+		for (const FIntPoint& C : InOutRooms[i].GridCells)
+		{
+			MinX = FMath::Min(MinX, C.X); MaxX = FMath::Max(MaxX, C.X);
+			MinY = FMath::Min(MinY, C.Y); MaxY = FMath::Max(MaxY, C.Y);
+		}
+		int32 BoundsW = MaxX - MinX + 1;
+		int32 BoundsH = MaxY - MinY + 1;
+		int32 MinDim = FMath::Min(BoundsW, BoundsH);
+
+		if (MinDim < 3)
+		{
+			UE_LOG(LogMonolithFloorPlan, Warning, TEXT("Post-scale: corridor '%s' narrowed to %d cells (min 3). Template may produce narrow passages."),
+				*InOutRooms[i].RoomId, MinDim);
+		}
+	}
+
+	// R2-I2: Stairwells >= 4x6
+	for (const FStairwellDef& Stair : InOutStairwells)
+	{
+		if (Stair.GridCells.Num() == 0) continue;
+
+		int32 MinX = INT_MAX, MaxX = INT_MIN, MinY = INT_MAX, MaxY = INT_MIN;
+		for (const FIntPoint& C : Stair.GridCells)
+		{
+			MinX = FMath::Min(MinX, C.X); MaxX = FMath::Max(MaxX, C.X);
+			MinY = FMath::Min(MinY, C.Y); MaxY = FMath::Max(MaxY, C.Y);
+		}
+		int32 BoundsW = MaxX - MinX + 1;
+		int32 BoundsH = MaxY - MinY + 1;
+		int32 MinDim = FMath::Min(BoundsW, BoundsH);
+		int32 MaxDim = FMath::Max(BoundsW, BoundsH);
+
+		if (MinDim < 4 || MaxDim < 6)
+		{
+			OutError = FString::Printf(TEXT("Post-scale: stairwell '%s' shrank to %dx%d (min 4x6). Cannot use scaled template; use original size."),
+				*Stair.StairwellId, BoundsW, BoundsH);
+			return false;
+		}
+	}
+
+	// R2-I3: Entrance cell still on exterior edge
+	// We check if any room has cells on the perimeter — if the template had an entrance it should still be reachable
+	bool bHasPerimeterRoom = false;
+	for (const FRoomDef& Room : InOutRooms)
+	{
+		for (const FIntPoint& C : Room.GridCells)
+		{
+			if (C.X == 0 || C.X == TargetGridW - 1 || C.Y == 0 || C.Y == TargetGridH - 1)
+			{
+				bHasPerimeterRoom = true;
+				break;
+			}
+		}
+		if (bHasPerimeterRoom) break;
+	}
+	if (!bHasPerimeterRoom)
+	{
+		UE_LOG(LogMonolithFloorPlan, Warning, TEXT("Post-scale: no rooms touch exterior perimeter. Entrance may need re-placement."));
+	}
+
+	UE_LOG(LogMonolithFloorPlan, Log, TEXT("Scaled template grid from %dx%d to %dx%d (scale %.2fx%.2f)"),
+		OldW, OldH, TargetGridW, TargetGridH, ScaleX, ScaleY);
+
+	return true;
+}
+
+// ============================================================================
 // Action handlers
 // ============================================================================
 
@@ -2726,6 +3325,187 @@ FMonolithActionResult FMonolithMeshFloorPlanGenerator::GenerateFloorPlan(const T
 	Params->TryGetNumberField(TEXT("floor_index"), FloorIndexDbl);
 	int32 FloorIndex = static_cast<int32>(FloorIndexDbl);
 
+	// ---- WP-A: Parse template params ----
+	FString TemplateName;
+	Params->TryGetStringField(TEXT("template"), TemplateName);
+	FString TemplateCategory;
+	Params->TryGetStringField(TEXT("template_category"), TemplateCategory);
+	bool bUseTemplates = true;
+	Params->TryGetBoolField(TEXT("use_templates"), bUseTemplates);
+	FString Genre;
+	Params->TryGetStringField(TEXT("genre"), Genre);
+
+	// Genre override: horror genre forces horror template category
+	if (Genre.ToLower() == TEXT("horror") && TemplateCategory.IsEmpty())
+	{
+		TemplateCategory = TEXT("horror");
+	}
+
+	// ---- WP-A: Template-based floor plan path ----
+	if (bUseTemplates)
+	{
+		FString TemplateError;
+		FString ResolvedTemplate = TemplateName;
+		FString ResolvedCategory = TemplateCategory;
+
+		// Resolve category from archetype if not specified
+		if (ResolvedCategory.IsEmpty() && ResolvedTemplate.IsEmpty())
+		{
+			ResolvedCategory = ArchetypeToTemplateCategory(ArchetypeName);
+		}
+
+		// If no specific template, select one
+		if (ResolvedTemplate.IsEmpty() && !ResolvedCategory.IsEmpty())
+		{
+			ResolvedTemplate = SelectTemplate(ResolvedCategory, static_cast<float>(FootprintW), static_cast<float>(FootprintH), Rng, TemplateError);
+		}
+
+		// If we still don't have a category but have a template name, try common categories
+		if (!ResolvedTemplate.IsEmpty() && ResolvedCategory.IsEmpty())
+		{
+			static const TArray<FString> Categories = { TEXT("residential"), TEXT("commercial"), TEXT("horror") };
+			for (const FString& Cat : Categories)
+			{
+				FString TestPath = FPaths::Combine(GetTemplateDirectory(), Cat, ResolvedTemplate + TEXT(".json"));
+				if (IFileManager::Get().FileExists(*TestPath))
+				{
+					ResolvedCategory = Cat;
+					break;
+				}
+			}
+		}
+
+		if (!ResolvedTemplate.IsEmpty() && !ResolvedCategory.IsEmpty())
+		{
+			TArray<TArray<int32>> TemplateGrid;
+			int32 TemplateGridW = 0, TemplateGridH = 0;
+			TArray<FRoomDef> TemplateRooms;
+			TArray<FDoorDef> TemplateDoors;
+			TArray<FStairwellDef> TemplateStairwells;
+
+			if (LoadFloorPlanTemplate(ResolvedTemplate, ResolvedCategory,
+				TemplateGrid, TemplateGridW, TemplateGridH,
+				TemplateRooms, TemplateDoors, TemplateStairwells, TemplateError))
+			{
+				// Compute target grid dimensions from requested footprint
+				int32 TargetGridW = FMath::Max(2, FMath::RoundToInt32(static_cast<float>(FootprintW) / CellSize));
+				int32 TargetGridH = FMath::Max(2, FMath::RoundToInt32(static_cast<float>(FootprintH) / CellSize));
+
+				// Scale if needed
+				if (TargetGridW != TemplateGridW || TargetGridH != TemplateGridH)
+				{
+					FString ScaleError;
+					if (!ScaleTemplateGrid(TemplateGrid, TemplateGridW, TemplateGridH,
+						TemplateRooms, TemplateDoors, TemplateStairwells,
+						TargetGridW, TargetGridH, ScaleError))
+					{
+						UE_LOG(LogMonolithFloorPlan, Warning, TEXT("Template scaling failed (%s), using original template size"), *ScaleError);
+						// Reload at original size — scaling modified in place
+						TemplateGrid.Empty(); TemplateRooms.Empty(); TemplateDoors.Empty(); TemplateStairwells.Empty();
+						LoadFloorPlanTemplate(ResolvedTemplate, ResolvedCategory,
+							TemplateGrid, TemplateGridW, TemplateGridH,
+							TemplateRooms, TemplateDoors, TemplateStairwells, TemplateError);
+					}
+				}
+
+				// R2-I4: Hospice door width clamp — all doors >= 120cm
+				if (bHospiceMode)
+				{
+					for (FDoorDef& Door : TemplateDoors)
+					{
+						if (Door.Width < 120.0f)
+						{
+							Door.Width = 120.0f;
+						}
+					}
+				}
+
+				// Ensure exterior entrance exists on template
+				EnsureExteriorEntrance(TemplateGrid, TemplateGridW, TemplateGridH,
+					TemplateRooms, TemplateDoors, bHospiceMode, Rng);
+
+				// Validate door clearances
+				ValidateDoorClearances(TemplateGrid, TemplateGridW, TemplateGridH,
+					TemplateRooms, TemplateDoors, CellSize);
+
+				// ---- Horror post-processing on template ----
+				TArray<FRoomSpaceSyntax> PerRoomSS;
+				FSpaceSyntaxScores SSScores;
+				TSet<int32> LockedDoors;
+				int32 WrongRoomCount = 0;
+
+				if (HorrorLevel > 0.0f)
+				{
+					LockedDoors = ApplyHorrorModifiers(TemplateRooms, TemplateDoors, HorrorLevel, bHospiceMode, Rng, PerRoomSS, SSScores);
+					if (HorrorLevel > 0.7f && !bHospiceMode)
+					{
+						WrongRoomCount = ApplyWrongRoomInjection(TemplateRooms, Rng);
+					}
+				}
+				else
+				{
+					TSet<int32> NoLocked;
+					ComputeSpaceSyntax(TemplateRooms, TemplateDoors, NoLocked, PerRoomSS, SSScores);
+				}
+
+				// ---- Build output JSON (same format as treemap path) ----
+				TSharedPtr<FJsonObject> ResultJson = BuildOutputJson(
+					TemplateGrid, TemplateGridW, TemplateGridH, TemplateRooms, TemplateDoors,
+					ArchetypeName, static_cast<float>(FootprintW), static_cast<float>(FootprintH),
+					bHospiceMode, CellSize);
+
+				ResultJson->SetNumberField(TEXT("seed"), Seed);
+				ResultJson->SetNumberField(TEXT("floor_index"), FloorIndex);
+				ResultJson->SetStringField(TEXT("template_name"), ResolvedTemplate);
+				ResultJson->SetStringField(TEXT("template_category"), ResolvedCategory);
+				ResultJson->SetBoolField(TEXT("from_template"), true);
+
+				// Entrance info
+				{
+					const FDoorDef* EntranceDoor = nullptr;
+					for (const FDoorDef& D : TemplateDoors)
+					{
+						if (D.RoomB == TEXT("exterior") || D.RoomB == TEXT("EXTERIOR")
+							|| D.RoomA == TEXT("exterior") || D.RoomA == TEXT("EXTERIOR"))
+						{
+							EntranceDoor = &D;
+							break;
+						}
+					}
+					ResultJson->SetBoolField(TEXT("has_exterior_entrance"), EntranceDoor != nullptr);
+					if (EntranceDoor)
+					{
+						ResultJson->SetStringField(TEXT("entrance_door_id"), EntranceDoor->DoorId);
+						ResultJson->SetStringField(TEXT("entrance_wall"), EntranceDoor->Wall);
+						FString EntranceRoom = (EntranceDoor->RoomA == TEXT("exterior") || EntranceDoor->RoomA == TEXT("EXTERIOR"))
+							? EntranceDoor->RoomB : EntranceDoor->RoomA;
+						ResultJson->SetStringField(TEXT("entrance_room"), EntranceRoom);
+					}
+				}
+
+				// Horror + Space Syntax data
+				EmitHorrorAndSpaceSyntaxJson(ResultJson, TemplateRooms, TemplateDoors, LockedDoors, PerRoomSS, SSScores, HorrorLevel, WrongRoomCount);
+
+				UE_LOG(LogMonolithFloorPlan, Log,
+					TEXT("Floor plan from template '%s/%s': %d rooms, %d doors, grid=%dx%d, seed=%d, horror=%.2f"),
+					*ResolvedCategory, *ResolvedTemplate,
+					TemplateRooms.Num(), TemplateDoors.Num(), TemplateGridW, TemplateGridH, Seed, HorrorLevel);
+
+				return FMonolithActionResult::Success(ResultJson);
+			}
+			else
+			{
+				UE_LOG(LogMonolithFloorPlan, Warning, TEXT("Template load failed: %s — falling back to treemap"), *TemplateError);
+			}
+		}
+		else if (!TemplateError.IsEmpty())
+		{
+			UE_LOG(LogMonolithFloorPlan, Log, TEXT("Template selection: %s — falling back to treemap"), *TemplateError);
+		}
+	}
+
+	// ==== TREEMAP FALLBACK (existing code) ====
+
 	// ---- Load archetype ----
 	FBuildingArchetype Archetype;
 	FString LoadError;
@@ -2741,10 +3521,13 @@ FMonolithActionResult FMonolithMeshFloorPlanGenerator::GenerateFloorPlan(const T
 	int32 GridW = FMath::Max(2, FMath::RoundToInt32(static_cast<float>(FootprintW) / CellSize));
 	int32 GridH = FMath::Max(2, FMath::RoundToInt32(static_cast<float>(FootprintH) / CellSize));
 
-	// ---- Validate footprint capacity ----
+	// ---- Validate footprint capacity (warn, don't fail — do our best with available space) ----
 	FString CapacityError = ValidateFootprintCapacity(Archetype, GridW, GridH, FloorIndex);
 	if (!CapacityError.IsEmpty())
-		return FMonolithActionResult::Error(CapacityError);
+	{
+		UE_LOG(LogMonolithFloorPlan, Warning, TEXT("%s — will generate with reduced room set"), *CapacityError);
+		// Don't return error — let ResolveRoomInstances drop optional rooms to fit
+	}
 
 	UE_LOG(LogMonolithFloorPlan, Log, TEXT("Generating floor plan: archetype=%s, grid=%dx%d, cell=%.0f, seed=%d, hospice=%d, floor=%d, circulation=%d"),
 		*Archetype.Name, GridW, GridH, CellSize, Seed, bHospiceMode ? 1 : 0, FloorIndex, static_cast<int32>(Archetype.Circulation));
@@ -2872,6 +3655,7 @@ FMonolithActionResult FMonolithMeshFloorPlanGenerator::GenerateFloorPlan(const T
 	ResultJson->SetNumberField(TEXT("seed"), Seed);
 	ResultJson->SetNumberField(TEXT("floor_index"), FloorIndex);
 	ResultJson->SetNumberField(TEXT("floor_height"), Archetype.FloorHeight);
+	ResultJson->SetBoolField(TEXT("from_template"), false);
 
 	// ---- WP-2: Add intelligence stats to output ----
 	auto StatsObj = ResultJson->GetObjectField(TEXT("stats"));

@@ -175,8 +175,39 @@ public:
 	/** Get the archetype directory path */
 	static FString GetArchetypeDirectory();
 
+	/** Get the floor plan template directory path */
+	static FString GetTemplateDirectory();
+
 	/** Load an archetype from a JSON file (public for CityBlock orchestrator) */
 	static bool LoadArchetype(const FString& ArchetypeName, FBuildingArchetype& OutArchetype, FString& OutError);
+
+	// ---- Template system (WP-A) ----
+
+	/** Load a floor plan template JSON from disk.
+	 *  Reconstructs FRoomDef::GridCells by scanning the grid (R1-C1: grid is source of truth).
+	 *  Validates door edge coordinates: EdgeStart.X == EdgeEnd.X || EdgeStart.Y == EdgeEnd.Y. */
+	static bool LoadFloorPlanTemplate(const FString& TemplateName, const FString& Category,
+		TArray<TArray<int32>>& OutGrid, int32& OutGridW, int32& OutGridH,
+		TArray<FRoomDef>& OutRooms, TArray<FDoorDef>& OutDoors,
+		TArray<FStairwellDef>& OutStairwells, FString& OutError);
+
+	/** Select a template from the given category that fits the requested footprint.
+	 *  Returns template name (empty on failure). Weighted random from top candidates. */
+	static FString SelectTemplate(const FString& Category, float FootprintW, float FootprintH,
+		FRandomStream& Rng, FString& OutError);
+
+	/** Scale a template grid to fit a different footprint size.
+	 *  Uses nearest-neighbor cell scaling. Recomputes door positions and room cells.
+	 *  Post-scaling validation: corridors >= 3 cells wide, stairwells >= 4x6, entrance on exterior edge. */
+	static bool ScaleTemplateGrid(
+		TArray<TArray<int32>>& InOutGrid, int32& InOutGridW, int32& InOutGridH,
+		TArray<FRoomDef>& InOutRooms, TArray<FDoorDef>& InOutDoors,
+		TArray<FStairwellDef>& InOutStairwells,
+		int32 TargetGridW, int32 TargetGridH,
+		FString& OutError);
+
+	/** Map archetype name to template category */
+	static FString ArchetypeToTemplateCategory(const FString& ArchetypeName);
 
 private:
 	/** Parse a JSON object into an archetype struct */
