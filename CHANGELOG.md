@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+**MCP Auto-Reconnect Proxy**
+
+Claude Code has a known issue where HTTP MCP sessions die permanently when the Unreal Editor restarts — forcing you to restart Claude Code every time you recompile, crash, or close the editor. Monolith now ships with a **stdio-to-HTTP proxy** (`Scripts/monolith_proxy.py`) that eliminates this entirely.
+
+**Who it's for:** Claude Code users. Cursor and Cline handle reconnection natively and don't need this.
+
+**What it does:**
+- Keeps your MCP session alive across editor restarts — zero manual intervention
+- Background health poll auto-detects when the editor comes up or goes down
+- Sends `notifications/tools/list_changed` so Claude Code refreshes its tool list automatically
+- When the editor is down, tool calls return graceful errors instead of killing the session
+- When the editor comes back, the next tool call just works
+
+**How to use it:** Update your `.mcp.json` to use the proxy instead of direct HTTP:
+
+```json
+{
+  "mcpServers": {
+    "monolith": {
+      "command": "Plugins/Monolith/Scripts/monolith_proxy.bat",
+      "args": []
+    }
+  }
+}
+```
+
+Requires Python 3.8+ (stdlib only, no pip install). The `.bat` launcher auto-finds Python. No Python? The direct HTTP config still works — you'll just need to restart Claude Code after editor restarts.
+
+- `Scripts/monolith_proxy.py` — stdio-to-HTTP proxy (pure Python, zero dependencies)
+- `Scripts/monolith_proxy.bat` — Windows launcher that auto-detects Python
+- `Templates/.mcp.json.proxy.example` — ready-to-copy config template
+
 ## [0.10.0] - 2026-03-25
 
 Massive expansion across all modules: +153 actions (290 to 443). Niagara nearly doubles with 31 new actions and 10 bug fixes. Blueprint and Animation get major expansions. Material function suite rounds out the material pipeline.
