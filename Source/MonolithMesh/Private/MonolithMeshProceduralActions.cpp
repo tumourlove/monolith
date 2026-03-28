@@ -93,7 +93,8 @@ void FMonolithMeshProceduralActions::RegisterActions(FMonolithToolRegistry& Regi
 			.Optional(TEXT("floor_thickness"), TEXT("number"), TEXT("Floor/ceiling slab thickness in cm"), TEXT("3"))
 			.Optional(TEXT("has_ceiling"), TEXT("boolean"), TEXT("Include ceiling slab"), TEXT("true"))
 			.Optional(TEXT("has_floor"), TEXT("boolean"), TEXT("Include floor slab"), TEXT("true"))
-			.Optional(TEXT("openings"), TEXT("array"), TEXT("Array of opening specs: { wall: north|south|east|west, type: door|window, width, height, offset_x, offset_z }"))
+			.Optional(TEXT("openings"), TEXT("array"), TEXT("Array of opening specs: { wall: north|south|east|west, type: door|window|vent, width, height, offset_x, offset_z }"))
+			.Optional(TEXT("add_trim"), TEXT("boolean"), TEXT("Add doorframe/window/vent trim geometry around openings"), TEXT("true"))
 			.Optional(TEXT("wall_mode"), TEXT("string"), TEXT("Wall construction: sweep (thin walls) or box (legacy cubes)"), TEXT("sweep"))
 			.Optional(TEXT("handle"), TEXT("string"), TEXT("Save result to a mesh handle"))
 			.Optional(TEXT("save_path"), TEXT("string"), TEXT("Asset path to save as StaticMesh"))
@@ -1650,6 +1651,8 @@ FMonolithActionResult FMonolithMeshProceduralActions::CreateStructure(const TSha
 	bool bCeiling = Params->HasField(TEXT("has_ceiling")) ? Params->GetBoolField(TEXT("has_ceiling")) : true;
 	bool bFloor = Params->HasField(TEXT("has_floor")) ? Params->GetBoolField(TEXT("has_floor")) : true;
 
+	bool bAddTrim = Params->HasField(TEXT("add_trim")) ? Params->GetBoolField(TEXT("add_trim")) : true;
+
 	FString WallMode = TEXT("sweep");
 	Params->TryGetStringField(TEXT("wall_mode"), WallMode);
 	WallMode = WallMode.ToLower().TrimStartAndEnd();
@@ -1838,6 +1841,113 @@ FMonolithActionResult FMonolithMeshProceduralActions::CreateStructure(const TSha
 				Mesh, FTransform::Identity, OpenCutter, FTransform::Identity,
 				EGeometryScriptBooleanOperation::Subtract, BoolOpts);
 			bHadBooleans = true;
+
+			// Generate trim frame geometry around the opening
+			if (bAddTrim)
+			{
+				// Trim width: 5cm doors, 3cm windows, 2cm vents
+				const float TrimW = (OpenType == TEXT("vent")) ? 2.0f : (OpenType == TEXT("window")) ? 3.0f : 5.0f;
+				// Trim depth: slightly wider than wall so it protrudes on both sides
+				const float TrimD = WallT + 2.0f;
+				// Doors get U-frame (no sill), windows/vents get full frame (4 sides)
+				const bool bHasSill = (OpenType != TEXT("door"));
+
+				FGeometryScriptPrimitiveOptions TrimOpts;
+				TrimOpts.PolygroupMode = EGeometryScriptPrimitivePolygroupMode::PerFace;
+				TrimOpts.MaterialID = 2; // Trim material slot (walls=0, floor/ceiling=0, trim=2)
+
+				UDynamicMesh* TrimMesh = NewObject<UDynamicMesh>(Pool);
+
+				// Axis mapping per wall orientation:
+				// N/S walls run along X, trim depth along Y
+				// E/W walls run along Y, trim depth along X
+				if (Wall == TEXT("north") || Wall == TEXT("south"))
+				{
+					// Left jamb
+					FTransform LeftJambXf(FRotator::ZeroRotator,
+						FVector(CutPos.X - OpenW * 0.5f - TrimW * 0.5f, CutPos.Y, CutPos.Z),
+						FVector::OneVector);
+					UGeometryScriptLibrary_MeshPrimitiveFunctions::AppendBox(
+						TrimMesh, TrimOpts, LeftJambXf,
+						TrimW, TrimD, OpenH,
+						0, 0, 0, EGeometryScriptPrimitiveOriginMode::Base);
+
+					// Right jamb
+					FTransform RightJambXf(FRotator::ZeroRotator,
+						FVector(CutPos.X + OpenW * 0.5f + TrimW * 0.5f, CutPos.Y, CutPos.Z),
+						FVector::OneVector);
+					UGeometryScriptLibrary_MeshPrimitiveFunctions::AppendBox(
+						TrimMesh, TrimOpts, RightJambXf,
+						TrimW, TrimD, OpenH,
+						0, 0, 0, EGeometryScriptPrimitiveOriginMode::Base);
+
+					// Header (spans full width including both jambs)
+					FTransform HeaderXf(FRotator::ZeroRotator,
+						FVector(CutPos.X, CutPos.Y, CutPos.Z + OpenH),
+						FVector::OneVector);
+					UGeometryScriptLibrary_MeshPrimitiveFunctions::AppendBox(
+						TrimMesh, TrimOpts, HeaderXf,
+						OpenW + TrimW * 2.0f, TrimD, TrimW,
+						0, 0, 0, EGeometryScriptPrimitiveOriginMode::Base);
+
+					// Sill for windows/vents
+					if (bHasSill)
+					{
+						FTransform SillXf(FRotator::ZeroRotator,
+							FVector(CutPos.X, CutPos.Y, CutPos.Z - TrimW),
+							FVector::OneVector);
+						UGeometryScriptLibrary_MeshPrimitiveFunctions::AppendBox(
+							TrimMesh, TrimOpts, SillXf,
+							OpenW + TrimW * 2.0f, TrimD, TrimW,
+							0, 0, 0, EGeometryScriptPrimitiveOriginMode::Base);
+					}
+				}
+				else // east or west — walls run along Y, trim depth along X
+				{
+					// Left jamb (lower Y)
+					FTransform LeftJambXf(FRotator::ZeroRotator,
+						FVector(CutPos.X, CutPos.Y - OpenW * 0.5f - TrimW * 0.5f, CutPos.Z),
+						FVector::OneVector);
+					UGeometryScriptLibrary_MeshPrimitiveFunctions::AppendBox(
+						TrimMesh, TrimOpts, LeftJambXf,
+						TrimD, TrimW, OpenH,
+						0, 0, 0, EGeometryScriptPrimitiveOriginMode::Base);
+
+					// Right jamb (upper Y)
+					FTransform RightJambXf(FRotator::ZeroRotator,
+						FVector(CutPos.X, CutPos.Y + OpenW * 0.5f + TrimW * 0.5f, CutPos.Z),
+						FVector::OneVector);
+					UGeometryScriptLibrary_MeshPrimitiveFunctions::AppendBox(
+						TrimMesh, TrimOpts, RightJambXf,
+						TrimD, TrimW, OpenH,
+						0, 0, 0, EGeometryScriptPrimitiveOriginMode::Base);
+
+					// Header
+					FTransform HeaderXf(FRotator::ZeroRotator,
+						FVector(CutPos.X, CutPos.Y, CutPos.Z + OpenH),
+						FVector::OneVector);
+					UGeometryScriptLibrary_MeshPrimitiveFunctions::AppendBox(
+						TrimMesh, TrimOpts, HeaderXf,
+						TrimD, OpenW + TrimW * 2.0f, TrimW,
+						0, 0, 0, EGeometryScriptPrimitiveOriginMode::Base);
+
+					// Sill for windows/vents
+					if (bHasSill)
+					{
+						FTransform SillXf(FRotator::ZeroRotator,
+							FVector(CutPos.X, CutPos.Y, CutPos.Z - TrimW),
+							FVector::OneVector);
+						UGeometryScriptLibrary_MeshPrimitiveFunctions::AppendBox(
+							TrimMesh, TrimOpts, SillXf,
+							TrimD, OpenW + TrimW * 2.0f, TrimW,
+							0, 0, 0, EGeometryScriptPrimitiveOriginMode::Base);
+					}
+				}
+
+				// Append trim onto main mesh
+				UGeometryScriptLibrary_MeshBasicEditFunctions::AppendMesh(
+					Mesh, TrimMesh, FTransform::Identity);
+			}
 		}
 	}
 
@@ -1860,6 +1970,7 @@ FMonolithActionResult FMonolithMeshProceduralActions::CreateStructure(const TSha
 	Result->SetStringField(TEXT("wall_mode"), WallMode);
 	Result->SetNumberField(TEXT("triangle_count"), TriCount);
 	Result->SetBoolField(TEXT("had_booleans"), bHadBooleans);
+	Result->SetBoolField(TEXT("add_trim"), bAddTrim);
 
 	FString FinalErr = FinalizeProceduralMesh(Mesh, Params, Result, TEXT("structure"));
 	if (!FinalErr.IsEmpty())
