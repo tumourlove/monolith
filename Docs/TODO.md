@@ -163,8 +163,8 @@ Tech Art:
 - [ ] `generate_scare_sequence` — procedural scare events with variety + escalation
 - [ ] `analyze_framing` — camera composition scoring (leading lines, focal points)
 - [ ] `evaluate_monster_reveal` — score reveal quality: silhouette, backlight, distance, partial visibility
-- [ ] `validate_horror_intensity` — cap tension for hospice mode, remove jump scares
-- [ ] `generate_hospice_report` — full level audit: intensity caps, rest spacing, cognitive load, one-handed play
+- [ ] `validate_horror_intensity` — cap tension for accessibility mode, remove jump scares
+- [ ] `generate_hospice_report` — full level audit: intensity caps, rest spacing, cognitive load, one-handed playability
 
 **P3 — Quality of life + future (~10 actions)**
 

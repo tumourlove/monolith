@@ -240,7 +240,7 @@ Templates are preset configurations accessible via `*_from_template` and `scaffo
 
 5. **GBA conditional** — Gameplay Blueprint Attributes (GBA) plugin allows Blueprint-only attribute sets. Check if installed before recommending C++-only attribute workflows.
 
-6. **Hospice accessibility** — This project serves hospice patients. When scaffolding abilities, consider infinite-duration GEs for accessibility modes (e.g., invulnerability, infinite stamina, reduced horror). The horror templates include these by default.
+6. **Accessibility modes** — When scaffolding abilities, consider infinite-duration GEs for accessibility modes (e.g., invulnerability, infinite stamina, reduced horror intensity). The horror templates include these by default.
 
 ## Common Workflows
 
@@ -329,7 +329,7 @@ gas_query({ action: "scaffold_damage_pipeline", params: {
 ## Tips
 
 - **Always validate** after creating or modifying GAS assets — the validation actions catch common mistakes early.
-- **Use templates** for this project's genre — the horror templates include accessibility features for hospice patients.
+- **Use templates** for this project's genre — the horror templates include accessibility features for players with accessibility needs.
 - **GE Components** are the modern way — avoid setting legacy GE fields directly on 5.3+.
 - **Batch operations** (`batch_create_abilities`, `batch_create_effects`, `batch_create_cues`) save round-trips when scaffolding.
 - **Runtime actions** (get/set attribute values, apply/remove effects, grant/revoke abilities) only work during PIE.

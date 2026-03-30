@@ -1,11 +1,11 @@
 ---
 name: unreal-mesh
-description: Use when working with Unreal Engine meshes, scene spatial queries, level blockout, actor manipulation, 3D awareness, horror spatial analysis, accessibility validation, GeometryScript mesh operations, lighting analysis, audio/acoustics, performance budgeting, decal/detail placement, level design (lights, volumes, sublevels, prefabs), tech art (import, LOD, texel density, collision), context-aware prop placement (surface scatter, disturbance, physics sleep), procedural geometry (furniture, structures, mazes, pipes, terrain), procedural town generation (buildings, facades, roofs, streets, city blocks, floor plans, spatial registry, foundations, balconies, fire escapes, room furnishing, debug views, validation), genre presets, encounter design, or hospice accessibility reports via Monolith MCP. Triggers on mesh, StaticMesh, SkeletalMesh, blockout, spatial, raycast, overlap, scene, actor, spawn, LOD, collision, UV, triangle, bounds, scan volume, scatter, navmesh, sightline, hiding, horror, tension, accessibility, wheelchair, lighting, dark, audio, acoustic, surface, footstep, reverb, performance, budget, draw call, decal, blood trail, light, volume, trigger, sublevel, prefab, spline, import, texel, instancing, HISM, material swap, parametric, structure, maze, pipe, terrain, fragment, preset, encounter, patrol, safe room, hospice report, prop kit, disturbance, town, city, block, building, facade, roof, street, floor plan, archetype, lot, foundation, balcony, porch, fire escape, ramp, railing, furnish, furniture, bookmark, section view, validate building.
+description: Use when working with Unreal Engine meshes, scene spatial queries, level blockout, actor manipulation, 3D awareness, horror spatial analysis, accessibility validation, GeometryScript mesh operations, lighting analysis, audio/acoustics, performance budgeting, decal/detail placement, level design (lights, volumes, sublevels, prefabs), tech art (import, LOD, texel density, collision), context-aware prop placement (surface scatter, disturbance, physics sleep), procedural geometry (furniture, structures, mazes, pipes, terrain), procedural town generation (buildings, facades, roofs, streets, city blocks, floor plans, spatial registry, foundations, balconies, fire escapes, room furnishing, debug views, validation), genre presets, encounter design, or accessibility reports via Monolith MCP. Triggers on mesh, StaticMesh, SkeletalMesh, blockout, spatial, raycast, overlap, scene, actor, spawn, LOD, collision, UV, triangle, bounds, scan volume, scatter, navmesh, sightline, hiding, horror, tension, accessibility, wheelchair, lighting, dark, audio, acoustic, surface, footstep, reverb, performance, budget, draw call, decal, blood trail, light, volume, trigger, sublevel, prefab, spline, import, texel, instancing, HISM, material swap, parametric, structure, maze, pipe, terrain, fragment, preset, encounter, patrol, safe room, accessibility report, prop kit, disturbance, town, city, block, building, facade, roof, street, floor plan, archetype, lot, foundation, balcony, porch, fire escape, ramp, railing, furnish, furniture, bookmark, section view, validate building.
 ---
 
 # Unreal Mesh & Spatial Workflows
 
-You have access to **Monolith** with **242 Mesh actions** (197 core + 45 experimental town gen) via `mesh_query()`. Town gen actions require `bEnableProceduralTownGen = true` in Editor Preferences (disabled by default — known geometry issues).
+You have access to **Monolith** with **242 Mesh actions** (197 core + 45 experimental town gen) via `mesh_query()`. Town gen actions require `bEnableProceduralTownGen = true` in Editor Preferences (disabled by default — work-in-progress with known geometry issues; unless you're willing to dig in and help improve it, best left alone for now).
 
 ### New in Overhaul (5 new actions + major feature upgrades):
 - `create_blueprint_prefab` -- Dialog-free Blueprint prefab from world actors
@@ -156,7 +156,7 @@ monolith_discover({ namespace: "mesh" })
 | `compute_uvs` | `handle`, `method` | Auto-unwrap/box/planar/cylinder projection |
 | `mirror_mesh` | `handle`, `axis` | Mirror across X/Y/Z |
 
-### Horror Spatial Analysis (8 actions)
+### Horror Spatial Analysis (8 actions) — *Work-in-progress: functional but still being refined*
 
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
@@ -169,7 +169,7 @@ monolith_discover({ namespace: "mesh" })
 | `analyze_pacing_curve` | `path_points` | Tension along path, scare point detection |
 | `find_dead_ends` | `region_min/max`? | Navmesh flood-fill for single-exit regions |
 
-### Accessibility Analysis (6 actions) -- Serves the hospice mission
+### Accessibility Analysis (6 actions) -- Accessibility validation
 
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
@@ -180,7 +180,7 @@ monolith_discover({ namespace: "mesh" })
 | `validate_interactive_reach` | `region`, `tags`? | Height/distance/obstruction checks |
 | `generate_accessibility_report` | `start`, `end`, `profile`? | Motor/vision/cognitive profile, A-F grade |
 
-### Lighting Analysis (5 actions) -- Hybrid scene capture + analytic
+### Lighting Analysis (5 actions) -- Hybrid scene capture + analytic — *Work-in-progress: functional but still being refined*
 
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
@@ -190,7 +190,7 @@ monolith_discover({ namespace: "mesh" })
 | `get_light_coverage` | `volume_name` | % lit/shadow/dark, light inventory, histogram |
 | `suggest_light_placement` | `volume_name`, `mood`? | Inverse-square placement for horror_dim/safe_room/clinical |
 
-### Audio & Acoustics (14 actions) -- Physical material-aware spatial audio
+### Audio & Acoustics (14 actions) -- Physical material-aware spatial audio — *Work-in-progress: functional but still being refined*
 
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
@@ -209,7 +209,7 @@ monolith_discover({ namespace: "mesh" })
 | `set_surface_type` | `actor_name`, `surface_type` | Set physical material surface override |
 | `create_surface_datatable` | `template`? | Bootstrap acoustic system (12 horror surfaces) |
 
-### Performance Analysis (5 actions) -- Budget-aware placement
+### Performance Analysis (5 actions) -- Budget-aware placement — *Work-in-progress: functional but still being refined*
 
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
@@ -394,7 +394,7 @@ Generates entire city blocks from archetype definitions through a layered pipeli
 | `create_balcony` | `location`, `size`?, `railing_style`?, `building_context`? | Floor slab + railing. Optional `building_context` for auto-orientation; emits `wall_openings` in result |
 | `create_porch` | `location`, `size`?, `columns`?, `building_context`? | Covered entry with columns. Optional `building_context` for auto-orientation; emits `wall_openings` in result |
 | `create_fire_escape` | `building_id`?, `floors`?, `building_context`? | Zigzag exterior stairs. Optional `building_context` for auto-orientation; emits `wall_openings` in result |
-| `create_ramp_connector` | `start`, `end`, `width`?, `building_context`? | ADA-compliant ramp (hospice accessibility). Optional `building_context` for auto-orientation; emits `wall_openings` in result |
+| `create_ramp_connector` | `start`, `end`, `width`?, `building_context`? | ADA-compliant ramp (wheelchair accessibility). Optional `building_context` for auto-orientation; emits `wall_openings` in result |
 | `create_railing` | `path_points`, `style`?, `building_context`? | Railing along arbitrary path. Optional `building_context` for auto-orientation; emits `wall_openings` in result |
 
 #### SP9: Daredevil Debug View (6 actions)
@@ -432,17 +432,17 @@ Generates entire city blocks from archetype definitions through a layered pipeli
 | `list_genre_presets` | -- | Browse available preset packs |
 | `export/import_genre_preset` | `path`, `merge_mode`? | Bundle/load full preset packs |
 
-### Encounter Design (8 actions) -- Horror advanced + hospice
+### Encounter Design (8 actions) -- Horror advanced + accessibility
 
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
 | `design_encounter` | `region`, `archetype`? | Capstone: spawn+patrol+exits+sightlines composed |
 | `suggest_patrol_route` | `path_points`, `archetype` | Stalker/patrol/ambusher navmesh routes |
 | `analyze_ai_territory` | `region` | Hiding/patrol/ambush heatmap |
-| `evaluate_safe_room` | `volume_name` | Defensibility + hospice amenity scoring |
+| `evaluate_safe_room` | `volume_name` | Defensibility + accessibility amenity scoring |
 | `analyze_level_pacing_structure` | `path_points` | Macro tension->release mapping |
 | `generate_scare_sequence` | `path_points`, `style`? | 4 styles: slow_burn/escalating/relentless/single_peak |
-| `validate_horror_intensity` | `path_points` | Hospice intensity cap audit |
+| `validate_horror_intensity` | `path_points` | Accessibility intensity cap audit |
 | `generate_hospice_report` | `start`, `end`, `profile`? | 5-section accessibility audit, A-F grade |
 
 ### Quality & Polish (9 actions)

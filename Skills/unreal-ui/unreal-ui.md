@@ -157,7 +157,7 @@ monolith_discover({ namespace: "ui" })
 - **No minimap** — navigation uncertainty = horror
 - **Short interaction trace** — player must get close to see prompts
 
-## Accessibility (Critical — hospice patients)
+## Accessibility (Critical — players with accessibility needs)
 
 - **Atkinson Hyperlegible** font at `Content/UI/Fonts/Atkinson/` — designed for low vision
 - Minimum font size: 18pt body, 22pt subtitles

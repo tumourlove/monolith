@@ -2941,13 +2941,13 @@ Use `monolith_discover("ui")` for the complete action list with parameter schema
 
 ## mesh
 
-Mesh inspection, scene manipulation, spatial queries, level blockout, GeometryScript operations, horror/accessibility features, lighting, audio/acoustics, performance, decals, level design, tech art, context-aware props, procedural geometry, blueprint prefabs, genre presets, encounter design, and hospice reports. **242 actions total** (197 core + 45 experimental town gen).
+Mesh inspection, scene manipulation, spatial queries, level blockout, GeometryScript operations, horror/accessibility features, lighting, audio/acoustics, performance, decals, level design, tech art, context-aware props, procedural geometry, blueprint prefabs, genre presets, encounter design, and accessibility reports. **242 actions total** (197 core + 45 experimental town gen).
 
 > **New in v0.11.0.** For full param schemas, call `monolith_discover("mesh")` at runtime.
 
 The mesh module is the largest in Monolith, covering the full level authoring pipeline from blockout primitives to furnished interiors. Core actions (197) are always registered. The 45 experimental Procedural Town Generator actions (floor plans, facades, roofs, city blocks, spatial registry, terrain adaptation, room furnishing, debug views) are disabled by default via `bEnableProceduralTownGen` in Editor Preferences — known geometry issues with wall alignment and room separation.
 
-**Action categories (core):** mesh inspection, primitive creation, batch operations, import/export, scene hierarchy, spatial queries, level blockout, GeometryScript ops, lighting (point/spot/rect/sky/HDRI), audio/acoustics (emitters, attenuation, reverb, occlusion), performance (HLOD, Nanite, LOD, draw call), decals, level design (volumes, sublevels, streaming), tech art (import, LOD config, texel density, collision), context-aware props (surface scatter, disturbance, physics), procedural geometry (parametric furniture, structures, mazes, terrain, sweep walls, auto-collision, proc mesh caching), blueprint prefabs, genre presets (horror, survival), encounter design, hospice accessibility reports.
+**Action categories (core):** mesh inspection, primitive creation, batch operations, import/export, scene hierarchy, spatial queries, level blockout, GeometryScript ops, lighting (point/spot/rect/sky/HDRI), audio/acoustics (emitters, attenuation, reverb, occlusion), performance (HLOD, Nanite, LOD, draw call), decals, level design (volumes, sublevels, streaming), tech art (import, LOD config, texel density, collision), context-aware props (surface scatter, disturbance, physics), procedural geometry (parametric furniture, structures, mazes, terrain, sweep walls, auto-collision, proc mesh caching), blueprint prefabs, genre presets (horror, survival), encounter design, accessibility reports.
 
 **Action categories (experimental town gen):** `generate_floor_plan`, `create_building_from_grid`, `generate_facade`, `generate_roof`, `create_city_block`, `register_building`, `query_spatial_registry`, `create_auto_volumes`, `adapt_terrain`, `generate_arch_features`, `furnish_room`, `validate_building`, debug views, and more.
 

@@ -126,7 +126,7 @@ All 12 modules tested. Total plugin: 815 actions (770 active by default + 45 exp
 
 | Action | Status | Test Plan | Notes |
 |--------|--------|-----------|-------|
-| `generate_floor_plan` | **UNTESTED** | Generate "residential_house" floor plan at 800x600. Verify: kitchen connects to dining, bathroom off hallway (not through bedroom), bedrooms upstairs (per-floor assignment), ALL rooms reachable via hallway or direct adjacency. Verify corridor width >= 120cm, door width >= 90cm, at least one exterior entrance on ground floor, no room aspect ratio worse than 1:4, rooms within footprint bounds. Test hospice_mode: min 100cm doors, 180cm corridors | Core algorithm: squarified treemap + corridor insertion. Fix Plan v2: corridor width min, door width min, per-floor assignment, aspect ratios, footprint validation, guaranteed exterior entrance |
+| `generate_floor_plan` | **UNTESTED** | Generate "residential_house" floor plan at 800x600. Verify: kitchen connects to dining, bathroom off hallway (not through bedroom), bedrooms upstairs (per-floor assignment), ALL rooms reachable via hallway or direct adjacency. Verify corridor width >= 120cm, door width >= 90cm, at least one exterior entrance on ground floor, no room aspect ratio worse than 1:4, rooms within footprint bounds. Test `hospice_mode` param: min 100cm doors, 180cm corridors | Core algorithm: squarified treemap + corridor insertion. Fix Plan v2: corridor width min, door width min, per-floor assignment, aspect ratios, footprint validation, guaranteed exterior entrance |
 | `list_building_archetypes` | **UNTESTED** | Call with no params, verify returns archetype list from BuildingArchetypes/ | Read-only, should be straightforward |
 | `get_building_archetype` | **UNTESTED** | Get "residential_house" archetype, verify JSON contains room types, sizes, adjacency requirements | Read-only |
 
@@ -182,7 +182,7 @@ All 12 modules tested. Total plugin: 815 actions (770 active by default + 45 exp
 |--------|--------|-----------|-------|
 | `sample_terrain_grid` | **UNTESTED** | Sample height grid over a sloped landscape. Verify NxM array of heights returned | Downward trace sampling |
 | `analyze_building_site` | **UNTESTED** | Analyze a 15-degree slope site. Verify recommended strategy (should be Stepped for 10-25 degrees) | Strategy selection logic |
-| `create_foundation` | **UNTESTED** | Create foundation on a slope. Verify geometry adapts, no floating sections. Test hospice_mode: ADA ramp (1:12 slope) | Foundation geometry generation |
+| `create_foundation` | **UNTESTED** | Create foundation on a slope. Verify geometry adapts, no floating sections. Test `hospice_mode` param: ADA ramp (1:12 slope) | Foundation geometry generation |
 | `create_retaining_wall` | **UNTESTED** | Create retaining wall along a path with height variation. Verify wall follows terrain contour | Terrain-following geometry |
 | `place_building_on_terrain` | **UNTESTED** | Place building on 15-degree slope. Verify: foundation adapts, front steps or ramp generated, no floating geometry | Full terrain adaptation pipeline |
 
