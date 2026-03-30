@@ -906,8 +906,12 @@ void UMonolithIndexSubsystem::OnIndexingFinished(bool bSuccess)
 
 FString UMonolithIndexSubsystem::GetDatabasePath() const
 {
-	FString PluginDir = FPaths::ProjectPluginsDir() / TEXT("Monolith") / TEXT("Saved");
-	return PluginDir / TEXT("ProjectIndex.db");
+	TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("Monolith"));
+	if (Plugin.IsValid())
+	{
+		return Plugin->GetBaseDir() / TEXT("Saved") / TEXT("ProjectIndex.db");
+	}
+	return FPaths::ProjectPluginsDir() / TEXT("Monolith") / TEXT("Saved") / TEXT("ProjectIndex.db");
 }
 
 bool UMonolithIndexSubsystem::ShouldAutoIndex() const

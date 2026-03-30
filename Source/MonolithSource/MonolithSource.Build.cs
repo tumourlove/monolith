@@ -22,7 +22,8 @@ public class MonolithSource : ModuleRules
 			"Json",
 			"JsonUtilities",
 			"Slate",
-			"SlateCore"
+			"SlateCore",
+			"Projects"
 		});
 	}
 }

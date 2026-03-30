@@ -5,6 +5,7 @@
 #include "Misc/Paths.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "Interfaces/IPluginManager.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogMonolithQuery, Log, All);
 
@@ -92,11 +93,21 @@ TArray<FString> UMonolithQueryCommandlet::ParseOptions(const TArray<FString>& Ra
 
 FString UMonolithQueryCommandlet::GetSourceDbPath() const
 {
+	TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("Monolith"));
+	if (Plugin.IsValid())
+	{
+		return Plugin->GetBaseDir() / TEXT("Saved") / TEXT("EngineSource.db");
+	}
 	return FPaths::ProjectPluginsDir() / TEXT("Monolith") / TEXT("Saved") / TEXT("EngineSource.db");
 }
 
 FString UMonolithQueryCommandlet::GetProjectDbPath() const
 {
+	TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("Monolith"));
+	if (Plugin.IsValid())
+	{
+		return Plugin->GetBaseDir() / TEXT("Saved") / TEXT("ProjectIndex.db");
+	}
 	return FPaths::ProjectPluginsDir() / TEXT("Monolith") / TEXT("Saved") / TEXT("ProjectIndex.db");
 }
 

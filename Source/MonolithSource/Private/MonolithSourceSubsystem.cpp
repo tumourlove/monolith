@@ -4,6 +4,7 @@
 #include "Misc/Paths.h"
 #include "HAL/PlatformFileManager.h"
 #include "Async/Async.h"
+#include "Interfaces/IPluginManager.h"
 
 UMonolithSourceSubsystem::~UMonolithSourceSubsystem()
 {
@@ -179,6 +180,16 @@ FString UMonolithSourceSubsystem::GetDatabasePath() const
 	{
 		return Settings->EngineSourceDBPathOverride.Path / TEXT("EngineSource.db");
 	}
+
+	// Use the actual plugin directory so the DB lands next to the plugin regardless
+	// of where it is installed.
+	TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("Monolith"));
+	if (Plugin.IsValid())
+	{
+		return Plugin->GetBaseDir() / TEXT("Saved") / TEXT("EngineSource.db");
+	}
+
+	// Fallback — should not be reached when running inside the plugin itself
 	return FPaths::ProjectPluginsDir() / TEXT("Monolith") / TEXT("Saved") / TEXT("EngineSource.db");
 }
 

@@ -35,7 +35,8 @@ public class MonolithEditor : ModuleRules
 			"AssetTools",
 			"EditorScriptingUtilities",
 			"AdvancedPreviewScene",
-			"ImageCore"
+			"ImageCore",
+			"Projects"
 		});
 
 		if (Target.Platform == UnrealTargetPlatform.Win64)

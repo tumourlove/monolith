@@ -6,6 +6,7 @@
 #include "MonolithCoreTools.h"
 #include "Misc/FileHelper.h"
 #include "GenericPlatform/GenericPlatformProcess.h"
+#include "Interfaces/IPluginManager.h"
 
 #define LOCTEXT_NAMESPACE "FMonolithCoreModule"
 
@@ -53,6 +54,11 @@ void FMonolithCoreModule::RegisterCoreTools()
 
 FString FMonolithCoreModule::GetSentinelFilePath() const
 {
+	TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("Monolith"));
+	if (Plugin.IsValid())
+	{
+		return Plugin->GetBaseDir() / TEXT("Saved") / TEXT(".monolith_running");
+	}
 	return FPaths::Combine(FPaths::ProjectPluginsDir(), TEXT("Monolith"), TEXT("Saved"), TEXT(".monolith_running"));
 }
 
