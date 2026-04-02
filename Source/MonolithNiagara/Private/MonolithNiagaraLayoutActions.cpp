@@ -46,7 +46,7 @@ void FMonolithNiagaraLayoutActions::RegisterActions(FMonolithToolRegistry& Regis
 namespace
 {
 	/** Normalize asset_path with common alias fallback */
-	FString GetAssetPath(const TSharedPtr<FJsonObject>& Params)
+	FString NL_GetAssetPath(const TSharedPtr<FJsonObject>& Params)
 	{
 		FString Path = Params->GetStringField(TEXT("asset_path"));
 		if (Path.IsEmpty()) Path = Params->GetStringField(TEXT("system_path"));
@@ -190,7 +190,7 @@ namespace
 FMonolithActionResult FMonolithNiagaraLayoutActions::HandleAutoLayout(const TSharedPtr<FJsonObject>& Params)
 {
 	// --- Parse params ---
-	FString AssetPath = GetAssetPath(Params);
+	FString AssetPath = NL_GetAssetPath(Params);
 	if (AssetPath.IsEmpty())
 	{
 		return FMonolithActionResult::Error(TEXT("Missing required param 'asset_path'"));

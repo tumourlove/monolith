@@ -1,4 +1,5 @@
 #include "MonolithComboGraphActions.h"
+#include "MonolithComboGraphModule.h"
 #include "MonolithParamSchema.h"
 // NO ComboGraph includes — all property access via reflection
 
@@ -23,8 +24,6 @@
 #include "EditorAssetLibrary.h"
 #include "GameplayTagContainer.h"
 #include "Abilities/GameplayAbility.h"
-
-DEFINE_LOG_CATEGORY_STATIC(LogMonolithComboGraph, Log, All);
 
 // ============================================================
 //  Anonymous helpers
@@ -2227,8 +2226,6 @@ FMonolithActionResult FMonolithComboGraphActions::HandleLayoutComboGraph(const T
 }
 
 #else // !WITH_COMBOGRAPH
-
-DEFINE_LOG_CATEGORY_STATIC(LogMonolithComboGraph, Log, All);
 
 void FMonolithComboGraphActions::RegisterActions(FMonolithToolRegistry& Registry)
 {

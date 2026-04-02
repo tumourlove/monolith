@@ -3,7 +3,6 @@
 #include "MonolithSettings.h"
 #include "MonolithComboGraphActions.h"
 
-DECLARE_LOG_CATEGORY_EXTERN(LogMonolithComboGraph, Log, All);
 DEFINE_LOG_CATEGORY(LogMonolithComboGraph);
 
 void FMonolithComboGraphModule::StartupModule()

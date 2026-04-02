@@ -31,13 +31,13 @@
 
 namespace
 {
-	TArray<TSharedPtr<FJsonValue>> VecToArr(const FVector& V)
+	TArray<TSharedPtr<FJsonValue>> MAud_VecToArr(const FVector& V)
 	{
 		return MonolithMeshAnalysis::VectorToJsonArray(V);
 	}
 
 	/** Parse an array of [x,y,z] arrays from a JSON field */
-	bool ParseVectorArray(const TSharedPtr<FJsonObject>& Params, const FString& Key, TArray<FVector>& Out)
+	bool MAud_ParseVectorArray(const TSharedPtr<FJsonObject>& Params, const FString& Key, TArray<FVector>& Out)
 	{
 		const TArray<TSharedPtr<FJsonValue>>* Arr;
 		if (!Params->TryGetArrayField(Key, Arr) || Arr->Num() == 0)
@@ -365,8 +365,8 @@ FMonolithActionResult FMonolithMeshAudioActions::GetAudioVolumes(const TSharedPt
 		// Bounds
 		FVector Origin, Extent;
 		AV->GetActorBounds(false, Origin, Extent);
-		VolObj->SetArrayField(TEXT("center"), VecToArr(Origin));
-		VolObj->SetArrayField(TEXT("extent"), VecToArr(Extent * 2.0));
+		VolObj->SetArrayField(TEXT("center"), MAud_VecToArr(Origin));
+		VolObj->SetArrayField(TEXT("extent"), MAud_VecToArr(Extent * 2.0));
 
 		if (bIncludeDetails)
 		{
@@ -569,7 +569,7 @@ FMonolithActionResult FMonolithMeshAudioActions::EstimateFootstepSound(const TSh
 
 	if (Hit.bBlockingHit)
 	{
-		Result->SetArrayField(TEXT("floor_hit"), VecToArr(Hit.ImpactPoint));
+		Result->SetArrayField(TEXT("floor_hit"), MAud_VecToArr(Hit.ImpactPoint));
 		if (Hit.GetActor())
 		{
 			Result->SetStringField(TEXT("floor_actor"), Hit.GetActor()->GetActorNameOrLabel());
@@ -959,7 +959,7 @@ FMonolithActionResult FMonolithMeshAudioActions::FindLoudSurfaces(const TSharedP
 	for (const FLoudSpot& Spot : LoudSpots)
 	{
 		auto SpotObj = MakeShared<FJsonObject>();
-		SpotObj->SetArrayField(TEXT("location"), VecToArr(Spot.Location));
+		SpotObj->SetArrayField(TEXT("location"), MAud_VecToArr(Spot.Location));
 		SpotObj->SetStringField(TEXT("surface"), Spot.Surface);
 		SpotObj->SetNumberField(TEXT("loudness"), Spot.Loudness);
 		// Detection radius estimate: loudness * base_hearing_range
@@ -1017,7 +1017,7 @@ FMonolithActionResult FMonolithMeshAudioActions::FindSoundPaths(const TSharedPtr
 		TArray<TSharedPtr<FJsonValue>> PointsArr;
 		for (const FVector& Pt : Path.Points)
 		{
-			PointsArr.Add(MakeShared<FJsonValueArray>(VecToArr(Pt)));
+			PointsArr.Add(MakeShared<FJsonValueArray>(MAud_VecToArr(Pt)));
 		}
 		PathObj->SetArrayField(TEXT("points"), PointsArr);
 
@@ -1048,7 +1048,7 @@ FMonolithActionResult FMonolithMeshAudioActions::FindSoundPaths(const TSharedPtr
 		TArray<TSharedPtr<FJsonValue>> IndirectPointsArr;
 		for (const FVector& Pt : IndirectResult.PathPoints)
 		{
-			IndirectPointsArr.Add(MakeShared<FJsonValueArray>(VecToArr(Pt)));
+			IndirectPointsArr.Add(MakeShared<FJsonValueArray>(MAud_VecToArr(Pt)));
 		}
 		IndirectObj->SetArrayField(TEXT("points"), IndirectPointsArr);
 
@@ -1326,7 +1326,7 @@ FMonolithActionResult FMonolithMeshAudioActions::GetStealthMap(const TSharedPtr<
 				float DetectionRadius = AiHearingRange * Props.FootstepLoudness;
 
 				auto CellObj = MakeShared<FJsonObject>();
-				CellObj->SetArrayField(TEXT("position"), VecToArr(FVector(X, Y, Hit.ImpactPoint.Z)));
+				CellObj->SetArrayField(TEXT("position"), MAud_VecToArr(FVector(X, Y, Hit.ImpactPoint.Z)));
 				CellObj->SetStringField(TEXT("surface"), Props.SurfaceName);
 				CellObj->SetNumberField(TEXT("loudness"), Props.FootstepLoudness);
 				CellObj->SetNumberField(TEXT("detection_radius_cm"), DetectionRadius);
@@ -1420,7 +1420,7 @@ FMonolithActionResult FMonolithMeshAudioActions::FindQuietPath(const TSharedPtr<
 	for (const FVector& Pt : MainPath)
 	{
 		auto PtObj = MakeShared<FJsonObject>();
-		PtObj->SetArrayField(TEXT("position"), VecToArr(Pt));
+		PtObj->SetArrayField(TEXT("position"), MAud_VecToArr(Pt));
 
 		FHitResult Hit;
 		FVector TraceStart = Pt + FVector(0, 0, 50);
@@ -1643,7 +1643,7 @@ FMonolithActionResult FMonolithMeshAudioActions::CreateAudioVolume(const TShared
 
 	auto Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("actor_name"), AudioVol->GetActorNameOrLabel());
-	Result->SetArrayField(TEXT("location"), VecToArr(AudioVol->GetActorLocation()));
+	Result->SetArrayField(TEXT("location"), MAud_VecToArr(AudioVol->GetActorLocation()));
 	Result->SetNumberField(TEXT("priority"), Priority);
 	Result->SetStringField(TEXT("matched_volume"), VolumeName);
 
