@@ -14,6 +14,7 @@
 #endif
 
 // Capture action includes
+#include "ProceduralMeshComponent.h"
 #include "Components/SceneCaptureComponent2D.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "AdvancedPreviewScene.h"
@@ -383,6 +384,7 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.Optional(TEXT("resolution"), TEXT("array"), TEXT("[width, height]"), TEXT("[512,512]"))
 			.Optional(TEXT("output_dir"), TEXT("string"), TEXT("Output directory for frame PNGs"))
 			.Optional(TEXT("filename_prefix"), TEXT("string"), TEXT("Prefix for frame files"), TEXT("frame"))
+			.Optional(TEXT("persistent"), TEXT("bool"), TEXT("Use persistent component (preserves ribbons/accumulation). Default: false (per-frame recreate)."))
 			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("import_texture"),
@@ -419,6 +421,18 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 		TEXT("Get current editor viewport camera position, rotation, FOV, and resolution"),
 		FMonolithActionHandler::CreateStatic(&HandleGetViewportInfo),
 		MakeShared<FJsonObject>());
+
+	Registry.RegisterAction(TEXT("editor"), TEXT("capture_system_gif"),
+		TEXT("Capture a Niagara system as a sequence of PNG frames with optional GIF encoding via ffmpeg or python"),
+		FMonolithActionHandler::CreateStatic(&HandleCaptureSystemGif),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Optional(TEXT("duration_seconds"), TEXT("number"), TEXT("Capture duration in seconds (default: 2.0)"))
+			.Optional(TEXT("fps"), TEXT("integer"), TEXT("Frames per second (default: 15)"))
+			.Optional(TEXT("resolution"), TEXT("integer"), TEXT("Output resolution width/height in pixels (default: 256)"))
+			.Optional(TEXT("output_path"), TEXT("string"), TEXT("Output directory (default: Saved/Screenshots/Monolith/GIF_<timestamp>)"))
+			.Optional(TEXT("encoder"), TEXT("string"), TEXT("frames_only (default), ffmpeg, or python — opt-in GIF encoding"))
+			.Build());
 
 	InitLiveCodingDelegate();
 }
@@ -1101,7 +1115,9 @@ bool FMonolithEditorActions::CaptureMaterialFrame(
 	float FOV,
 	int32 ResX, int32 ResY,
 	const FString& OutputPath,
-	ESceneCaptureSource CaptureSource)
+	ESceneCaptureSource CaptureSource,
+	float UVTiling,
+	const FLinearColor& BackgroundColor)
 {
 	if (!Material)
 	{
@@ -1113,47 +1129,86 @@ bool FMonolithEditorActions::CaptureMaterialFrame(
 		MakeShareable(new FAdvancedPreviewScene(FPreviewScene::ConstructionValues()));
 	PreviewScene->SetFloorVisibility(false);
 
-	// Determine mesh to use
-	FString MeshPath;
-	if (MeshType.Equals(TEXT("sphere"), ESearchCase::IgnoreCase))
+	UPrimitiveComponent* SpawnedMeshComp = nullptr;
+
+	if (!FMath::IsNearlyEqual(UVTiling, 1.0f) && (MeshType.Equals(TEXT("plane"), ESearchCase::IgnoreCase) || MeshType.IsEmpty()))
 	{
-		MeshPath = TEXT("/Engine/BasicShapes/Sphere");
+		// Build a procedural quad with scaled UVs for tiling preview
+		UProceduralMeshComponent* ProcMeshComp = NewObject<UProceduralMeshComponent>(
+			GetTransientPackage(), NAME_None, RF_Transient);
+
+		const float HalfSize = 100.0f; // 200x200 cm quad
+		TArray<FVector> Vertices;
+		Vertices.Add(FVector(-HalfSize, -HalfSize, 0.0f));
+		Vertices.Add(FVector( HalfSize, -HalfSize, 0.0f));
+		Vertices.Add(FVector( HalfSize,  HalfSize, 0.0f));
+		Vertices.Add(FVector(-HalfSize,  HalfSize, 0.0f));
+
+		TArray<int32> Triangles = { 0, 1, 2, 0, 2, 3 };
+
+		TArray<FVector> Normals;
+		Normals.Init(FVector::UpVector, 4);
+
+		TArray<FVector2D> UV0;
+		UV0.Add(FVector2D(0.0f, 0.0f));
+		UV0.Add(FVector2D(UVTiling, 0.0f));
+		UV0.Add(FVector2D(UVTiling, UVTiling));
+		UV0.Add(FVector2D(0.0f, UVTiling));
+
+		TArray<FColor> VertexColors;
+		VertexColors.Init(FColor::White, 4);
+
+		TArray<FProcMeshTangent> Tangents;
+		Tangents.Init(FProcMeshTangent(1.0f, 0.0f, 0.0f), 4);
+
+		ProcMeshComp->CreateMeshSection(0, Vertices, Triangles, Normals, UV0, VertexColors, Tangents, false);
+		ProcMeshComp->SetMaterial(0, const_cast<UMaterialInterface*>(Material));
+		ProcMeshComp->SetRelativeScale3D(FVector(2.0f, 2.0f, 1.0f));
+		SpawnedMeshComp = ProcMeshComp;
 	}
-	else if (MeshType.Equals(TEXT("cube"), ESearchCase::IgnoreCase))
+	else
 	{
-		MeshPath = TEXT("/Engine/BasicShapes/Cube");
-	}
-	else if (MeshType.Equals(TEXT("cylinder"), ESearchCase::IgnoreCase))
-	{
-		MeshPath = TEXT("/Engine/BasicShapes/Cylinder");
-	}
-	else // default: plane
-	{
-		MeshPath = TEXT("/Engine/BasicShapes/Plane");
+		// Standard static mesh path
+		FString MeshPath;
+		if (MeshType.Equals(TEXT("sphere"), ESearchCase::IgnoreCase))
+		{
+			MeshPath = TEXT("/Engine/BasicShapes/Sphere");
+		}
+		else if (MeshType.Equals(TEXT("cube"), ESearchCase::IgnoreCase))
+		{
+			MeshPath = TEXT("/Engine/BasicShapes/Cube");
+		}
+		else if (MeshType.Equals(TEXT("cylinder"), ESearchCase::IgnoreCase))
+		{
+			MeshPath = TEXT("/Engine/BasicShapes/Cylinder");
+		}
+		else // default: plane
+		{
+			MeshPath = TEXT("/Engine/BasicShapes/Plane");
+		}
+
+		UStaticMesh* Mesh = LoadObject<UStaticMesh>(nullptr, *MeshPath);
+		if (!Mesh)
+		{
+			UE_LOG(LogMonolith, Error, TEXT("CaptureMaterialFrame: Failed to load mesh %s"), *MeshPath);
+			return false;
+		}
+
+		UStaticMeshComponent* MeshComp = NewObject<UStaticMeshComponent>(
+			GetTransientPackage(), NAME_None, RF_Transient);
+		MeshComp->SetStaticMesh(Mesh);
+		MeshComp->SetMaterial(0, const_cast<UMaterialInterface*>(Material));
+		MeshComp->SetRelativeScale3D(FVector(2.0f, 2.0f, 1.0f));
+		SpawnedMeshComp = MeshComp;
 	}
 
-	UStaticMesh* Mesh = LoadObject<UStaticMesh>(nullptr, *MeshPath);
-	if (!Mesh)
-	{
-		UE_LOG(LogMonolith, Error, TEXT("CaptureMaterialFrame: Failed to load mesh %s"), *MeshPath);
-		return false;
-	}
-
-	// Create static mesh component
-	UStaticMeshComponent* MeshComp = NewObject<UStaticMeshComponent>(
-		GetTransientPackage(), NAME_None, RF_Transient);
-	MeshComp->SetStaticMesh(Mesh);
-	MeshComp->SetMaterial(0, const_cast<UMaterialInterface*>(Material));
-	// Scale plane to reasonable size (default is 100x100 cm)
-	MeshComp->SetRelativeScale3D(FVector(2.0f, 2.0f, 1.0f));
-
-	PreviewScene->AddComponent(MeshComp, MeshComp->GetRelativeTransform());
+	PreviewScene->AddComponent(SpawnedMeshComp, SpawnedMeshComp->GetRelativeTransform());
 
 	// Create render target
 	UTextureRenderTarget2D* RT = NewObject<UTextureRenderTarget2D>(
 		GetTransientPackage(), NAME_None, RF_Transient);
 	RT->InitAutoFormat(ResX, ResY);
-	RT->ClearColor = FLinearColor(0.18f, 0.18f, 0.18f); // mid-gray background
+	RT->ClearColor = BackgroundColor;
 	RT->UpdateResourceImmediate(true);
 
 	// Create scene capture
@@ -1180,7 +1235,7 @@ bool FMonolithEditorActions::CaptureMaterialFrame(
 	// Cleanup
 	CaptureComp->TextureTarget = nullptr;
 	CaptureComp->UnregisterComponent();
-	PreviewScene->RemoveComponent(MeshComp);
+	PreviewScene->RemoveComponent(SpawnedMeshComp);
 
 	return bSuccess;
 }
@@ -1313,8 +1368,30 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureScenePreview(
 			return FMonolithActionResult::Error(
 				FString::Printf(TEXT("Failed to load material: %s"), *AssetPath));
 		}
+		float UVTiling = 1.0f;
+		if (Params->HasField(TEXT("uv_tiling")))
+		{
+			UVTiling = (float)Params->GetNumberField(TEXT("uv_tiling"));
+			if (UVTiling <= 0.0f) UVTiling = 1.0f;
+		}
+
+		FLinearColor BgColor(0.18f, 0.18f, 0.18f);
+		if (Params->HasField(TEXT("background_color")))
+		{
+			const TArray<TSharedPtr<FJsonValue>>& BgArr = Params->GetArrayField(TEXT("background_color"));
+			if (BgArr.Num() >= 3)
+			{
+				BgColor = FLinearColor(
+					(float)BgArr[0]->AsNumber(),
+					(float)BgArr[1]->AsNumber(),
+					(float)BgArr[2]->AsNumber(),
+					BgArr.Num() >= 4 ? (float)BgArr[3]->AsNumber() : 1.0f);
+			}
+		}
+
 		bSuccess = CaptureMaterialFrame(Material, PreviewMesh, CameraLocation, CameraRotation,
-			FOV, ResX, ResY, OutputPath);
+			FOV, ResX, ResY, OutputPath, ESceneCaptureSource::SCS_FinalToneCurveHDR,
+			UVTiling, BgColor);
 	}
 	else
 	{
@@ -1460,32 +1537,152 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureSequenceFrames(
 			FString::Printf(TEXT("Failed to load: %s"), *AssetPath));
 	}
 
+	bool bPersistent = Params->HasField(TEXT("persistent")) && Params->GetBoolField(TEXT("persistent"));
+
 	double StartTime = FPlatformTime::Seconds();
 	TArray<TSharedPtr<FJsonValue>> FrameResults;
 
-	// Use CaptureNiagaraFrame per frame — the proven working path
-	// (DesiredAge + warm-up ticks + GPU flush). Persistent TickDeltaTime
-	// approach produced black frames — reverting to what works.
-	for (int32 i = 0; i < Timestamps.Num(); i++)
+	if (bPersistent)
 	{
-		float T = Timestamps[i];
-		FString FramePath = OutputDir / FString::Printf(TEXT("%s_%03d_t%.2f.png"),
-			*FilenamePrefix, i, T);
+		// PERSISTENT MODE: Create component ONCE, advance through time, capture at intervals.
+		// Preserves ribbons, particle accumulation, and inter-frame state.
+		FPreviewScene::ConstructionValues CVs;
+		CVs.bDefaultLighting = false;
+		CVs.LightBrightness = 0.0f;
+		CVs.SkyBrightness = 0.0f;
+		TSharedPtr<FAdvancedPreviewScene> PreviewScene =
+			MakeShareable(new FAdvancedPreviewScene(CVs));
+		PreviewScene->SetFloorVisibility(false);
+		PreviewScene->SetEnvironmentVisibility(false);
 
-		bool bOk = CaptureNiagaraFrame(System, T, CameraLocation, CameraRotation,
-			FOV, ResX, ResY, FramePath);
+		UNiagaraComponent* NiagaraComp = NewObject<UNiagaraComponent>(
+			GetTransientPackage(), NAME_None, RF_Transient);
+		NiagaraComp->CastShadow = false;
+		NiagaraComp->bCastDynamicShadow = false;
+		NiagaraComp->SetAllowScalability(false);
+		NiagaraComp->SetAsset(System);
+		NiagaraComp->SetForceSolo(true);
+		NiagaraComp->SetAgeUpdateMode(ENiagaraAgeUpdateMode::DesiredAge);
+		NiagaraComp->SetCanRenderWhileSeeking(true);
+		NiagaraComp->SetMaxSimTime(0.0f);
+		NiagaraComp->Activate(true);
 
-		TSharedPtr<FJsonObject> FrameObj = MakeShared<FJsonObject>();
-		FrameObj->SetNumberField(TEXT("timestamp"), T);
-		FrameObj->SetStringField(TEXT("file"), FramePath);
-		FrameObj->SetBoolField(TEXT("success"), bOk);
-		FrameResults.Add(MakeShared<FJsonValueObject>(FrameObj));
+		PreviewScene->AddComponent(NiagaraComp, NiagaraComp->GetRelativeTransform());
+
+		UWorld* World = NiagaraComp->GetWorld();
+		const float TickDelta = 1.0f / 30.0f;
+		float CurrentTime = 0.0f;
+
+		// Sort timestamps to ensure we advance monotonically
+		TArray<float> SortedTimestamps = Timestamps;
+		SortedTimestamps.Sort();
+
+		for (int32 i = 0; i < SortedTimestamps.Num(); i++)
+		{
+			float TargetTime = SortedTimestamps[i];
+
+			// Advance from current time to target time
+			NiagaraComp->SetSeekDelta(TickDelta);
+			NiagaraComp->SeekToDesiredAge(TargetTime);
+
+			if (World)
+			{
+				World->TimeSeconds = TargetTime;
+				World->DeltaTimeSeconds = TickDelta;
+				World->Tick(ELevelTick::LEVELTICK_PauseTick, TickDelta);
+			}
+
+			NiagaraComp->TickComponent(TickDelta, ELevelTick::LEVELTICK_All, nullptr);
+
+			// GPU flush for particle buffers
+			if (World)
+			{
+				World->SendAllEndOfFrameUpdates();
+				if (FNiagaraWorldManager* WorldManager = FNiagaraWorldManager::Get(World))
+				{
+					WorldManager->FlushComputeAndDeferredQueues(true);
+				}
+			}
+			FlushRenderingCommands();
+
+			// Warm-up extra tick so GPU buffers are populated
+			if (World)
+			{
+				World->Tick(ELevelTick::LEVELTICK_PauseTick, TickDelta);
+				NiagaraComp->TickComponent(TickDelta, ELevelTick::LEVELTICK_All, nullptr);
+				World->SendAllEndOfFrameUpdates();
+				if (FNiagaraWorldManager* WorldManager = FNiagaraWorldManager::Get(World))
+				{
+					WorldManager->FlushComputeAndDeferredQueues(true);
+				}
+				FlushRenderingCommands();
+			}
+
+			// Set up capture component and render
+			UTextureRenderTarget2D* RT = NewObject<UTextureRenderTarget2D>(GetTransientPackage());
+			RT->InitAutoFormat(ResX, ResY);
+			RT->ClearColor = FLinearColor::Black;
+			RT->UpdateResourceImmediate(true);
+
+			USceneCaptureComponent2D* CaptureComp = NewObject<USceneCaptureComponent2D>(
+				GetTransientPackage(), NAME_None, RF_Transient);
+			CaptureComp->TextureTarget = RT;
+			CaptureComp->CaptureSource = ESceneCaptureSource::SCS_FinalToneCurveHDR;
+			CaptureComp->bCaptureEveryFrame = false;
+			CaptureComp->bCaptureOnMovement = false;
+			CaptureComp->bAlwaysPersistRenderingState = true;
+			CaptureComp->FOVAngle = FOV;
+			CaptureComp->SetRelativeLocation(CameraLocation);
+			CaptureComp->SetRelativeRotation(CameraRotation);
+
+			PreviewScene->AddComponent(CaptureComp, FTransform::Identity);
+
+			FString FramePath = OutputDir / FString::Printf(TEXT("%s_%03d_t%.2f.png"),
+				*FilenamePrefix, i, TargetTime);
+
+			bool bOk = RenderAndSaveCapture(CaptureComp, RT, ResX, ResY, FramePath);
+
+			PreviewScene->RemoveComponent(CaptureComp);
+
+			TSharedPtr<FJsonObject> FrameObj = MakeShared<FJsonObject>();
+			FrameObj->SetNumberField(TEXT("timestamp"), TargetTime);
+			FrameObj->SetStringField(TEXT("file"), FramePath);
+			FrameObj->SetBoolField(TEXT("success"), bOk);
+			FrameResults.Add(MakeShared<FJsonValueObject>(FrameObj));
+
+			CurrentTime = TargetTime;
+		}
+
+		// Cleanup
+		PreviewScene->RemoveComponent(NiagaraComp);
+		NiagaraComp->DeactivateImmediate();
+	}
+	else
+	{
+		// PER-FRAME MODE: Use CaptureNiagaraFrame per frame — the proven working path
+		// (DesiredAge + warm-up ticks + GPU flush). Reliable but recreates component each frame.
+		for (int32 i = 0; i < Timestamps.Num(); i++)
+		{
+			float T = Timestamps[i];
+			FString FramePath = OutputDir / FString::Printf(TEXT("%s_%03d_t%.2f.png"),
+				*FilenamePrefix, i, T);
+
+			bool bOk = CaptureNiagaraFrame(System, T, CameraLocation, CameraRotation,
+				FOV, ResX, ResY, FramePath);
+
+			TSharedPtr<FJsonObject> FrameObj = MakeShared<FJsonObject>();
+			FrameObj->SetNumberField(TEXT("timestamp"), T);
+			FrameObj->SetStringField(TEXT("file"), FramePath);
+			FrameObj->SetBoolField(TEXT("success"), bOk);
+			FrameResults.Add(MakeShared<FJsonValueObject>(FrameObj));
+		}
 	}
 
 	double ElapsedMs = (FPlatformTime::Seconds() - StartTime) * 1000.0;
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetBoolField(TEXT("success"), true);
+	Result->SetBoolField(TEXT("persistent_mode"), bPersistent);
 	Result->SetArrayField(TEXT("frames"), FrameResults);
 	Result->SetNumberField(TEXT("total_capture_time_ms"), ElapsedMs);
 
@@ -2045,6 +2242,196 @@ FMonolithActionResult FMonolithEditorActions::HandleDeleteAssets(
 			NotFoundArr.Add(MakeShared<FJsonValueString>(P));
 		}
 		Result->SetArrayField(TEXT("not_found"), NotFoundArr);
+	}
+
+	return FMonolithActionResult::Success(Result);
+}
+
+// ============================================================================
+// Action: capture_system_gif
+// Captures a Niagara system as a sequence of PNG frames with optional GIF encoding.
+// Default mode: frames_only — returns array of PNG paths (always works, no deps).
+// Optional: encoder: "ffmpeg" or "python" for GIF encoding.
+// ============================================================================
+FMonolithActionResult FMonolithEditorActions::HandleCaptureSystemGif(
+	const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+	if (AssetPath.IsEmpty())
+		return FMonolithActionResult::Error(TEXT("asset_path is required"));
+
+	double DurationSeconds = Params->HasField(TEXT("duration_seconds")) ? Params->GetNumberField(TEXT("duration_seconds")) : 2.0;
+	int32 FPS = Params->HasField(TEXT("fps")) ? static_cast<int32>(Params->GetNumberField(TEXT("fps"))) : 15;
+	int32 Resolution = Params->HasField(TEXT("resolution")) ? static_cast<int32>(Params->GetNumberField(TEXT("resolution"))) : 256;
+	FString Encoder = Params->HasField(TEXT("encoder")) ? Params->GetStringField(TEXT("encoder")).ToLower() : TEXT("frames_only");
+
+	if (FPS <= 0) FPS = 15;
+	if (Resolution <= 0) Resolution = 256;
+	if (DurationSeconds <= 0) DurationSeconds = 2.0;
+
+	// Output directory
+	FString OutputDir;
+	if (Params->HasField(TEXT("output_path")))
+	{
+		OutputDir = Params->GetStringField(TEXT("output_path"));
+		if (FPaths::IsRelative(OutputDir))
+		{
+			OutputDir = FPaths::ProjectDir() / OutputDir;
+		}
+	}
+	else
+	{
+		FString Timestamp = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
+		FString SafeName = FPaths::GetBaseFilename(AssetPath);
+		OutputDir = FPaths::ProjectDir() / TEXT("Saved/Screenshots/Monolith") /
+			FString::Printf(TEXT("GIF_%s_%s"), *Timestamp, *SafeName);
+	}
+	IFileManager::Get().MakeDirectory(*OutputDir, true);
+
+	// Load system
+	UNiagaraSystem* System = LoadObject<UNiagaraSystem>(nullptr, *AssetPath);
+	if (!System)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to load Niagara system: %s"), *AssetPath));
+
+	// Generate timestamps
+	int32 FrameCount = FMath::Max(1, static_cast<int32>(DurationSeconds * FPS));
+	TArray<float> Timestamps;
+	for (int32 i = 0; i < FrameCount; i++)
+	{
+		Timestamps.Add(static_cast<float>(i) / static_cast<float>(FPS));
+	}
+
+	// Build params for capture_sequence_frames (persistent mode)
+	TArray<TSharedPtr<FJsonValue>> TimestampValues;
+	for (float T : Timestamps)
+	{
+		TimestampValues.Add(MakeShared<FJsonValueNumber>(T));
+	}
+
+	TSharedRef<FJsonObject> CaptureParams = MakeShared<FJsonObject>();
+	CaptureParams->SetStringField(TEXT("asset_path"), AssetPath);
+	CaptureParams->SetStringField(TEXT("asset_type"), TEXT("niagara"));
+	CaptureParams->SetArrayField(TEXT("timestamps"), TimestampValues);
+	CaptureParams->SetStringField(TEXT("output_dir"), OutputDir);
+	CaptureParams->SetStringField(TEXT("filename_prefix"), TEXT("gif_frame"));
+	CaptureParams->SetBoolField(TEXT("persistent"), true);
+
+	// Set resolution
+	TArray<TSharedPtr<FJsonValue>> ResArr;
+	ResArr.Add(MakeShared<FJsonValueNumber>(Resolution));
+	ResArr.Add(MakeShared<FJsonValueNumber>(Resolution));
+	CaptureParams->SetArrayField(TEXT("resolution"), ResArr);
+
+	// Capture frames
+	FMonolithActionResult CaptureResult = HandleCaptureSequenceFrames(CaptureParams);
+	if (!CaptureResult.bSuccess)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Frame capture failed: %s"), *CaptureResult.ErrorMessage));
+
+	// Collect frame paths from the capture result
+	TArray<FString> FramePaths;
+	const TArray<TSharedPtr<FJsonValue>>* FramesArr = nullptr;
+	if (CaptureResult.Result.IsValid() && CaptureResult.Result->TryGetArrayField(TEXT("frames"), FramesArr))
+	{
+		for (const auto& FV : *FramesArr)
+		{
+			const TSharedPtr<FJsonObject> FrameObj = FV->AsObject();
+			if (FrameObj.IsValid())
+			{
+				FString FilePath = FrameObj->GetStringField(TEXT("file"));
+				if (!FilePath.IsEmpty())
+					FramePaths.Add(FilePath);
+			}
+		}
+	}
+
+	// Build result
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetNumberField(TEXT("frame_count"), FramePaths.Num());
+	Result->SetNumberField(TEXT("duration"), DurationSeconds);
+	Result->SetNumberField(TEXT("fps"), FPS);
+	Result->SetNumberField(TEXT("resolution"), Resolution);
+	Result->SetStringField(TEXT("output_dir"), OutputDir);
+
+	// Always include frame paths
+	TArray<TSharedPtr<FJsonValue>> PathArr;
+	for (const FString& P : FramePaths)
+		PathArr.Add(MakeShared<FJsonValueString>(P));
+	Result->SetArrayField(TEXT("frame_paths"), PathArr);
+
+	// Optional GIF encoding
+	if (Encoder != TEXT("frames_only") && FramePaths.Num() > 0)
+	{
+		FString GifPath = OutputDir / TEXT("output.gif");
+
+		if (Encoder == TEXT("ffmpeg"))
+		{
+			FString InputPattern = OutputDir / TEXT("gif_frame_%04d.png");
+			FString FFmpegArgs = FString::Printf(
+				TEXT("-y -framerate %d -i \"%s\" -vf \"scale=%d:-1:flags=lanczos\" -loop 0 \"%s\""),
+				FPS, *InputPattern, Resolution, *GifPath);
+
+			FString FFmpegPath = TEXT("ffmpeg");
+			int32 ReturnCode = -1;
+			FString StdOut, StdErr;
+
+			// Try to run ffmpeg
+			bool bLaunched = FPlatformProcess::ExecProcess(*FFmpegPath, *FFmpegArgs, &ReturnCode, &StdOut, &StdErr);
+
+			if (bLaunched && ReturnCode == 0 && IFileManager::Get().FileExists(*GifPath))
+			{
+				Result->SetStringField(TEXT("gif_path"), GifPath);
+				Result->SetStringField(TEXT("encoder_used"), TEXT("ffmpeg"));
+			}
+			else
+			{
+				Result->SetStringField(TEXT("encoder_error"),
+					FString::Printf(TEXT("ffmpeg failed (code %d). Ensure ffmpeg is in PATH. stderr: %s"),
+						ReturnCode, *StdErr.Left(500)));
+			}
+		}
+		else if (Encoder == TEXT("python"))
+		{
+			// Build a quick python one-liner using imageio
+			FString FrameListStr;
+			for (const FString& P : FramePaths)
+			{
+				if (!FrameListStr.IsEmpty()) FrameListStr += TEXT(",");
+				FString Escaped = P;
+				Escaped.ReplaceInline(TEXT("\\"), TEXT("/"));
+				FrameListStr += FString::Printf(TEXT("'%s'"), *Escaped);
+			}
+
+			FString PyScript = FString::Printf(
+				TEXT("import imageio; frames=[imageio.imread(p) for p in [%s]]; imageio.mimsave('%s',frames,duration=%f,loop=0)"),
+				*FrameListStr,
+				*GifPath.Replace(TEXT("\\"), TEXT("/")),
+				1.0 / FPS);
+
+			FString PythonPath = TEXT("python");
+			FString PythonArgs = FString::Printf(TEXT("-c \"%s\""), *PyScript);
+
+			int32 ReturnCode = -1;
+			FString StdOut, StdErr;
+			bool bLaunched = FPlatformProcess::ExecProcess(*PythonPath, *PythonArgs, &ReturnCode, &StdOut, &StdErr);
+
+			if (bLaunched && ReturnCode == 0 && IFileManager::Get().FileExists(*GifPath))
+			{
+				Result->SetStringField(TEXT("gif_path"), GifPath);
+				Result->SetStringField(TEXT("encoder_used"), TEXT("python"));
+			}
+			else
+			{
+				Result->SetStringField(TEXT("encoder_error"),
+					FString::Printf(TEXT("python imageio failed (code %d). Ensure python + imageio are installed. stderr: %s"),
+						ReturnCode, *StdErr.Left(500)));
+			}
+		}
+		else
+		{
+			Result->SetStringField(TEXT("encoder_error"),
+				FString::Printf(TEXT("Unknown encoder '%s'. Valid: frames_only, ffmpeg, python"), *Encoder));
+		}
 	}
 
 	return FMonolithActionResult::Success(Result);

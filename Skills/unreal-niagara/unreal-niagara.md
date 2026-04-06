@@ -5,7 +5,7 @@ description: Use when creating, editing, or inspecting Niagara particle systems 
 
 # Unreal Niagara VFX Workflows
 
-You have access to **Monolith** with 96 Niagara actions via `niagara_query()`.
+You have access to **Monolith** with 108 Niagara actions via `niagara_query()`.
 
 ## Discovery
 
@@ -29,6 +29,22 @@ All asset paths follow UE content browser format (no .uasset extension):
 - `emitter` — emitter name (string)
 - `module_node` — module GUID returned by `get_ordered_modules` (NOT module display name)
 
+## Cross-Namespace Capabilities
+
+These already-working features span multiple Monolith namespaces and are useful during Niagara workflows:
+
+### Texture/Material Preview
+Agents can call `material_query("render_preview", { "asset_path": "/Game/SomeTexture" })` to preview textures or materials before assigning them to renderers. Works with any texture or material asset path.
+
+### Module Stage Info from get_ordered_modules
+`get_ordered_modules` already returns a `usage` field per module indicating which stage it belongs to (e.g. `"Emitter Update"`, `"Particle Spawn"`). There is no need for a separate stage query — the stage is included in the standard module listing.
+
+### Available Parameters with Usage Filter
+`get_available_parameters` with `usage: "particle"` lists all particle attributes including compiled emitter attributes. This is the fastest way to discover what bindings are available without inspecting individual modules.
+
+### CustomHlsl Module Input Fallback
+`set_module_input_value` automatically detects CustomHlsl modules and uses pin defaults directly as a fallback path. This means you can set inputs on custom HLSL modules the same way as built-in modules — no special handling required.
+
 ## Action Reference
 
 ### System Management (9)
@@ -45,19 +61,21 @@ All asset paths follow UE content browser format (no .uasset extension):
 | `set_system_property` | `asset_path`, `property`, `value` | Set system-level properties (WarmupTime, bDeterminism, bFixedTickDelta, RandomSeed, MaxPoolSize, etc.). Snake_case aliases supported |
 | `request_compile` | `asset_path` | Force recompile the system |
 
-### Read / Inspection (7 + 4 new summary)
+### Read / Inspection (7 + 4 summary + 3 new)
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
 | `list_emitters` | `asset_path` | List all emitters (name, index, enabled, sim_target, renderer_count, GUID) |
 | `list_renderers` | `asset_path`, `emitter` | List renderers (`type` short name, index, enabled, material) |
-| `list_module_scripts` | `query` | Search module scripts. Space-separated queries work ("Gravity Force") |
+| `list_module_scripts` | `query`, `include_metadata`? | Search module scripts. `include_metadata: true` loads each to get ModuleUsageBitmask, Category, Description |
+| `list_systems` | `search`?, `path`?, `limit`? | Search/list NiagaraSystem assets, optional path and keyword filter |
 | `list_renderer_properties` | `asset_path`, `emitter`, `renderer` | List editable properties on a renderer |
 | `list_emitter_properties` | `asset_path`, `emitter` | Discover what set_emitter_property accepts (reflection-based) |
-| `get_ordered_modules` | `asset_path`, `emitter` | Get modules with GUIDs (needed for module actions) |
+| `get_ordered_modules` | `asset_path`, `emitter` | Get modules with GUIDs and `usage` stage field (needed for module actions) |
 | `get_system_diagnostics` | `asset_path` | Compile errors, warnings, incompatibility checks |
 | `get_system_summary` | `asset_path` | One-call overview: emitters, user params, module counts, renderer types |
 | `get_emitter_summary` | `asset_path`, `emitter` | Deep emitter view: modules per stage, renderers, event handlers |
 | `get_module_input_value` | `asset_path`, `emitter`, `module_node`, `input` | Read current override value (literal, bound, DI, or dynamic input) |
+| `get_module_script_inputs` | `script_path` | Pre-add introspection: query module inputs, valid stages, metadata WITHOUT adding |
 | `validate_system` | `asset_path` | Pre-compile validation: GPU+Light error, missing materials, bounds warnings |
 
 ### System Management (9 + 5 new)
@@ -80,15 +98,16 @@ All asset paths follow UE content browser format (no .uasset extension):
 | `request_compile` | `asset_path` | Force recompile |
 | `get_module_graph` | `asset_path`, `emitter`, `module_node` | Get module's internal graph |
 
-### Module Editing (9)
+### Module Editing (10)
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
 | `get_module_inputs` | `asset_path`, `emitter`, `module_node` | List all inputs on a module (includes DI curve data; returns short names) |
 | `add_module` | `asset_path`, `emitter`, `module_path`, `stage` | Add a module to an emitter stage |
 | `remove_module` | `asset_path`, `emitter`, `module_node` | Remove a module |
+| `clear_emitter_modules` | `asset_path`, `emitter`, `usage`? | Remove ALL modules from an emitter (optionally filter by stage) |
 | `move_module` | `asset_path`, `emitter`, `module_node`, `new_index` | Reorder a module (preserves input overrides) |
 | `set_module_enabled` | `asset_path`, `emitter`, `module_node`, `enabled` | Enable/disable a module |
-| `set_module_input_value` | `asset_path`, `emitter`, `module_node`, `input`, `value` | Set a module input to a literal value |
+| `set_module_input_value` | `asset_path`, `emitter`, `module_node`, `input`, `value` | Set a module input to a literal value. Auto-detects CustomHlsl modules and uses pin defaults directly |
 | `set_module_input_binding` | `asset_path`, `emitter`, `module_node`, `input`, `binding` | Bind a module input to a parameter |
 | `set_module_input_di` | `asset_path`, `emitter`, `module_node`, `input`, `di_class` | Set a data interface on a module input. Auto-resolves DI class names |
 | `set_static_switch_value` | `asset_path`, `emitter`, `module_node`, `input`, `value` | Set a static switch value (bool: true/false, enum: value name, int: number) |
@@ -105,6 +124,11 @@ All asset paths follow UE content browser format (no .uasset extension):
 | `remove_user_parameter` | `asset_path`, `name` | Remove a user parameter |
 | `set_parameter_default` | `asset_path`, `parameter`, `value` | Set parameter default value |
 | `set_curve_value` | `asset_path`, `emitter`, `module_node`, `input`, `keys` | Set curve keys on a module input |
+
+### Composite Helpers (1)
+| Action | Key Params | Purpose |
+|--------|-----------|---------|
+| `set_spawn_shape` | `asset_path`, `emitter`, `shape` | Set spawn location shape. Shapes: Cylinder, Sphere, Box, Cone, Torus, Grid, GridV2, Line, Ring, Disc, Wedge, CurlNoise, SkelMesh, StaticMesh, Shape (V2). Line/Ring/Disc use ShapeLocation V2 |
 
 ### DI & Curve Configuration (2 new)
 | Action | Key Params | Purpose |
@@ -149,12 +173,14 @@ All asset paths follow UE content browser format (no .uasset extension):
 | `remove_npc_parameter` | `asset_path`, `name` | Remove parameter from NPC |
 | `set_npc_default` | `asset_path`, `name`, `value` | Set default value for NPC parameter |
 
-### Effect Types (3)
+### Effect Types & Scalability (5)
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
 | `create_effect_type` | `save_path`, `cull_reaction`?, `max_distance`? | Create UNiagaraEffectType asset |
 | `get_effect_type` | `asset_path` | Read all scalability settings |
 | `set_effect_type_property` | `asset_path`, `property`, `value` | Set effect type property |
+| `get_scalability_settings` | `asset_path` | Read per-quality-level scalability configs from an effect type |
+| `set_scalability_settings` | `asset_path`, `settings` | Set per-quality-level scalability configs (distance, instance counts, proxies) |
 
 ### Advanced (6)
 | Action | Key Params | Purpose |
@@ -162,11 +188,17 @@ All asset paths follow UE content browser format (no .uasset extension):
 | `rename_emitter` | `asset_path`, `emitter`, `name` | Rename an emitter |
 | `get_emitter_property` | `asset_path`, `emitter`, `property` | Read a single emitter property |
 | `get_module_output_parameters` | `asset_path`, `emitter`, `module_node` | What attributes a module writes to |
-| `get_available_parameters` | `asset_path`, `emitter`?, `usage`? | List all bindable parameters |
+| `get_available_parameters` | `asset_path`, `emitter`?, `usage`? | List all bindable parameters. Use `usage: "particle"` to get all particle attributes including compiled emitter attributes |
 | `diff_systems` | `asset_path_a`, `asset_path_b`, `detail_level`? | Compare two systems |
 | `save_emitter_as_template` | `asset_path`, `emitter`, `save_path` | Extract emitter to standalone asset |
 | `clone_module_overrides` | `asset_path`, `source_emitter`, `source_module`, `target_emitter`, `target_module` | Copy input overrides between modules |
+| `duplicate_module` | `asset_path`, `source_emitter`, `source_module_node`, `target_emitter`?, `target_usage`?, `target_index`? | Duplicate a module with all overrides (composite of add_module + clone_module_overrides) |
+| `get_emitter_parent` | `asset_path`, `emitter` | Get parent emitter asset path (read-only) |
+| `rename_user_parameter` | `asset_path`, `old_name`, `new_name` | Rename user param and update all module bindings. HLSL string refs NOT updated |
 | `preview_system` | `asset_path`, `seek_time`?, `resolution`? | Capture preview screenshot |
+| `save_system` | `asset_path`, `only_if_dirty`? | Save any Niagara asset to disk |
+| `get_static_switch_value` | `asset_path`, `emitter`, `module_node`, `input`? | Get static switch value(s) — omit input to list all |
+| `import_system_spec` | `asset_path`, `spec`, `mode`? | Overwrite existing system with JSON spec |
 
 ### Renderers (6)
 | Action | Key Params | Purpose |
@@ -184,10 +216,11 @@ All asset paths follow UE content browser format (no .uasset extension):
 | `batch_execute` | `asset_path`, `commands` | Execute multiple actions in sequence |
 | `create_system_from_spec` | `spec` | Create a complete system from a JSON specification |
 
-### Data Interface & HLSL (2)
+### Data Interface & HLSL (3)
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
 | `get_di_functions` | `di_class` | List functions available on a data interface class |
+| `get_di_properties` | `di_class` | Inspect editable properties + function signatures on a DI class via CDO reflection |
 | `get_compiled_gpu_hlsl` | `asset_path`, `emitter` | Get the compiled GPU HLSL for an emitter (auto-compiles if needed) |
 
 ### Custom HLSL Module/Function Creation (2)
@@ -252,6 +285,11 @@ niagara_query({ action: "list_renderer_properties", params: { asset_path: "/Game
 niagara_query({ action: "set_renderer_property", params: { asset_path: "/Game/VFX/NS_Sparks", emitter: "Fountain", renderer: "SpriteRenderer", property: "SubImageSize", value: "4,4" } })
 ```
 
+### Preview a texture before using it
+```
+material_query({ action: "render_preview", params: { asset_path: "/Game/VFX/Textures/T_Smoke" } })
+```
+
 ## Working with Particle Materials
 
 When creating VFX that need custom materials, the **material agent creates materials FIRST**, then you assign them to renderers.
@@ -312,7 +350,7 @@ When creating fire+light effects, do NOT put the Light Renderer on a GPU emitter
 
 ## Rules
 
-- Use `monolith_discover("niagara")` to see per-action param schemas — there are 96 actions
+- Use `monolith_discover("niagara")` to see per-action param schemas — there are 108 actions
 - The primary asset param is `asset_path`, NOT `system` or `asset`
 - Module actions require `module_node` (a GUID) — get it from `get_ordered_modules`
 - Module stages: `Emitter Spawn`, `Emitter Update`, `Particle Spawn`, `Particle Update`, `Render`

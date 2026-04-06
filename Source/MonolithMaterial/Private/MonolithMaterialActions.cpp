@@ -46,6 +46,8 @@
 #include "AssetToolsModule.h"
 #include "AssetImportTask.h"
 #include "Engine/Texture2D.h"
+#include "Engine/TextureCube.h"
+#include "Engine/TextureRenderTarget2D.h"
 #include "Engine/EngineTypes.h"
 #include "Engine/TextureCollection.h"
 #include "Engine/Font.h"
@@ -140,7 +142,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
 			.Required(TEXT("graph_spec"), TEXT("object"), TEXT("JSON specification of the material graph"))
-			.Optional(TEXT("clear_existing"), TEXT("bool"), TEXT("Clear existing expressions before building"), TEXT("false"))
+			.Optional(TEXT("clear_existing"), TEXT("bool"), TEXT("Clear existing expressions before building (default: true)"), TEXT("true"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("material"), TEXT("begin_transaction"),
@@ -182,11 +184,13 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Build());
 
 	Registry.RegisterAction(TEXT("material"), TEXT("render_preview"),
-		TEXT("Render material preview to PNG file"),
+		TEXT("Render material preview to PNG file. Supports UV tiling to check repetition at scale."),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::RenderPreview),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
 			.Optional(TEXT("resolution"), TEXT("integer"), TEXT("Preview resolution in pixels"), TEXT("256"))
+			.Optional(TEXT("uv_tiling"), TEXT("number"), TEXT("UV tiling multiplier (e.g. 3.0 to preview at 3x3 tiling)"), TEXT("1.0"))
+			.Optional(TEXT("preview_mesh"), TEXT("string"), TEXT("Preview mesh shape: plane, sphere, cube (default: sphere)"), TEXT("sphere"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("material"), TEXT("get_thumbnail"),
@@ -338,9 +342,9 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
 			.Required(TEXT("from_expression"), TEXT("string"), TEXT("Source expression name"))
-			.Optional(TEXT("from_output"), TEXT("string"), TEXT("Source output pin name (empty = default)"))
+			.Optional(TEXT("from_output"), TEXT("string"), TEXT("Source output pin name (empty = default). Alias: from_pin"))
 			.Optional(TEXT("to_expression"), TEXT("string"), TEXT("Target expression name (for expr-to-expr)"))
-			.Optional(TEXT("to_input"), TEXT("string"), TEXT("Target input pin name (empty = default)"))
+			.Optional(TEXT("to_input"), TEXT("string"), TEXT("Target input pin name (empty = default). Alias: to_pin"))
 			.Optional(TEXT("to_property"), TEXT("string"), TEXT("Material property name: BaseColor, Roughness, etc. (for expr-to-material)"))
 			.Build());
 
@@ -670,6 +674,56 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("MaterialFunction asset path"))
 			.Required(TEXT("old_group"), TEXT("string"), TEXT("Current group name"))
 			.Required(TEXT("new_group"), TEXT("string"), TEXT("New group name"))
+			.Build());
+
+	// --- Wave 11: Material expansion ---
+
+	Registry.RegisterAction(TEXT("material"), TEXT("clear_graph"),
+		TEXT("Remove all expressions from a material graph, optionally preserving parameter nodes"),
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ClearGraph),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
+			.Optional(TEXT("preserve_parameters"), TEXT("bool"), TEXT("Keep parameter expressions (ScalarParameter, VectorParameter, etc.)"), TEXT("false"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("material"), TEXT("delete_expressions"),
+		TEXT("Delete multiple expression nodes by name in a single transaction"),
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::DeleteExpressions),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
+			.Required(TEXT("expression_names"), TEXT("array"), TEXT("Array of expression name strings to delete"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("material"), TEXT("get_texture_properties"),
+		TEXT("Get comprehensive texture properties including recommended sampler type for material use"),
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetTextureProperties),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Texture asset path"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("material"), TEXT("preview_texture"),
+		TEXT("Render texture preview to PNG and return texture metadata in one call"),
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::PreviewTexture),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Texture asset path"))
+			.Optional(TEXT("resolution"), TEXT("integer"), TEXT("Preview resolution in pixels"), TEXT("256"))
+			.Optional(TEXT("output_path"), TEXT("string"), TEXT("Custom output file path (default: Saved/Monolith/previews/)"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("material"), TEXT("preview_textures"),
+		TEXT("Render a contact sheet of multiple textures with metadata"),
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::PreviewTextures),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_paths"), TEXT("array"), TEXT("Array of texture asset path strings"))
+			.Optional(TEXT("per_texture_size"), TEXT("integer"), TEXT("Size of each texture tile in pixels"), TEXT("128"))
+			.Optional(TEXT("output_path"), TEXT("string"), TEXT("Custom output file path (default: Saved/Monolith/previews/)"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("material"), TEXT("check_tiling_quality"),
+		TEXT("Analyze material for tiling issues: missing anti-tiling, no macro variation, direct UV usage"),
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::CheckTilingQuality),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
 			.Build());
 }
 
@@ -1303,13 +1357,13 @@ FMonolithActionResult FMonolithMaterialActions::EndTransaction(const TSharedPtr<
 
 // ============================================================================
 // Action: build_material_graph
-// Params: { "asset_path": "...", "graph_spec": { nodes, custom_hlsl_nodes, connections, outputs }, "clear_existing": false }
+// Params: { "asset_path": "...", "graph_spec": { nodes, custom_hlsl_nodes, connections, outputs }, "clear_existing": true }
 // ============================================================================
 
 FMonolithActionResult FMonolithMaterialActions::BuildMaterialGraph(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
-	bool bClearExisting = Params->HasField(TEXT("clear_existing")) ? Params->GetBoolField(TEXT("clear_existing")) : false;
+	bool bClearExisting = Params->HasField(TEXT("clear_existing")) ? Params->GetBoolField(TEXT("clear_existing")) : true;
 
 	UMaterial* Mat = LoadBaseMaterial(AssetPath);
 	if (!Mat)
@@ -1445,7 +1499,9 @@ FMonolithActionResult FMonolithMaterialActions::BuildMaterialGraph(const TShared
 			// Blend mode validation warnings
 			{
 				EBlendMode BM = Mat->BlendMode;
-				if (MatProp == MP_Opacity && (BM == BLEND_Opaque || BM == BLEND_Masked))
+				if (MatProp == MP_Opacity && (BM == BLEND_Opaque || BM == BLEND_Masked)
+					&& !IsSubsurfaceShadingModel(Mat->GetShadingModels())
+					&& !Mat->GetShadingModels().HasShadingModel(MSM_SingleLayerWater))
 				{
 					auto WJ = MakeShared<FJsonObject>();
 					WJ->SetStringField(TEXT("output"), ToProp);
@@ -2029,9 +2085,12 @@ FMonolithActionResult FMonolithMaterialActions::ValidateMaterial(const TSharedPt
 		}
 
 		// Opaque with Opacity or Refraction connected (wasted work)
+		// NOTE: Subsurface/SingleLayerWater models legitimately use Opacity for scattering even in Opaque mode
 		if (BM == BLEND_Opaque)
 		{
-			if (bHasOpacity)
+			if (bHasOpacity
+				&& !IsSubsurfaceShadingModel(Mat->GetShadingModels())
+				&& !Mat->GetShadingModels().HasShadingModel(MSM_SingleLayerWater))
 			{
 				AddBlendWarning(TEXT("opaque_unused_opacity"),
 					TEXT("Opaque blend mode with Opacity connected — Opacity has no effect, consider removing or changing blend mode"));
@@ -2083,7 +2142,7 @@ FMonolithActionResult FMonolithMaterialActions::ValidateMaterial(const TSharedPt
 
 // ============================================================================
 // Action: render_preview
-// Params: { "asset_path": "...", "resolution": 256 }
+// Params: { "asset_path": "...", "resolution": 256, "uv_tiling": 1.0, "preview_mesh": "sphere" }
 // ============================================================================
 
 FMonolithActionResult FMonolithMaterialActions::RenderPreview(const TSharedPtr<FJsonObject>& Params)
@@ -2095,6 +2154,57 @@ FMonolithActionResult FMonolithMaterialActions::RenderPreview(const TSharedPtr<F
 		Resolution = 256;
 	}
 
+	// Read new params
+	double UVTiling = 1.0;
+	Params->TryGetNumberField(TEXT("uv_tiling"), UVTiling);
+	FString PreviewMesh = TEXT("sphere");
+	Params->TryGetStringField(TEXT("preview_mesh"), PreviewMesh);
+
+	// Custom preview pipeline: route through editor capture_scene_preview when
+	// uv_tiling or preview_mesh differ from defaults (avoids MonolithEditor dependency)
+	bool bUseCustomPipeline = !FMath::IsNearlyEqual(UVTiling, 1.0) || PreviewMesh != TEXT("sphere");
+
+	if (bUseCustomPipeline)
+	{
+		auto CaptureParams = MakeShared<FJsonObject>();
+		CaptureParams->SetStringField(TEXT("asset_path"), AssetPath);
+		CaptureParams->SetStringField(TEXT("asset_type"), TEXT("material"));
+		CaptureParams->SetStringField(TEXT("preview_mesh"), PreviewMesh);
+		CaptureParams->SetNumberField(TEXT("uv_tiling"), UVTiling);
+
+		// Resolution as array [W, H] for capture_scene_preview
+		TArray<TSharedPtr<FJsonValue>> ResArr;
+		ResArr.Add(MakeShared<FJsonValueNumber>((double)Resolution));
+		ResArr.Add(MakeShared<FJsonValueNumber>((double)Resolution));
+		CaptureParams->SetArrayField(TEXT("resolution"), ResArr);
+
+		// Pass through background_color if provided
+		if (Params->HasField(TEXT("background_color")))
+		{
+			CaptureParams->SetField(TEXT("background_color"), Params->TryGetField(TEXT("background_color")));
+		}
+
+		FMonolithActionResult CaptureResult = FMonolithToolRegistry::Get().ExecuteAction(
+			TEXT("editor"), TEXT("capture_scene_preview"), CaptureParams);
+
+		if (!CaptureResult.bSuccess)
+		{
+			return CaptureResult;
+		}
+
+		// Augment the result with material-specific fields
+		if (CaptureResult.Result.IsValid())
+		{
+			CaptureResult.Result->SetStringField(TEXT("asset_path"), AssetPath);
+			CaptureResult.Result->SetNumberField(TEXT("uv_tiling"), UVTiling);
+			CaptureResult.Result->SetStringField(TEXT("preview_mesh"), PreviewMesh);
+			CaptureResult.Result->SetStringField(TEXT("pipeline"), TEXT("custom_capture"));
+		}
+
+		return CaptureResult;
+	}
+
+	// Fast path: default 1x sphere via ThumbnailTools
 	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
 	if (!LoadedAsset)
 	{
@@ -2138,6 +2248,9 @@ FMonolithActionResult FMonolithMaterialActions::RenderPreview(const TSharedPtr<F
 	ResultJson->SetStringField(TEXT("file_path"), FilePath);
 	ResultJson->SetNumberField(TEXT("width"), Width);
 	ResultJson->SetNumberField(TEXT("height"), Height);
+	ResultJson->SetNumberField(TEXT("uv_tiling"), UVTiling);
+	ResultJson->SetStringField(TEXT("preview_mesh"), PreviewMesh);
+	ResultJson->SetStringField(TEXT("pipeline"), TEXT("thumbnail"));
 
 	return FMonolithActionResult::Success(ResultJson);
 }
@@ -3562,9 +3675,11 @@ FMonolithActionResult FMonolithMaterialActions::ConnectExpressions(const TShared
 {
 	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
 	FString FromExprName = Params->GetStringField(TEXT("from_expression"));
-	FString FromOutput = Params->HasField(TEXT("from_output")) ? Params->GetStringField(TEXT("from_output")) : TEXT("");
+	FString FromOutput = Params->HasField(TEXT("from_output")) ? Params->GetStringField(TEXT("from_output"))
+	                   : Params->HasField(TEXT("from_pin")) ? Params->GetStringField(TEXT("from_pin")) : TEXT("");
 	FString ToExprName = Params->HasField(TEXT("to_expression")) ? Params->GetStringField(TEXT("to_expression")) : TEXT("");
-	FString ToInput = Params->HasField(TEXT("to_input")) ? Params->GetStringField(TEXT("to_input")) : TEXT("");
+	FString ToInput = Params->HasField(TEXT("to_input")) ? Params->GetStringField(TEXT("to_input"))
+	                : Params->HasField(TEXT("to_pin")) ? Params->GetStringField(TEXT("to_pin")) : TEXT("");
 	ToInput = NormalizeInputPinName(ToInput);
 	FString ToProperty = Params->HasField(TEXT("to_property")) ? Params->GetStringField(TEXT("to_property")) : TEXT("");
 
@@ -3618,7 +3733,9 @@ FMonolithActionResult FMonolithMaterialActions::ConnectExpressions(const TShared
 		if (MatProp != MP_MAX)
 		{
 			EBlendMode BM = Mat->BlendMode;
-			if (MatProp == MP_Opacity && (BM == BLEND_Opaque || BM == BLEND_Masked))
+			if (MatProp == MP_Opacity && (BM == BLEND_Opaque || BM == BLEND_Masked)
+				&& !IsSubsurfaceShadingModel(Mat->GetShadingModels())
+				&& !Mat->GetShadingModels().HasShadingModel(MSM_SingleLayerWater))
 				Warnings.Add(TEXT("Opacity has no effect on Opaque/Masked materials. Set blend mode to Translucent/Additive first."));
 			if (MatProp == MP_OpacityMask && BM != BLEND_Masked)
 				Warnings.Add(TEXT("OpacityMask only affects Masked blend mode."));
@@ -5819,6 +5936,7 @@ void FMonolithMaterialActions::BuildGraphFromSpec(
 			}
 
 			// Set properties — accept both "props" and "properties" as key names
+			bool bSamplerTypeExplicitlySet = false;
 			const TSharedPtr<FJsonObject>* PropsObjPtr = nullptr;
 			if (!NodeObj->TryGetObjectField(TEXT("props"), PropsObjPtr))
 			{
@@ -5829,6 +5947,10 @@ void FMonolithMaterialActions::BuildGraphFromSpec(
 				const TSharedPtr<FJsonObject>& PropsObj = *PropsObjPtr;
 				for (const auto& Pair : PropsObj->Values)
 				{
+					if (Pair.Key == TEXT("SamplerType"))
+					{
+						bSamplerTypeExplicitlySet = true;
+					}
 					FProperty* Prop = NewExpr->GetClass()->FindPropertyByName(*Pair.Key);
 					if (!Prop)
 					{
@@ -5926,6 +6048,15 @@ void FMonolithMaterialActions::BuildGraphFromSpec(
 					{
 						Prop->ImportText_Direct(*ValueStr, ValuePtr, NewExpr, PPF_None);
 					}
+				}
+			}
+
+			// Auto-detect SamplerType from texture if user didn't set it explicitly
+			if (!bSamplerTypeExplicitlySet)
+			{
+				if (UMaterialExpressionTextureBase* TextureExpr = Cast<UMaterialExpressionTextureBase>(NewExpr))
+				{
+					TextureExpr->AutoSetSampleType();
 				}
 			}
 
@@ -8960,6 +9091,707 @@ FMonolithActionResult FMonolithMaterialActions::RenameFunctionParameterGroup(con
 	auto ResultJson = MakeShared<FJsonObject>();
 	ResultJson->SetStringField(TEXT("asset_path"), AssetPath);
 	ResultJson->SetBoolField(TEXT("renamed"), bRenamed);
+
+	return FMonolithActionResult::Success(ResultJson);
+}
+
+// ============================================================================
+// Wave 11 — Material expansion
+// ============================================================================
+
+// ============================================================================
+// Action: clear_graph
+// Params: { "asset_path": "...", "preserve_parameters": false }
+// ============================================================================
+
+FMonolithActionResult FMonolithMaterialActions::ClearGraph(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+	bool bPreserveParams = false;
+	Params->TryGetBoolField(TEXT("preserve_parameters"), bPreserveParams);
+
+	UMaterial* Mat = LoadBaseMaterial(AssetPath);
+	if (!Mat)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to load base material at '%s'"), *AssetPath));
+	}
+
+	// Save material-level properties — PostEditChange can reset them
+	const EBlendMode SavedBlendMode = Mat->BlendMode;
+	const EMaterialShadingModel SavedShadingModel = Mat->GetShadingModels().GetFirstShadingModel();
+	const bool bSavedTwoSided = Mat->TwoSided;
+	const float SavedOpacityMaskClipValue = Mat->OpacityMaskClipValue;
+
+	GEditor->BeginTransaction(FText::FromString(TEXT("ClearMaterialGraph")));
+	Mat->Modify();
+
+	// Collect expressions to delete (copy first to avoid iterator invalidation)
+	TArray<UMaterialExpression*> ToDelete;
+	TArray<TSharedPtr<FJsonValue>> PreservedArray;
+	for (const TObjectPtr<UMaterialExpression>& Expr : Mat->GetExpressions())
+	{
+		if (!Expr) continue;
+
+		if (bPreserveParams && Expr->bIsParameterExpression)
+		{
+			auto PJ = MakeShared<FJsonObject>();
+			PJ->SetStringField(TEXT("name"), Expr->GetName());
+			PJ->SetStringField(TEXT("class"), Expr->GetClass()->GetName());
+			PreservedArray.Add(MakeShared<FJsonValueObject>(PJ));
+			continue;
+		}
+		ToDelete.Add(Expr);
+	}
+
+	int32 DeletedCount = 0;
+	for (UMaterialExpression* Expr : ToDelete)
+	{
+		UMaterialEditingLibrary::DeleteMaterialExpression(Mat, Expr);
+		DeletedCount++;
+	}
+
+	// Restore material-level properties
+	Mat->BlendMode = SavedBlendMode;
+	Mat->SetShadingModel(SavedShadingModel);
+	Mat->TwoSided = bSavedTwoSided;
+	Mat->OpacityMaskClipValue = SavedOpacityMaskClipValue;
+
+	Mat->PreEditChange(nullptr);
+	Mat->PostEditChange();
+	GEditor->EndTransaction();
+
+	int32 RemainingCount = Mat->GetExpressions().Num();
+
+	auto ResultJson = MakeShared<FJsonObject>();
+	ResultJson->SetStringField(TEXT("asset_path"), AssetPath);
+	ResultJson->SetNumberField(TEXT("deleted_count"), DeletedCount);
+	ResultJson->SetNumberField(TEXT("remaining_count"), RemainingCount);
+	if (PreservedArray.Num() > 0)
+	{
+		ResultJson->SetArrayField(TEXT("preserved_parameters"), PreservedArray);
+	}
+
+	return FMonolithActionResult::Success(ResultJson);
+}
+
+// ============================================================================
+// Action: delete_expressions
+// Params: { "asset_path": "...", "expression_names": ["Name1", "Name2"] }
+// ============================================================================
+
+FMonolithActionResult FMonolithMaterialActions::DeleteExpressions(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+
+	const TArray<TSharedPtr<FJsonValue>>* NamesArray = nullptr;
+	if (!Params->TryGetArrayField(TEXT("expression_names"), NamesArray) || !NamesArray)
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required 'expression_names' array"));
+	}
+
+	TSet<FString> RequestedNames;
+	for (const TSharedPtr<FJsonValue>& Val : *NamesArray)
+	{
+		FString Name = Val->AsString();
+		if (!Name.IsEmpty())
+		{
+			RequestedNames.Add(Name);
+		}
+	}
+
+	if (RequestedNames.Num() == 0)
+	{
+		return FMonolithActionResult::Error(TEXT("expression_names array is empty"));
+	}
+
+	UMaterial* Mat = LoadBaseMaterial(AssetPath);
+	if (!Mat)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to load base material at '%s'"), *AssetPath));
+	}
+
+	// Collect matching expressions into local array first (avoid iterator invalidation)
+	TArray<UMaterialExpression*> ToDelete;
+	TArray<TSharedPtr<FJsonValue>> DeletedArray;
+	TSet<FString> FoundNames;
+	for (const TObjectPtr<UMaterialExpression>& Expr : Mat->GetExpressions())
+	{
+		if (Expr && RequestedNames.Contains(Expr->GetName()))
+		{
+			ToDelete.Add(Expr);
+			FoundNames.Add(Expr->GetName());
+
+			auto DJ = MakeShared<FJsonObject>();
+			DJ->SetStringField(TEXT("name"), Expr->GetName());
+			DJ->SetStringField(TEXT("class"), Expr->GetClass()->GetName());
+			DeletedArray.Add(MakeShared<FJsonValueObject>(DJ));
+		}
+	}
+
+	// Find names that weren't matched
+	TArray<TSharedPtr<FJsonValue>> NotFoundArray;
+	for (const FString& Requested : RequestedNames)
+	{
+		if (!FoundNames.Contains(Requested))
+		{
+			NotFoundArray.Add(MakeShared<FJsonValueString>(Requested));
+		}
+	}
+
+	GEditor->BeginTransaction(FText::FromString(TEXT("DeleteExpressions")));
+	Mat->Modify();
+
+	for (UMaterialExpression* Expr : ToDelete)
+	{
+		UMaterialEditingLibrary::DeleteMaterialExpression(Mat, Expr);
+	}
+
+	Mat->PreEditChange(nullptr);
+	Mat->PostEditChange();
+	GEditor->EndTransaction();
+
+	auto ResultJson = MakeShared<FJsonObject>();
+	ResultJson->SetStringField(TEXT("asset_path"), AssetPath);
+	ResultJson->SetArrayField(TEXT("deleted"), DeletedArray);
+	ResultJson->SetNumberField(TEXT("deleted_count"), DeletedArray.Num());
+	ResultJson->SetNumberField(TEXT("remaining_count"), Mat->GetExpressions().Num());
+	if (NotFoundArray.Num() > 0)
+	{
+		ResultJson->SetArrayField(TEXT("not_found"), NotFoundArray);
+	}
+
+	return FMonolithActionResult::Success(ResultJson);
+}
+
+// ============================================================================
+// Helper: Populate texture metadata JSON
+// ============================================================================
+
+static void PopulateTextureMetadata(UTexture* Tex, const TSharedPtr<FJsonObject>& OutJson)
+{
+	OutJson->SetBoolField(TEXT("srgb"), Tex->SRGB != 0);
+	OutJson->SetStringField(TEXT("compression_settings"), UEnum::GetValueAsString(Tex->CompressionSettings));
+	OutJson->SetStringField(TEXT("filter"), UEnum::GetValueAsString(Tex->Filter));
+	OutJson->SetStringField(TEXT("lod_group"), UEnum::GetValueAsString(Tex->LODGroup));
+	OutJson->SetStringField(TEXT("address_x"), UEnum::GetValueAsString(Tex->GetTextureAddressX()));
+	OutJson->SetStringField(TEXT("address_y"), UEnum::GetValueAsString(Tex->GetTextureAddressY()));
+#if WITH_EDITORONLY_DATA
+	OutJson->SetBoolField(TEXT("compression_no_alpha"), Tex->CompressionNoAlpha != 0);
+	OutJson->SetBoolField(TEXT("virtual_texture_streaming"), Tex->VirtualTextureStreaming != 0);
+#endif
+
+	// Recommended sampler type for material usage
+	EMaterialSamplerType SamplerType = UMaterialExpressionTextureBase::GetSamplerTypeForTexture(Tex);
+	UEnum* SamplerEnum = StaticEnum<EMaterialSamplerType>();
+	if (SamplerEnum)
+	{
+		OutJson->SetStringField(TEXT("recommended_sampler_type"), SamplerEnum->GetNameStringByValue(static_cast<int64>(SamplerType)));
+	}
+
+	// Texture2D-specific properties
+	if (UTexture2D* Tex2D = Cast<UTexture2D>(Tex))
+	{
+		OutJson->SetNumberField(TEXT("width"), Tex2D->GetSizeX());
+		OutJson->SetNumberField(TEXT("height"), Tex2D->GetSizeY());
+		OutJson->SetNumberField(TEXT("mip_count"), Tex2D->GetNumMips());
+		OutJson->SetBoolField(TEXT("has_alpha"), Tex2D->HasAlphaChannel());
+		OutJson->SetStringField(TEXT("pixel_format"), GPixelFormats[Tex2D->GetPixelFormat()].Name);
+	}
+	else if (UTextureCube* TexCube = Cast<UTextureCube>(Tex))
+	{
+		OutJson->SetNumberField(TEXT("width"), TexCube->GetSizeX());
+		OutJson->SetNumberField(TEXT("height"), TexCube->GetSizeX()); // cube faces are square
+		OutJson->SetStringField(TEXT("texture_type"), TEXT("TextureCube"));
+	}
+	else if (UTextureRenderTarget2D* RT = Cast<UTextureRenderTarget2D>(Tex))
+	{
+		OutJson->SetNumberField(TEXT("width"), RT->SizeX);
+		OutJson->SetNumberField(TEXT("height"), RT->SizeY);
+		OutJson->SetStringField(TEXT("texture_type"), TEXT("RenderTarget2D"));
+	}
+}
+
+// ============================================================================
+// Action: get_texture_properties
+// Params: { "asset_path": "..." }
+// ============================================================================
+
+FMonolithActionResult FMonolithMaterialActions::GetTextureProperties(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+
+	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
+	if (!LoadedAsset)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to load asset at '%s'"), *AssetPath));
+	}
+
+	UTexture* Tex = Cast<UTexture>(LoadedAsset);
+	if (!Tex)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Asset '%s' is not a UTexture (type: %s)"), *AssetPath, *LoadedAsset->GetClass()->GetName()));
+	}
+
+	auto ResultJson = MakeShared<FJsonObject>();
+	ResultJson->SetStringField(TEXT("asset_path"), AssetPath);
+	ResultJson->SetStringField(TEXT("class"), Tex->GetClass()->GetName());
+	PopulateTextureMetadata(Tex, ResultJson);
+
+	return FMonolithActionResult::Success(ResultJson);
+}
+
+// ============================================================================
+// Action: preview_texture
+// Params: { "asset_path": "...", "resolution": 256, "output_path": "..." }
+// ============================================================================
+
+FMonolithActionResult FMonolithMaterialActions::PreviewTexture(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+	int32 Resolution = 256;
+	{
+		double Tmp = 0;
+		if (Params->TryGetNumberField(TEXT("resolution"), Tmp) && Tmp > 0) Resolution = static_cast<int32>(Tmp);
+	}
+	FString OutputPath;
+	Params->TryGetStringField(TEXT("output_path"), OutputPath);
+
+	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
+	if (!LoadedAsset)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to load asset at '%s'"), *AssetPath));
+	}
+
+	UTexture* Tex = Cast<UTexture>(LoadedAsset);
+	if (!Tex)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Asset '%s' is not a UTexture (type: %s)"), *AssetPath, *LoadedAsset->GetClass()->GetName()));
+	}
+
+	// Render thumbnail
+	FObjectThumbnail Thumbnail;
+	ThumbnailTools::RenderThumbnail(LoadedAsset, Resolution, Resolution,
+		ThumbnailTools::EThumbnailTextureFlushMode::NeverFlush, nullptr, &Thumbnail);
+
+	if (Thumbnail.GetImageWidth() == 0 || Thumbnail.GetImageHeight() == 0)
+	{
+		return FMonolithActionResult::Error(TEXT("Thumbnail rendering produced an empty image"));
+	}
+
+	TArray<uint8>& ThumbData = Thumbnail.AccessImageData();
+	int32 Width = Thumbnail.GetImageWidth();
+	int32 Height = Thumbnail.GetImageHeight();
+
+	TArray64<uint8> PngData;
+	FImageView ImageView((void*)ThumbData.GetData(), Width, Height, ERawImageFormat::BGRA8);
+	FImageUtils::CompressImage(PngData, TEXT(".png"), ImageView);
+
+	if (PngData.Num() == 0)
+	{
+		return FMonolithActionResult::Error(TEXT("Failed to compress thumbnail to PNG"));
+	}
+
+	// Save to file
+	if (OutputPath.IsEmpty())
+	{
+		FString AssetName = FPaths::GetBaseFilename(AssetPath);
+		FString SaveDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Monolith"), TEXT("previews"));
+		IFileManager::Get().MakeDirectory(*SaveDir, true);
+		OutputPath = FPaths::Combine(SaveDir, FString::Printf(TEXT("%s_%d.png"), *AssetName, Resolution));
+	}
+
+	if (!FFileHelper::SaveArrayToFile(PngData, *OutputPath))
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to save PNG to '%s'"), *OutputPath));
+	}
+
+	auto ResultJson = MakeShared<FJsonObject>();
+	ResultJson->SetStringField(TEXT("asset_path"), AssetPath);
+	ResultJson->SetStringField(TEXT("file_path"), OutputPath);
+	ResultJson->SetNumberField(TEXT("preview_width"), Width);
+	ResultJson->SetNumberField(TEXT("preview_height"), Height);
+	ResultJson->SetStringField(TEXT("class"), Tex->GetClass()->GetName());
+	PopulateTextureMetadata(Tex, ResultJson);
+
+	return FMonolithActionResult::Success(ResultJson);
+}
+
+// ============================================================================
+// Action: preview_textures (contact sheet)
+// Params: { "asset_paths": [...], "per_texture_size": 128, "output_path": "..." }
+// ============================================================================
+
+FMonolithActionResult FMonolithMaterialActions::PreviewTextures(const TSharedPtr<FJsonObject>& Params)
+{
+	const TArray<TSharedPtr<FJsonValue>>* PathsArray = nullptr;
+	if (!Params->TryGetArrayField(TEXT("asset_paths"), PathsArray) || !PathsArray || PathsArray->Num() == 0)
+	{
+		return FMonolithActionResult::Error(TEXT("Missing or empty 'asset_paths' array"));
+	}
+
+	int32 TileSize = 128;
+	{
+		double Tmp = 0;
+		if (Params->TryGetNumberField(TEXT("per_texture_size"), Tmp) && Tmp > 0) TileSize = static_cast<int32>(Tmp);
+	}
+	FString OutputPath;
+	Params->TryGetStringField(TEXT("output_path"), OutputPath);
+
+	int32 Count = PathsArray->Num();
+	int32 Cols = FMath::CeilToInt(FMath::Sqrt(static_cast<float>(Count)));
+	int32 Rows = FMath::CeilToInt(static_cast<float>(Count) / static_cast<float>(Cols));
+	int32 SheetWidth = Cols * TileSize;
+	int32 SheetHeight = Rows * TileSize;
+
+	// Allocate contact sheet buffer (BGRA8)
+	TArray<uint8> SheetData;
+	SheetData.SetNumZeroed(SheetWidth * SheetHeight * 4);
+
+	TArray<TSharedPtr<FJsonValue>> TextureInfoArray;
+	int32 SuccessCount = 0;
+
+	for (int32 i = 0; i < Count; ++i)
+	{
+		FString AssetPath = (*PathsArray)[i]->AsString();
+		int32 Col = i % Cols;
+		int32 Row = i / Cols;
+
+		auto TexInfo = MakeShared<FJsonObject>();
+		TexInfo->SetStringField(TEXT("asset_path"), AssetPath);
+		TexInfo->SetNumberField(TEXT("index"), i);
+
+		UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
+		UTexture* Tex = LoadedAsset ? Cast<UTexture>(LoadedAsset) : nullptr;
+		if (!Tex)
+		{
+			TexInfo->SetStringField(TEXT("error"), TEXT("Failed to load as UTexture"));
+			TextureInfoArray.Add(MakeShared<FJsonValueObject>(TexInfo));
+			continue;
+		}
+
+		// Render thumbnail
+		FObjectThumbnail Thumbnail;
+		ThumbnailTools::RenderThumbnail(LoadedAsset, TileSize, TileSize,
+			ThumbnailTools::EThumbnailTextureFlushMode::NeverFlush, nullptr, &Thumbnail);
+
+		if (Thumbnail.GetImageWidth() > 0 && Thumbnail.GetImageHeight() > 0)
+		{
+			TArray<uint8>& ThumbData = Thumbnail.AccessImageData();
+			int32 ThumbW = Thumbnail.GetImageWidth();
+			int32 ThumbH = Thumbnail.GetImageHeight();
+
+			// Blit thumbnail into contact sheet at (Col*TileSize, Row*TileSize)
+			int32 CopyW = FMath::Min(ThumbW, TileSize);
+			int32 CopyH = FMath::Min(ThumbH, TileSize);
+			for (int32 Y = 0; Y < CopyH; ++Y)
+			{
+				int32 SrcOffset = Y * ThumbW * 4;
+				int32 DstOffset = ((Row * TileSize + Y) * SheetWidth + Col * TileSize) * 4;
+				FMemory::Memcpy(&SheetData[DstOffset], &ThumbData[SrcOffset], CopyW * 4);
+			}
+			SuccessCount++;
+		}
+
+		PopulateTextureMetadata(Tex, TexInfo);
+		TextureInfoArray.Add(MakeShared<FJsonValueObject>(TexInfo));
+	}
+
+	// Compress contact sheet to PNG
+	TArray64<uint8> PngData;
+	FImageView SheetView((void*)SheetData.GetData(), SheetWidth, SheetHeight, ERawImageFormat::BGRA8);
+	FImageUtils::CompressImage(PngData, TEXT(".png"), SheetView);
+
+	if (PngData.Num() == 0)
+	{
+		return FMonolithActionResult::Error(TEXT("Failed to compress contact sheet to PNG"));
+	}
+
+	// Save
+	if (OutputPath.IsEmpty())
+	{
+		FString SaveDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Monolith"), TEXT("previews"));
+		IFileManager::Get().MakeDirectory(*SaveDir, true);
+		OutputPath = FPaths::Combine(SaveDir, FString::Printf(TEXT("contact_sheet_%dx%d_%d.png"), Cols, Rows, Count));
+	}
+
+	if (!FFileHelper::SaveArrayToFile(PngData, *OutputPath))
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to save contact sheet to '%s'"), *OutputPath));
+	}
+
+	auto ResultJson = MakeShared<FJsonObject>();
+	ResultJson->SetStringField(TEXT("file_path"), OutputPath);
+	ResultJson->SetNumberField(TEXT("texture_count"), Count);
+	ResultJson->SetNumberField(TEXT("successful_renders"), SuccessCount);
+	ResultJson->SetNumberField(TEXT("sheet_width"), SheetWidth);
+	ResultJson->SetNumberField(TEXT("sheet_height"), SheetHeight);
+	ResultJson->SetNumberField(TEXT("columns"), Cols);
+	ResultJson->SetNumberField(TEXT("rows"), Rows);
+	ResultJson->SetNumberField(TEXT("tile_size"), TileSize);
+	ResultJson->SetArrayField(TEXT("textures"), TextureInfoArray);
+
+	return FMonolithActionResult::Success(ResultJson);
+}
+
+// ============================================================================
+// Action: check_tiling_quality
+// Params: { "asset_path": "..." }
+// ============================================================================
+
+FMonolithActionResult FMonolithMaterialActions::CheckTilingQuality(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+
+	UMaterial* Mat = LoadBaseMaterial(AssetPath);
+	if (!Mat)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to load base material at '%s'"), *AssetPath));
+	}
+
+	TArray<TSharedPtr<FJsonValue>> IssuesArray;
+	bool bHasAntiTiling = false;
+	bool bHasMacroVariation = false;
+
+	// Gather all expressions by type for analysis
+	TArray<UMaterialExpressionTextureSample*> TextureSamples;
+	bool bHasWorldPosition = false;
+	bool bHasNoise = false;
+	bool bHasCustomHLSL = false;
+
+	for (const TObjectPtr<UMaterialExpression>& Expr : Mat->GetExpressions())
+	{
+		if (!Expr) continue;
+
+		if (UMaterialExpressionTextureSample* TexSample = Cast<UMaterialExpressionTextureSample>(Expr))
+		{
+			TextureSamples.Add(TexSample);
+		}
+		if (Expr->IsA(UMaterialExpressionCustom::StaticClass()))
+		{
+			bHasCustomHLSL = true;
+			// Check if HLSL code contains noise-related keywords
+			UMaterialExpressionCustom* CustomExpr = Cast<UMaterialExpressionCustom>(Expr);
+			if (CustomExpr)
+			{
+				FString Code = CustomExpr->Code.ToLower();
+				if (Code.Contains(TEXT("noise")) || Code.Contains(TEXT("hash"))
+					|| Code.Contains(TEXT("random")) || Code.Contains(TEXT("fbm"))
+					|| Code.Contains(TEXT("voronoi")) || Code.Contains(TEXT("perlin")))
+				{
+					bHasAntiTiling = true;
+				}
+			}
+		}
+
+		FString ClassName = Expr->GetClass()->GetName();
+		if (ClassName.Contains(TEXT("WorldPosition")))
+		{
+			bHasWorldPosition = true;
+			bHasAntiTiling = true; // World-space UVs break tiling naturally
+		}
+		if (ClassName.Contains(TEXT("Noise")))
+		{
+			bHasNoise = true;
+			bHasAntiTiling = true;
+		}
+		if (ClassName.Contains(TEXT("MaterialFunctionCall")))
+		{
+			// Check if function name suggests anti-tiling
+			UMaterialExpressionMaterialFunctionCall* FuncCall = Cast<UMaterialExpressionMaterialFunctionCall>(Expr);
+			if (FuncCall && FuncCall->MaterialFunction)
+			{
+				FString FuncName = FuncCall->MaterialFunction->GetName().ToLower();
+				if (FuncName.Contains(TEXT("antitile")) || FuncName.Contains(TEXT("anti_tile"))
+					|| FuncName.Contains(TEXT("macro")) || FuncName.Contains(TEXT("variation"))
+					|| FuncName.Contains(TEXT("triplanar"))
+					|| FuncName.Contains(TEXT("worldaligned")) || FuncName.Contains(TEXT("world_aligned")))
+				{
+					bHasAntiTiling = true;
+					if (FuncName.Contains(TEXT("macro")))
+					{
+						bHasMacroVariation = true;
+					}
+				}
+			}
+		}
+	}
+
+	// Analyze each texture sample's UV input
+	for (UMaterialExpressionTextureSample* TexSample : TextureSamples)
+	{
+		// Check UV input (Coordinates)
+		FExpressionInput& CoordInput = TexSample->Coordinates;
+		bool bDirectTexCoord = false;
+		FString UVSource = TEXT("default (TexCoord0)");
+
+		if (!CoordInput.Expression)
+		{
+			// No UV input at all — using default TexCoord0
+			bDirectTexCoord = true;
+		}
+		else
+		{
+			FString InputClassName = CoordInput.Expression->GetClass()->GetName();
+			if (InputClassName.Contains(TEXT("TextureCoordinate")))
+			{
+				bDirectTexCoord = true;
+				UVSource = TEXT("TextureCoordinate (direct)");
+			}
+		}
+
+		if (bDirectTexCoord)
+		{
+			auto IssueJson = MakeShared<FJsonObject>();
+			IssueJson->SetStringField(TEXT("expression"), TexSample->GetName());
+			IssueJson->SetStringField(TEXT("uv_source"), UVSource);
+			IssueJson->SetStringField(TEXT("suggestion"),
+				TEXT("Direct UV tiling — visible repetition likely at distance. Consider adding noise offset, world-position blend, or anti-tiling function."));
+
+			// Get texture name if available
+			if (TexSample->Texture)
+			{
+				IssueJson->SetStringField(TEXT("texture"), TexSample->Texture->GetPathName());
+			}
+			IssuesArray.Add(MakeShared<FJsonValueObject>(IssueJson));
+		}
+	}
+
+	// Check for macro variation (large-scale noise overlaid on BaseColor or Roughness)
+	FExpressionInput* BaseColorInput = Mat->GetExpressionInputForProperty(MP_BaseColor);
+	FExpressionInput* RoughnessInput = Mat->GetExpressionInputForProperty(MP_Roughness);
+
+	auto CheckForMacroVariation = [&](FExpressionInput* Input, const FString& PropName)
+	{
+		if (!Input || !Input->Expression) return;
+
+		// BFS upstream walk — look for noise indicators up to MaxDepth hops
+		TSet<UMaterialExpression*> Visited;
+		TArray<UMaterialExpression*> Stack;
+		Stack.Push(Input->Expression);
+		constexpr int32 MaxDepth = 4;
+
+		for (int32 Depth = 0; Depth < MaxDepth && Stack.Num() > 0; ++Depth)
+		{
+			TArray<UMaterialExpression*> NextLevel;
+			for (UMaterialExpression* Expr : Stack)
+			{
+				if (!Expr || Visited.Contains(Expr)) continue;
+				Visited.Add(Expr);
+
+				FString ClassName = Expr->GetClass()->GetName();
+
+				// Direct noise/worldposition/custom expression
+				if (ClassName.Contains(TEXT("Noise")) || ClassName.Contains(TEXT("WorldPosition"))
+					|| ClassName.Contains(TEXT("Custom")))
+				{
+					bHasMacroVariation = true;
+					return;
+				}
+
+				// TextureSample sampling a noise texture (by texture name heuristic)
+				if (UMaterialExpressionTextureSample* TS = Cast<UMaterialExpressionTextureSample>(Expr))
+				{
+					if (TS->Texture)
+					{
+						FString TexName = TS->Texture->GetName().ToLower();
+						if (TexName.Contains(TEXT("noise")) || TexName.Contains(TEXT("curl"))
+							|| TexName.Contains(TEXT("perlin")) || TexName.Contains(TEXT("simplex"))
+							|| TexName.Contains(TEXT("fbm")) || TexName.Contains(TEXT("voronoi"))
+							|| TexName.Contains(TEXT("grunge")))
+						{
+							bHasMacroVariation = true;
+							return;
+						}
+					}
+				}
+
+				// MaterialFunctionCall with macro/variation/noise in name
+				if (UMaterialExpressionMaterialFunctionCall* FC = Cast<UMaterialExpressionMaterialFunctionCall>(Expr))
+				{
+					if (FC->MaterialFunction)
+					{
+						FString FuncName = FC->MaterialFunction->GetName().ToLower();
+						if (FuncName.Contains(TEXT("noise")) || FuncName.Contains(TEXT("macro"))
+							|| FuncName.Contains(TEXT("variation")))
+						{
+							bHasMacroVariation = true;
+							return;
+						}
+					}
+				}
+
+				// Enqueue upstream inputs for next depth level
+				for (FExpressionInputIterator It(Expr); It; ++It)
+				{
+					if (It.Input && It.Input->Expression)
+					{
+						NextLevel.Add(It.Input->Expression);
+					}
+				}
+			}
+			Stack = MoveTemp(NextLevel);
+		}
+	};
+
+	CheckForMacroVariation(BaseColorInput, TEXT("BaseColor"));
+	CheckForMacroVariation(RoughnessInput, TEXT("Roughness"));
+
+	// Suggest world-aligned UVs for environment materials that don't already use them
+	{
+		FString MatName = Mat->GetName().ToLower();
+		bool bIsEnvironmentMaterial = MatName.Contains(TEXT("floor")) || MatName.Contains(TEXT("wall"))
+			|| MatName.Contains(TEXT("ground")) || MatName.Contains(TEXT("terrain"))
+			|| MatName.Contains(TEXT("rock")) || MatName.Contains(TEXT("ceiling"))
+			|| MatName.Contains(TEXT("concrete")) || MatName.Contains(TEXT("brick"));
+
+		if (bIsEnvironmentMaterial && !bHasWorldPosition)
+		{
+			// Also check if MF_WorldAlignedUV is already in use via function calls
+			bool bHasWorldAlignedFunc = false;
+			for (const TObjectPtr<UMaterialExpression>& Expr : Mat->GetExpressions())
+			{
+				if (!Expr) continue;
+				if (UMaterialExpressionMaterialFunctionCall* FuncCall = Cast<UMaterialExpressionMaterialFunctionCall>(Expr))
+				{
+					if (FuncCall->MaterialFunction)
+					{
+						FString FuncName = FuncCall->MaterialFunction->GetName().ToLower();
+						if (FuncName.Contains(TEXT("worldaligned")) || FuncName.Contains(TEXT("world_aligned")))
+						{
+							bHasWorldAlignedFunc = true;
+							break;
+						}
+					}
+				}
+			}
+
+			if (!bHasWorldAlignedFunc)
+			{
+				auto SuggestionJson = MakeShared<FJsonObject>();
+				SuggestionJson->SetStringField(TEXT("type"), TEXT("world_aligned_uv"));
+				SuggestionJson->SetStringField(TEXT("suggestion"),
+					TEXT("Environment material may benefit from world-aligned UVs (MF_WorldAlignedUV) for consistent texel density across differently-sized meshes"));
+				IssuesArray.Add(MakeShared<FJsonValueObject>(SuggestionJson));
+			}
+		}
+	}
+
+	auto ResultJson = MakeShared<FJsonObject>();
+	ResultJson->SetStringField(TEXT("asset_path"), AssetPath);
+	ResultJson->SetNumberField(TEXT("texture_sample_count"), TextureSamples.Num());
+	ResultJson->SetNumberField(TEXT("tiling_issue_count"), IssuesArray.Num());
+	ResultJson->SetBoolField(TEXT("has_anti_tiling"), bHasAntiTiling);
+	ResultJson->SetBoolField(TEXT("has_macro_variation"), bHasMacroVariation);
+	ResultJson->SetBoolField(TEXT("has_world_position_uvs"), bHasWorldPosition);
+	ResultJson->SetBoolField(TEXT("has_noise_nodes"), bHasNoise);
+	ResultJson->SetBoolField(TEXT("has_custom_hlsl"), bHasCustomHLSL);
+	ResultJson->SetArrayField(TEXT("tiling_issues"), IssuesArray);
+
+	if (!bHasAntiTiling && TextureSamples.Num() > 0)
+	{
+		ResultJson->SetStringField(TEXT("recommendation"),
+			TEXT("No anti-tiling detected. Consider adding MF_AntiTile_IqOffset, world-position noise offset, or macro variation overlay to reduce visible repetition."));
+	}
 
 	return FMonolithActionResult::Success(ResultJson);
 }

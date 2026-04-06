@@ -1174,6 +1174,18 @@ TSharedPtr<FJsonObject> FMonolithIndexDatabase::GetAssetDetails(const FString& P
 		NodeObj->SetStringField(TEXT("node_type"), Node.NodeType);
 		NodeObj->SetStringField(TEXT("node_name"), Node.NodeName);
 		NodeObj->SetStringField(TEXT("node_class"), Node.NodeClass);
+
+		// Include stored properties (type-specific metadata from indexers)
+		if (!Node.Properties.IsEmpty() && Node.Properties != TEXT("{}"))
+		{
+			TSharedPtr<FJsonObject> PropsObj;
+			auto Reader = TJsonReaderFactory<>::Create(Node.Properties);
+			if (FJsonSerializer::Deserialize(Reader, PropsObj) && PropsObj.IsValid() && PropsObj->Values.Num() > 0)
+			{
+				NodeObj->SetObjectField(TEXT("properties"), PropsObj);
+			}
+		}
+
 		NodesArr.Add(MakeShared<FJsonValueObject>(NodeObj));
 	}
 	Details->SetArrayField(TEXT("nodes"), NodesArr);

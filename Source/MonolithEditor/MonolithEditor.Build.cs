@@ -36,7 +36,8 @@ public class MonolithEditor : ModuleRules
 			"EditorScriptingUtilities",
 			"AdvancedPreviewScene",
 			"ImageCore",
-			"Projects"
+			"Projects",
+			"ProceduralMeshComponent"
 		});
 
 		if (Target.Platform == UnrealTargetPlatform.Win64)

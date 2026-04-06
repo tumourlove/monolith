@@ -2,6 +2,7 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/Texture2D.h"
+#include "Materials/MaterialExpressionTextureBase.h"
 #include "Sound/SoundWave.h"
 #include "Sound/SoundCue.h"
 #include "PhysicsEngine/PhysicsAsset.h"
@@ -67,6 +68,24 @@ bool FGenericAssetIndexer::IndexAsset(const FAssetData& AssetData, UObject* Load
 			UEnum::GetValueAsString(Tex->CompressionSettings));
 		Props->SetStringField(TEXT("lod_group"),
 			UEnum::GetValueAsString(Tex->LODGroup));
+		Props->SetStringField(TEXT("filter"),
+			UEnum::GetValueAsString(Tex->Filter));
+		Props->SetStringField(TEXT("address_x"),
+			UEnum::GetValueAsString(Tex->GetTextureAddressX()));
+		Props->SetStringField(TEXT("address_y"),
+			UEnum::GetValueAsString(Tex->GetTextureAddressY()));
+#if WITH_EDITORONLY_DATA
+		Props->SetBoolField(TEXT("virtual_texture_streaming"), Tex->VirtualTextureStreaming != 0);
+		Props->SetBoolField(TEXT("compression_no_alpha"), Tex->CompressionNoAlpha != 0);
+#endif
+		// Recommended sampler type for material use
+		EMaterialSamplerType SamplerType = UMaterialExpressionTextureBase::GetSamplerTypeForTexture(Tex);
+		UEnum* SamplerEnum = StaticEnum<EMaterialSamplerType>();
+		if (SamplerEnum)
+		{
+			Props->SetStringField(TEXT("recommended_sampler_type"),
+				SamplerEnum->GetNameStringByValue(static_cast<int64>(SamplerType)));
+		}
 	}
 	else if (USoundWave* Sound = Cast<USoundWave>(LoadedAsset))
 	{

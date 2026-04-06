@@ -5,7 +5,7 @@ description: Use when creating, editing, or inspecting Unreal Engine materials v
 
 # Unreal Material Workflows
 
-You have access to **Monolith** with 57 material actions via `material_query()`.
+You have access to **Monolith** with 63 material actions via `material_query()`.
 
 ## Discovery
 
@@ -27,9 +27,9 @@ All asset paths follow UE content browser format (no .uasset extension):
 
 - `asset_path` — the material asset path (NOT `asset`)
 
-## Action Reference (57 actions)
+## Action Reference (63 actions)
 
-### Read Actions (18)
+### Read Actions (21)
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
 | `get_all_expressions` | `asset_path` | List all expression nodes in a material |
@@ -49,7 +49,10 @@ All asset paths follow UE content browser format (no .uasset extension):
 | `get_function_instance_info` | `asset_path` | Read MFI parent chain, all 11 parameter override types, inputs/outputs |
 | `get_thumbnail` | `asset_path`, `save_to_file`? | Get thumbnail. Use `save_to_file: true` — inline base64 wastes context |
 | `validate_material` | `asset_path`, `fix_issues`? | Check for broken connections, unused nodes, errors |
-| `render_preview` | `asset_path` | Trigger material compilation and preview |
+| `render_preview` | `asset_path`, `uv_tiling`?, `preview_mesh`? | Trigger material compilation and preview. UV tiling for repetition checks |
+| `get_texture_properties` | `asset_path` | sRGB, dimensions, compression, filter, address modes, recommended_sampler_type |
+| `check_tiling_quality` | `asset_path` | Detect tiling issues: direct UV usage, missing anti-tiling, no macro variation |
+| `preview_texture` | `asset_path`, `resolution`?, `output_path`? | Render texture thumbnail + return full metadata |
 
 ### Instance Actions (5)
 | Action | Key Params | Purpose |
@@ -73,7 +76,7 @@ All asset paths follow UE content browser format (no .uasset extension):
 | `layout_function_expressions` | `asset_path` | Auto-arrange function graph layout. Rejects MFI paths |
 | `rename_function_parameter_group` | `asset_path`, `old_group`, `new_group` | Rename param group across all parameters |
 
-### Write Actions (21)
+### Write Actions (23)
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
 | `auto_layout` | `asset_path` | Topological-sort layout on all expressions. Works on UMaterial and UMaterialFunction |
@@ -90,6 +93,8 @@ All asset paths follow UE content browser format (no .uasset extension):
 | `connect_expressions` | `asset_path`, `from_expression`, `to_expression`/`to_property` | Wire two expressions or wire to material output |
 | `disconnect_expression` | `asset_path`, `expression_name`, `input_name`?, `target_expression`?, `output_index`? | Remove connections. Use `target_expression` + `output_index` for targeted disconnection |
 | `delete_expression` | `asset_path`, `expression_name` | Delete an expression node |
+| `delete_expressions` | `asset_path`, `expression_names[]` | Batch delete multiple expression nodes |
+| `clear_graph` | `asset_path`, `preserve_parameters`? | Remove all expressions (optionally keep parameter nodes) |
 | `create_material_instance` | `asset_path`, `parent_material` | Create a material instance |
 | `set_instance_parameter` | `asset_path`, `parameter_name`, `scalar_value`/`vector_value`/`texture_value` | Set instance parameter |
 | `duplicate_material` | `source_path`, `dest_path` | Duplicate a material asset |
@@ -98,12 +103,13 @@ All asset paths follow UE content browser format (no .uasset extension):
 | `begin_transaction` | `transaction_name` | Start an undo group |
 | `end_transaction` | — | End an undo group |
 
-### Batch Actions (3)
+### Batch Actions (4)
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
 | `batch_set_material_property` | `asset_paths` (array), `properties` | Apply same properties to multiple materials in one call |
 | `batch_recompile` | `asset_paths` (array) | Recompile multiple materials, returns per-material VS/PS instruction counts |
 | `import_texture` | `source_file`, `dest_path`, `compression`?, `srgb`?, `max_size`? | Import texture from disk with compression/sRGB settings |
+| `preview_textures` | `asset_paths[]`, `per_texture_size`?, `output_path`? | Render contact sheet grid of multiple textures with per-texture metadata |
 
 ### Compound Actions (1)
 | Action | Key Params | Purpose |
@@ -265,6 +271,16 @@ When building materials for VFX, the material agent runs FIRST. The Niagara agen
 - Whether Dynamic Parameters are available and what they control
 - Any special UV or texture coordinate requirements
 
+## Tiling Quality Checklist
+
+Before finalizing any material that uses tiling textures, verify ALL of these:
+
+1. **Macro variation applied?** Add world-space noise overlay on BaseColor (strength 0.1-0.3) and Roughness (multiply by 0.8-1.2 range). Use FluidNinja `T_LowResBlurredNoise_sRGB` at UV scale WorldPosition * 0.0003-0.001.
+2. **UVs broken with noise offset or world-position blend?** Base UVs must not feed directly into TextureSample without transformation.
+3. **Previewed at 3x tiling?** Use `render_preview` to check appearance at high repetition count. Tiling should not be obvious at 3x3.
+4. **`MF_AntiTile_IqOffset` used for organic/terrain textures?** Apply Iq's 2-sample offset technique (cheapest proper anti-tiling, ~15 instructions). See `Docs/references/materials/anti-tiling.md` for HLSL and alternatives (hex tiling for large surfaces).
+5. **FluidNinja noise textures used for macro variation?** Recommended: `/Game/FluidNinjaLive/Textures/T_LowResBlurredNoise_sRGB` (color), `/Game/FluidNinjaLive/Textures/T_MultilevelNoise1` (roughness).
+
 ## Rules
 
 - **Graph editing only works on base Materials**, not MaterialInstanceConstants
@@ -275,4 +291,4 @@ When building materials for VFX, the material agent runs FIRST. The Niagara agen
 - Use `get_all_expressions` + `get_full_connection_graph` for inspection. Only use `export_material_graph` for round-tripping. Pass `include_properties: false` to reduce payload by ~70%
 - Use `render_preview` or `get_thumbnail` with `save_to_file: true` — inline base64 wastes context window
 - Blend mode warnings from `connect_expressions` / `build_material_graph` are informational — the connection is made, but the output pin is inactive unless the material's blend mode matches
-- There are exactly 57 material actions — use `monolith_discover("material")` to see them all
+- There are exactly 63 material actions — use `monolith_discover("material")` to see them all

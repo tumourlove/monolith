@@ -175,6 +175,24 @@ public:
 	static FMonolithActionResult HandleSaveEmitterAsTemplate(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleCloneModuleOverrides(const TSharedPtr<FJsonObject>& Params);
 
+	// --- Phase 8: Expansion (4 new) ---
+	static FMonolithActionResult HandleSaveSystem(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleGetStaticSwitchValue(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleImportSystemSpec(const TSharedPtr<FJsonObject>& Params);
+
+	// --- Phase 9: Medium Priority Expansion (5 new) ---
+	static FMonolithActionResult HandleGetDIProperties(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleClearEmitterModules(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleGetModuleScriptInputs(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleGetScalabilitySettings(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSetScalabilitySettings(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleListSystems(const TSharedPtr<FJsonObject>& Params);
+
+	// --- Phase 10: Low Priority & QoL (3 new) ---
+	static FMonolithActionResult HandleDuplicateModule(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleGetEmitterParent(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleRenameUserParameter(const TSharedPtr<FJsonObject>& Params);
+
 	// --- Helpers (public for use by free functions) ---
 	static FString SerializeParameterValue(const FNiagaraVariable& Variable, const FNiagaraParameterStore& Store);
 
@@ -198,6 +216,11 @@ private:
 
 	// DI override resolution helper — walks override pin upstream to find the DI UObject
 	static UNiagaraDataInterface* FindDIFromOverridePin(UNiagaraNodeFunctionCall* ModuleNode, const FName& MatchedFullName, const FNiagaraTypeDefinition& InputType);
+
+	// Shared helper: applies a JSON spec (emitters, user params, renderers, modules) to an existing system.
+	// Used by both create_system_from_spec and import_system_spec.
+	static int32 ApplySpecToSystem(UNiagaraSystem* System, const FString& SystemPath,
+		const TSharedPtr<FJsonObject>& Spec, TArray<FString>& OutErrors);
 
 	// HLSL script creation helper
 	static FMonolithActionResult CreateScriptFromHLSL(const TSharedPtr<FJsonObject>& Params, ENiagaraScriptUsage Usage);

@@ -35,7 +35,7 @@ Core server management and introspection tools.
 
 List available tool namespaces and their actions. Pass namespace to filter.
 
-> `discover` returns per-action param schemas for all 815 actions. AI clients also receive these schemas in `tools/list` at session start, so full param documentation is available without calling `discover` first.
+> `discover` returns per-action param schemas for all 1145 actions. AI clients also receive these schemas in `tools/list` at session start, so full param documentation is available without calling `discover` first.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

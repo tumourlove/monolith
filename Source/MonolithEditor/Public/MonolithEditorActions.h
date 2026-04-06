@@ -64,6 +64,7 @@ public:
 	// --- Capture actions ---
 	static FMonolithActionResult HandleCaptureScenePreview(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleCaptureSequenceFrames(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleCaptureSystemGif(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleImportTexture(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetViewportInfo(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleStitchFlipbook(const TSharedPtr<FJsonObject>& Params);
@@ -91,7 +92,9 @@ private:
 		class UMaterialInterface* Material, const FString& MeshType,
 		const FVector& CameraLocation, const FRotator& CameraRotation, float FOV,
 		int32 ResX, int32 ResY, const FString& OutputPath,
-		ESceneCaptureSource CaptureSource = ESceneCaptureSource::SCS_FinalToneCurveHDR);
+		ESceneCaptureSource CaptureSource = ESceneCaptureSource::SCS_FinalToneCurveHDR,
+		float UVTiling = 1.0f,
+		const FLinearColor& BackgroundColor = FLinearColor(0.18f, 0.18f, 0.18f));
 
 	static bool RenderAndSaveCapture(
 		class USceneCaptureComponent2D* CaptureComp,

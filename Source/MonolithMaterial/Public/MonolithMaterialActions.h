@@ -97,6 +97,14 @@ public:
 	static FMonolithActionResult LayoutFunctionExpressions(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult RenameFunctionParameterGroup(const TSharedPtr<FJsonObject>& Params);
 
+	// --- Wave 11: Material expansion ---
+	static FMonolithActionResult ClearGraph(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult DeleteExpressions(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult GetTextureProperties(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult PreviewTexture(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult PreviewTextures(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult CheckTilingQuality(const TSharedPtr<FJsonObject>& Params);
+
 private:
 	/** Load a UMaterial from an asset path. Returns nullptr on failure. */
 	static UMaterial* LoadBaseMaterial(const FString& AssetPath);
