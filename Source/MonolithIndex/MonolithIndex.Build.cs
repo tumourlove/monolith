@@ -31,7 +31,9 @@ public class MonolithIndex : ModuleRules
 			"GameplayTags",
 			"GameplayAbilities",
 			"EnhancedInput",
-			"Projects"
+			"Projects",
+			"MetasoundEngine",
+			"MetasoundFrontend"
 		});
 	}
 }

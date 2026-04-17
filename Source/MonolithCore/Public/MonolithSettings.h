@@ -93,6 +93,10 @@ public:
 	UPROPERTY(config, EditAnywhere, Category="Indexing|Deep Indexers")
 	bool bIndexAI = true;
 
+	/** Enable MetaSound graph indexing (nodes, connections, parameters) */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Deep Indexers")
+	bool bIndexMetaSounds = true;
+
 	/** Enable dependency graph indexing */
 	UPROPERTY(config, EditAnywhere, Category="Indexing|Post-Pass Indexers")
 	bool bIndexDependencies = true;
@@ -224,6 +228,11 @@ public:
 		meta=(DisplayName="Enable AI Module",
 			  ToolTip="Registers ai_query actions for AI asset manipulation (BT, BB, ST, EQS, SO, Navigation, Perception)."))
 	bool bEnableAI = true;
+
+	UPROPERTY(config, EditAnywhere, Category="Modules|Optional",
+		meta=(DisplayName="Enable MetaSound Integration",
+			  ToolTip="Registers metasound_query actions for MetaSound graph manipulation."))
+	bool bEnableMetaSound = true;
 
 	// --- Modules|Mesh ---
 
