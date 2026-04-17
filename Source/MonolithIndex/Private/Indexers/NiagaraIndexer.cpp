@@ -1,10 +1,12 @@
 #include "Indexers/NiagaraIndexer.h"
 #include "MonolithSettings.h"
+#include "MonolithMemoryHelper.h"
 #include "NiagaraSystem.h"
 #include "NiagaraEmitter.h"
 #include "NiagaraRendererProperties.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
+#include "AssetCompilingManager.h"
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
 
@@ -22,21 +24,91 @@ bool FNiagaraIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedAss
 	Filter.ClassPaths.Add(UNiagaraSystem::StaticClass()->GetClassPathName());
 	Registry.GetAssets(Filter, NiagaraAssets);
 
-	int32 SystemsIndexed = 0;
+	// Get settings for batching
+	const UMonolithSettings* Settings = GetDefault<UMonolithSettings>();
+	const int32 BatchSize = FMath::Max(1, Settings->PostPassBatchSize);
+	const SIZE_T MemoryBudgetMB = static_cast<SIZE_T>(Settings->MemoryBudgetMB);
+	const bool bLogMemory = Settings->bLogMemoryStats;
 
-	for (const FAssetData& NiagaraAssetData : NiagaraAssets)
+	UE_LOG(LogMonolithIndex, Log, TEXT("NiagaraIndexer: Found %d Niagara systems to index (batch size: %d)"),
+		NiagaraAssets.Num(), BatchSize);
+
+	if (bLogMemory)
 	{
-		int64 NiagaraAssetId = DB.GetAssetId(NiagaraAssetData.PackageName.ToString());
-		if (NiagaraAssetId < 0) continue;
-
-		UNiagaraSystem* System = Cast<UNiagaraSystem>(NiagaraAssetData.GetAsset());
-		if (!System) continue;
-
-		IndexNiagaraSystem(System, DB, NiagaraAssetId);
-		SystemsIndexed++;
+		FMonolithMemoryHelper::LogMemoryStats(TEXT("NiagaraIndexer start"));
 	}
 
+	int32 SystemsIndexed = 0;
+	int32 BatchNumber = 0;
+
+	for (int32 i = 0; i < NiagaraAssets.Num(); i += BatchSize)
+	{
+		// Finish pending asset compilations before loading more assets
+		// This prevents reentrant texture compiler crashes
+		FAssetCompilingManager::Get().FinishAllCompilation();
+
+		// Memory budget check before each batch
+		if (FMonolithMemoryHelper::ShouldThrottle(MemoryBudgetMB))
+		{
+			UE_LOG(LogMonolithIndex, Log, TEXT("NiagaraIndexer: Memory budget exceeded, forcing GC..."));
+			FMonolithMemoryHelper::ForceGarbageCollection(true);
+			FMonolithMemoryHelper::YieldToEditor();
+
+			if (bLogMemory)
+			{
+				FMonolithMemoryHelper::LogMemoryStats(TEXT("NiagaraIndexer after throttle GC"));
+			}
+		}
+
+		int32 BatchEnd = FMath::Min(i + BatchSize, NiagaraAssets.Num());
+
+		// Process batch
+		for (int32 j = i; j < BatchEnd; ++j)
+		{
+			const FAssetData& NiagaraAssetData = NiagaraAssets[j];
+
+			int64 NiagaraAssetId = DB.GetAssetId(NiagaraAssetData.PackageName.ToString());
+			if (NiagaraAssetId < 0) continue;
+
+			UNiagaraSystem* System = Cast<UNiagaraSystem>(NiagaraAssetData.GetAsset());
+			if (!System) continue;
+
+			IndexNiagaraSystem(System, DB, NiagaraAssetId);
+			SystemsIndexed++;
+
+			// Mark for unloading
+			FMonolithMemoryHelper::TryUnloadPackage(System);
+		}
+
+		BatchNumber++;
+
+		// GC after each batch
+		FMonolithMemoryHelper::ForceGarbageCollection(false);
+		FMonolithMemoryHelper::YieldToEditor();
+
+		// Log progress periodically
+		if (BatchNumber % 5 == 0 || BatchEnd == NiagaraAssets.Num())
+		{
+			UE_LOG(LogMonolithIndex, Log, TEXT("NiagaraIndexer: processed %d / %d systems"),
+				BatchEnd, NiagaraAssets.Num());
+
+			if (bLogMemory)
+			{
+				FMonolithMemoryHelper::LogMemoryStats(FString::Printf(TEXT("NiagaraIndexer batch %d"), BatchNumber));
+			}
+		}
+	}
+
+	// Final GC
+	FMonolithMemoryHelper::ForceGarbageCollection(true);
+
 	UE_LOG(LogMonolithIndex, Log, TEXT("NiagaraIndexer: indexed %d Niagara systems"), SystemsIndexed);
+
+	if (bLogMemory)
+	{
+		FMonolithMemoryHelper::LogMemoryStats(TEXT("NiagaraIndexer complete"));
+	}
+
 	return true;
 }
 

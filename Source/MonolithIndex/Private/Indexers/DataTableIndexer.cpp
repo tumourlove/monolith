@@ -3,6 +3,7 @@
 #include "Engine/DataTable.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
+#include "AssetCompilingManager.h"
 #include "UObject/UnrealType.h"
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
@@ -23,6 +24,10 @@ bool FDataTableIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedA
 	Registry.GetAssets(Filter, DataTableAssets);
 
 	int32 RowsInserted = 0;
+
+	// Finish pending asset compilations before loading DataTables
+	// This prevents reentrant texture compiler crashes
+	FAssetCompilingManager::Get().FinishAllCompilation();
 
 	for (const FAssetData& DTAssetData : DataTableAssets)
 	{

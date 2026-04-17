@@ -93,6 +93,10 @@ public:
 	UPROPERTY(config, EditAnywhere, Category="Indexing|Deep Indexers")
 	bool bIndexAI = true;
 
+	/** Enable MetaSound graph indexing (nodes, connections, parameters) */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Deep Indexers")
+	bool bIndexMetaSounds = true;
+
 	/** Enable dependency graph indexing */
 	UPROPERTY(config, EditAnywhere, Category="Indexing|Post-Pass Indexers")
 	bool bIndexDependencies = true;
@@ -128,6 +132,43 @@ public:
 	/** Index content from enabled marketplace plugins (installed via Fab/Epic launcher) */
 	UPROPERTY(config, EditAnywhere, Category="Indexing")
 	bool bIndexMarketplacePlugins = true;
+
+	// --- Indexing Performance ---
+
+	/** Memory budget for indexing in megabytes. Indexing will pause and run GC when this limit is exceeded. */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Performance", DisplayName="Memory Budget (MB)",
+		meta=(ClampMin="1024", ClampMax="65536", ToolTip="Maximum memory usage during indexing before forcing garbage collection. Default 24GB - UE editor typically uses 8-12GB baseline."))
+	int32 MemoryBudgetMB = 24576;
+
+	/** Number of assets to process per batch during deep indexing. Lower values reduce memory spikes but increase indexing time. */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Performance", DisplayName="Deep Index Batch Size",
+		meta=(ClampMin="1", ClampMax="64", ToolTip="Assets processed per batch. Lower = less memory, slower indexing."))
+	int32 DeepIndexBatchSize = 8;
+
+	/** Number of assets to process per batch for post-pass indexers (levels, meshes). These are memory-heavy so use smaller batches. */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Performance", DisplayName="Post-Pass Batch Size",
+		meta=(ClampMin="1", ClampMax="32", ToolTip="Batch size for level/mesh indexing. Lower for large assets."))
+	int32 PostPassBatchSize = 4;
+
+	/** Run garbage collection every N batches during indexing. Lower values keep memory lower but slow down indexing. */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Performance", DisplayName="GC Frequency (Batches)",
+		meta=(ClampMin="1", ClampMax="20", ToolTip="Run GC every N batches. 1 = every batch, higher = less frequent."))
+	int32 GCFrequencyBatches = 2;
+
+	/** Time to yield between batches when memory pressure is detected (seconds). Allows editor to remain responsive. */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Performance", DisplayName="Yield Time (seconds)",
+		meta=(ClampMin="0.0", ClampMax="1.0", ToolTip="Sleep time when throttling due to memory pressure."))
+	float YieldTimeSeconds = 0.1f;
+
+	/** Defer first-time indexing until explicitly triggered via console command. Useful for very large projects. */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Performance", DisplayName="Defer First-Time Index",
+		meta=(ToolTip="If true, first-time indexing won't run automatically. Use 'Monolith.StartIndex' console command to trigger."))
+	bool bDeferFirstTimeIndex = false;
+
+	/** Log memory statistics periodically during indexing. */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Performance", DisplayName="Log Memory Stats",
+		meta=(ToolTip="Log memory usage during indexing for debugging."))
+	bool bLogMemoryStats = true;
 
 	// --- Module Toggles ---
 
@@ -187,6 +228,11 @@ public:
 		meta=(DisplayName="Enable AI Module",
 			  ToolTip="Registers ai_query actions for AI asset manipulation (BT, BB, ST, EQS, SO, Navigation, Perception)."))
 	bool bEnableAI = true;
+
+	UPROPERTY(config, EditAnywhere, Category="Modules|Optional",
+		meta=(DisplayName="Enable MetaSound Integration",
+			  ToolTip="Registers metasound_query actions for MetaSound graph manipulation."))
+	bool bEnableMetaSound = true;
 
 	// --- Modules|Mesh ---
 

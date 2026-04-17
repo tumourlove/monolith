@@ -1,5 +1,6 @@
 #include "Indexers/AnimationIndexer.h"
 #include "MonolithSettings.h"
+#include "MonolithMemoryHelper.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimMontage.h"
 #include "Animation/BlendSpace.h"
@@ -76,10 +77,16 @@ bool FAnimationIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedA
 {
 	IAssetRegistry& Registry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
 
+	// Get settings for batching
+	const UMonolithSettings* Settings = GetDefault<UMonolithSettings>();
+	const int32 BatchSize = FMath::Max(1, Settings->PostPassBatchSize);
+	const SIZE_T MemoryBudgetMB = static_cast<SIZE_T>(Settings->MemoryBudgetMB);
+	const bool bLogMemory = Settings->bLogMemoryStats;
+
 	int32 TotalIndexed = 0;
 
-	// Helper lambda: scan registry for type T, safely load and index each asset
-	auto IndexAllOfType = [&](UClass* Class, FAnimIndexCallContext::EType Type) -> int32
+	// Helper lambda: scan registry for type T, safely load and index each asset with batching and GC
+	auto IndexAllOfType = [&](UClass* Class, FAnimIndexCallContext::EType Type, const TCHAR* TypeName) -> int32
 	{
 		TArray<FAssetData> Assets;
 		FARFilter Filter;
@@ -91,43 +98,92 @@ bool FAnimationIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedA
 		Filter.ClassPaths.Add(Class->GetClassPathName());
 		Registry.GetAssets(Filter, Assets);
 
-		int32 Count = 0;
-		for (const FAssetData& AD : Assets)
-		{
-			int64 AId = DB.GetAssetId(AD.PackageName.ToString());
-			if (AId < 0) continue;
+		if (Assets.Num() == 0) return 0;
 
-			FAnimIndexCallContext Ctx;
-			Ctx.Self = this;
-			Ctx.DB = &DB;
-			Ctx.AssetId = AId;
-			Ctx.ObjectPath = AD.GetSoftObjectPath();
-			Ctx.bSuccess = false;
-			Ctx.Type = Type;
+		UE_LOG(LogMonolithIndex, Log, TEXT("AnimationIndexer: Processing %d %s assets"), Assets.Num(), TypeName);
+
+		int32 Count = 0;
+		int32 BatchNumber = 0;
+
+		for (int32 i = 0; i < Assets.Num(); i += BatchSize)
+		{
+			// Memory budget check before each batch
+			if (FMonolithMemoryHelper::ShouldThrottle(MemoryBudgetMB))
+			{
+				UE_LOG(LogMonolithIndex, Log, TEXT("AnimationIndexer: Memory budget exceeded, forcing GC..."));
+				FMonolithMemoryHelper::ForceGarbageCollection(true);
+				FMonolithMemoryHelper::YieldToEditor();
+			}
+
+			int32 BatchEnd = FMath::Min(i + BatchSize, Assets.Num());
+
+			// Process batch
+			for (int32 j = i; j < BatchEnd; ++j)
+			{
+				const FAssetData& AD = Assets[j];
+
+				int64 AId = DB.GetAssetId(AD.PackageName.ToString());
+				if (AId < 0) continue;
+
+				FAnimIndexCallContext Ctx;
+				Ctx.Self = this;
+				Ctx.DB = &DB;
+				Ctx.AssetId = AId;
+				Ctx.ObjectPath = AD.GetSoftObjectPath();
+				Ctx.bSuccess = false;
+				Ctx.Type = Type;
 
 #if PLATFORM_WINDOWS
-			if (SafeCallWithSEH(&LoadAndIndexAnimAsset, &Ctx))
-			{
-				if (Ctx.bSuccess) Count++;
-			}
-			else
-			{
-				UE_LOG(LogMonolithIndex, Warning, TEXT("AnimationIndexer: crashed loading/indexing '%s' - skipping"), *AD.GetSoftObjectPath().ToString());
-			}
+				if (SafeCallWithSEH(&LoadAndIndexAnimAsset, &Ctx))
+				{
+					if (Ctx.bSuccess) Count++;
+				}
+				else
+				{
+					UE_LOG(LogMonolithIndex, Warning, TEXT("AnimationIndexer: crashed loading/indexing '%s' - skipping"), *AD.GetSoftObjectPath().ToString());
+				}
 #else
-			LoadAndIndexAnimAsset(&Ctx);
-			if (Ctx.bSuccess) Count++;
+				LoadAndIndexAnimAsset(&Ctx);
+				if (Ctx.bSuccess) Count++;
 #endif
+			}
+
+			BatchNumber++;
+
+			// GC after each batch
+			FMonolithMemoryHelper::ForceGarbageCollection(false);
+			FMonolithMemoryHelper::YieldToEditor();
+
+			// Log progress periodically
+			if (BatchNumber % 10 == 0 || BatchEnd == Assets.Num())
+			{
+				UE_LOG(LogMonolithIndex, Log, TEXT("AnimationIndexer: %s progress %d / %d"), TypeName, BatchEnd, Assets.Num());
+			}
 		}
+
 		return Count;
 	};
 
-	TotalIndexed += IndexAllOfType(UAnimSequence::StaticClass(), FAnimIndexCallContext::Sequence);
-	TotalIndexed += IndexAllOfType(UAnimMontage::StaticClass(), FAnimIndexCallContext::Montage);
-	TotalIndexed += IndexAllOfType(UBlendSpace::StaticClass(), FAnimIndexCallContext::BlendSp);
-	TotalIndexed += IndexAllOfType(UPoseAsset::StaticClass(), FAnimIndexCallContext::Pose);
+	if (bLogMemory)
+	{
+		FMonolithMemoryHelper::LogMemoryStats(TEXT("AnimationIndexer start"));
+	}
+
+	TotalIndexed += IndexAllOfType(UAnimSequence::StaticClass(), FAnimIndexCallContext::Sequence, TEXT("AnimSequence"));
+	TotalIndexed += IndexAllOfType(UAnimMontage::StaticClass(), FAnimIndexCallContext::Montage, TEXT("AnimMontage"));
+	TotalIndexed += IndexAllOfType(UBlendSpace::StaticClass(), FAnimIndexCallContext::BlendSp, TEXT("BlendSpace"));
+	TotalIndexed += IndexAllOfType(UPoseAsset::StaticClass(), FAnimIndexCallContext::Pose, TEXT("PoseAsset"));
+
+	// Final GC
+	FMonolithMemoryHelper::ForceGarbageCollection(true);
 
 	UE_LOG(LogMonolithIndex, Log, TEXT("AnimationIndexer: indexed %d animation assets"), TotalIndexed);
+
+	if (bLogMemory)
+	{
+		FMonolithMemoryHelper::LogMemoryStats(TEXT("AnimationIndexer complete"));
+	}
+
 	return true;
 }
 

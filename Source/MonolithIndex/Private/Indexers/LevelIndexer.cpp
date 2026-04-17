@@ -1,6 +1,9 @@
 #include "Indexers/LevelIndexer.h"
+#include "MonolithMemoryHelper.h"
+#include "MonolithSettings.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
+#include "AssetCompilingManager.h"
 #include "Engine/World.h"
 #include "Engine/Level.h"
 #include "GameFramework/Actor.h"
@@ -32,42 +35,110 @@ bool FLevelIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedAsset
 	Filter.ClassPaths.Add(UWorld::StaticClass()->GetClassPathName());
 	Registry.GetAssets(Filter, WorldAssets);
 
+	// Get settings for batching
+	const UMonolithSettings* Settings = GetDefault<UMonolithSettings>();
+	const int32 BatchSize = FMath::Max(1, Settings->PostPassBatchSize);
+	const SIZE_T MemoryBudgetMB = static_cast<SIZE_T>(Settings->MemoryBudgetMB);
+	const bool bLogMemory = Settings->bLogMemoryStats;
+
+	UE_LOG(LogMonolithIndex, Log, TEXT("LevelIndexer: Found %d World assets to index (batch size: %d)"),
+		WorldAssets.Num(), BatchSize);
+
+	if (bLogMemory)
+	{
+		FMonolithMemoryHelper::LogMemoryStats(TEXT("LevelIndexer start"));
+	}
+
 	int32 ActorsInserted = 0;
 	int32 LevelsProcessed = 0;
+	int32 BatchNumber = 0;
 
-	for (const FAssetData& WorldData : WorldAssets)
+	for (int32 i = 0; i < WorldAssets.Num(); i += BatchSize)
 	{
-		int64 LevelAssetId = DB.GetAssetId(WorldData.PackageName.ToString());
-		if (LevelAssetId < 0) continue;
+		// Finish pending asset compilations before loading more packages
+		// This prevents reentrant texture compiler crashes
+		FAssetCompilingManager::Get().FinishAllCompilation();
 
-		// Load the package to access level data without initializing gameplay
-		UPackage* Package = LoadPackage(nullptr, *WorldData.PackageName.ToString(), LOAD_NoWarn | LOAD_Quiet);
-		if (!Package) continue;
-
-		UWorld* World = FindObject<UWorld>(Package, *WorldData.AssetName.ToString());
-		if (!World)
+		// Memory budget check before each batch
+		if (FMonolithMemoryHelper::ShouldThrottle(MemoryBudgetMB))
 		{
-			// Try the common naming convention
-			World = FindObject<UWorld>(Package, TEXT("World"));
+			UE_LOG(LogMonolithIndex, Log, TEXT("LevelIndexer: Memory budget exceeded, forcing GC..."));
+			FMonolithMemoryHelper::ForceGarbageCollection(true);
+			FMonolithMemoryHelper::YieldToEditor();
+
+			if (bLogMemory)
+			{
+				FMonolithMemoryHelper::LogMemoryStats(TEXT("LevelIndexer after throttle GC"));
+			}
 		}
-		if (!World || !World->PersistentLevel) continue;
 
-		// Only index the persistent level - skip streaming sub-levels for performance
-		ULevel* Level = World->PersistentLevel;
-		ActorsInserted += IndexActorsInLevel(Level, DB, LevelAssetId);
+		int32 BatchEnd = FMath::Min(i + BatchSize, WorldAssets.Num());
 
-		LevelsProcessed++;
+		// Process batch
+		for (int32 j = i; j < BatchEnd; ++j)
+		{
+			const FAssetData& WorldData = WorldAssets[j];
 
-		// Periodically log progress for large projects
-		if (LevelsProcessed % 10 == 0)
+			int64 LevelAssetId = DB.GetAssetId(WorldData.PackageName.ToString());
+			if (LevelAssetId < 0) continue;
+
+			// Load the package to access level data without initializing gameplay
+			UPackage* Package = LoadPackage(nullptr, *WorldData.PackageName.ToString(), LOAD_NoWarn | LOAD_Quiet);
+			if (!Package) continue;
+
+			UWorld* World = FindObject<UWorld>(Package, *WorldData.AssetName.ToString());
+			if (!World)
+			{
+				// Try the common naming convention
+				World = FindObject<UWorld>(Package, TEXT("World"));
+			}
+			if (!World || !World->PersistentLevel)
+			{
+				// Mark package for unload even if we couldn't find the world
+				FMonolithMemoryHelper::TryUnloadPackage(Package);
+				continue;
+			}
+
+			// Only index the persistent level - skip streaming sub-levels for performance
+			ULevel* Level = World->PersistentLevel;
+			ActorsInserted += IndexActorsInLevel(Level, DB, LevelAssetId);
+
+			// Mark world/package for unloading after indexing
+			FMonolithMemoryHelper::TryUnloadPackage(World);
+
+			LevelsProcessed++;
+		}
+
+		BatchNumber++;
+
+		// GC after each batch to prevent memory accumulation
+		FMonolithMemoryHelper::ForceGarbageCollection(false);
+		FMonolithMemoryHelper::YieldToEditor();
+
+		// Log progress periodically
+		if (BatchNumber % 5 == 0 || BatchEnd == WorldAssets.Num())
 		{
 			UE_LOG(LogMonolithIndex, Log, TEXT("LevelIndexer: processed %d / %d levels"),
 				LevelsProcessed, WorldAssets.Num());
+
+			if (bLogMemory)
+			{
+				FMonolithMemoryHelper::LogMemoryStats(FString::Printf(TEXT("LevelIndexer batch %d"), BatchNumber));
+			}
 		}
 	}
 
+	// Final GC
+	FMonolithMemoryHelper::ForceGarbageCollection(true);
+
 	UE_LOG(LogMonolithIndex, Log, TEXT("LevelIndexer: indexed %d levels, %d actors total"),
 		LevelsProcessed, ActorsInserted);
+
+	if (bLogMemory)
+	{
+		FMonolithMemoryHelper::LogMemoryStats(TEXT("LevelIndexer complete"));
+	}
+
 	return true;
 }
 

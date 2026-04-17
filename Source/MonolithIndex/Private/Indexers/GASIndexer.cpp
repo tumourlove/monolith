@@ -2,6 +2,7 @@
 #include "MonolithSettings.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
+#include "AssetCompilingManager.h"
 #include "Engine/Blueprint.h"
 #include "UObject/UObjectIterator.h"
 #include "Serialization/JsonWriter.h"
@@ -76,6 +77,10 @@ namespace
 		Filter.bRecursivePaths = true;
 		Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
 		Registry.GetAssets(Filter, BPAssets);
+
+		// Finish pending asset compilations before loading blueprints
+		// This prevents reentrant texture compiler crashes
+		FAssetCompilingManager::Get().FinishAllCompilation();
 
 		for (const FAssetData& AssetData : BPAssets)
 		{
