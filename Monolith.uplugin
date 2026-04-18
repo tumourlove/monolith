@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "0.12.1",
+	"VersionName": "0.13.0",
 	"FriendlyName": "Monolith",
 	"Description": "Unified Unreal Engine MCP server — 1226 actions across 16 domains (Blueprint 89, Material 63, Animation 115, Niagara 108, Mesh 242, Editor 20, Config 6, Source 11, Project 7, UI 42, GAS 130, ComboGraph 13, AI 229, LogicDriver 66, Audio 81, Core 4). AI-powered asset creation, inspection, and modification.",
 	"Category": "Editor",
