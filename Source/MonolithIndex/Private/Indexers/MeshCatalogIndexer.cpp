@@ -5,7 +5,6 @@
 #include "Engine/StaticMesh.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
-#include "AssetCompilingManager.h"
 #include "SQLiteDatabase.h"
 
 bool FMeshCatalogIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedAsset, FMonolithIndexDatabase& DB, int64 AssetId)
@@ -100,9 +99,7 @@ bool FMeshCatalogIndexer::IndexAsset(const FAssetData& AssetData, UObject* Loade
 
 	for (int32 i = 0; i < MeshAssets.Num(); i += BatchSize)
 	{
-		// Finish pending asset compilations before loading more assets
-		// This prevents reentrant texture compiler crashes
-		FAssetCompilingManager::Get().FinishAllCompilation();
+		// Compiler-idle gate is enforced by FMonolithCompilerSafeDispatch at the call site (see issue #19).
 
 		// Memory budget check before each batch
 		if (FMonolithMemoryHelper::ShouldThrottle(MemoryBudgetMB))

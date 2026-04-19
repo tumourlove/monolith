@@ -2,7 +2,6 @@
 #include "MonolithSettings.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
-#include "AssetCompilingManager.h"
 #include "Engine/Blueprint.h"
 #include "UObject/UObjectIterator.h"
 #include "Serialization/JsonWriter.h"
@@ -78,9 +77,7 @@ namespace
 		Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
 		Registry.GetAssets(Filter, BPAssets);
 
-		// Finish pending asset compilations before loading blueprints
-		// This prevents reentrant texture compiler crashes
-		FAssetCompilingManager::Get().FinishAllCompilation();
+		// Compiler-idle gate is enforced by FMonolithCompilerSafeDispatch at the call site (see issue #19).
 
 		for (const FAssetData& AssetData : BPAssets)
 		{

@@ -3,7 +3,6 @@
 #include "Engine/DataTable.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
-#include "AssetCompilingManager.h"
 #include "UObject/UnrealType.h"
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
@@ -25,9 +24,7 @@ bool FDataTableIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedA
 
 	int32 RowsInserted = 0;
 
-	// Finish pending asset compilations before loading DataTables
-	// This prevents reentrant texture compiler crashes
-	FAssetCompilingManager::Get().FinishAllCompilation();
+	// Compiler-idle gate is enforced by FMonolithCompilerSafeDispatch at the call site (see issue #19).
 
 	for (const FAssetData& DTAssetData : DataTableAssets)
 	{

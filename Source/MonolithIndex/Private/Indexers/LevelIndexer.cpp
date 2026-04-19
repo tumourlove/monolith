@@ -3,7 +3,6 @@
 #include "MonolithSettings.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
-#include "AssetCompilingManager.h"
 #include "Engine/World.h"
 #include "Engine/Level.h"
 #include "GameFramework/Actor.h"
@@ -55,9 +54,7 @@ bool FLevelIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedAsset
 
 	for (int32 i = 0; i < WorldAssets.Num(); i += BatchSize)
 	{
-		// Finish pending asset compilations before loading more packages
-		// This prevents reentrant texture compiler crashes
-		FAssetCompilingManager::Get().FinishAllCompilation();
+		// Compiler-idle gate is enforced by FMonolithCompilerSafeDispatch at the call site (see issue #19).
 
 		// Memory budget check before each batch
 		if (FMonolithMemoryHelper::ShouldThrottle(MemoryBudgetMB))

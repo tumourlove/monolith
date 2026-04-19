@@ -3,8 +3,7 @@
 #include "CoreMinimal.h"
 #include "IO/IoHash.h"
 #include "SQLiteDatabase.h"
-
-DECLARE_LOG_CATEGORY_EXTERN(LogMonolithIndex, Log, All);
+#include "MonolithIndexLog.h"
 
 struct FIndexedAsset
 {

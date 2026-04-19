@@ -6,7 +6,6 @@
 #include "NiagaraRendererProperties.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
-#include "AssetCompilingManager.h"
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
 
@@ -43,9 +42,7 @@ bool FNiagaraIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedAss
 
 	for (int32 i = 0; i < NiagaraAssets.Num(); i += BatchSize)
 	{
-		// Finish pending asset compilations before loading more assets
-		// This prevents reentrant texture compiler crashes
-		FAssetCompilingManager::Get().FinishAllCompilation();
+		// Compiler-idle gate is enforced by FMonolithCompilerSafeDispatch at the call site (see issue #19).
 
 		// Memory budget check before each batch
 		if (FMonolithMemoryHelper::ShouldThrottle(MemoryBudgetMB))
