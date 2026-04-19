@@ -21,17 +21,50 @@
 param(
     [Parameter(Mandatory=$true)]
     [string]$Version,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    # Allow releasing with a dirty working tree. DANGEROUS: WIP modifications to tracked
+    # files end up in the zip because this script copies the working-tree content, not the
+    # committed HEAD. Only use if you know exactly what dirty files you're shipping.
+    [switch]$AllowDirtyTree
 )
 
 $ErrorActionPreference = "Stop"
+
+# --- Step 0: Refuse to release a dirty working tree ---
+# This script copies tracked files from the working tree (not from HEAD), so any
+# uncommitted modification to a tracked file silently ends up in the release zip.
+# Bitten by this shipping v0.13.1 with WIP CommonUI refs in MonolithUI. Never again.
+$PluginDir = Split-Path -Parent $PSScriptRoot
+Push-Location $PluginDir
+try {
+    # Porcelain is empty iff working tree and index both match HEAD (no modified, staged,
+    # or untracked files). Ignores files under .gitignore. Perfect clean gate.
+    $dirty = git status --porcelain
+    if ($dirty -and -not $AllowDirtyTree) {
+        Pop-Location
+        Write-Host "`n  [FAIL] Working tree is dirty. Refusing to release." -ForegroundColor Red
+        Write-Host "`n  Offending files:" -ForegroundColor Red
+        $dirty | ForEach-Object { Write-Host "    $_" -ForegroundColor Yellow }
+        Write-Host "`n  Options:" -ForegroundColor Cyan
+        Write-Host "    - Commit or stash the changes, then re-run" -ForegroundColor Cyan
+        Write-Host "    - Re-run with -AllowDirtyTree if you REALLY know what you're shipping" -ForegroundColor Cyan
+        exit 1
+    }
+    if ($dirty -and $AllowDirtyTree) {
+        Write-Host "`n  [WARN] -AllowDirtyTree set. Working tree has uncommitted changes:" -ForegroundColor Yellow
+        $dirty | ForEach-Object { Write-Host "    $_" -ForegroundColor Yellow }
+        Write-Host "  These WILL be in the release zip." -ForegroundColor Yellow
+    }
+}
+finally {
+    Pop-Location
+}
 
 # Modules stripped from every public release zip.
 # - MonolithISX: paid marketplace plugin (InventorySystemX) integration -- redistribution not permitted
 # - MonolithSteamBridge: solo-dev only, Steam Integration Kit bridge -- not public
 $StrippedModules = @("MonolithISX", "MonolithSteamBridge")
 
-$PluginDir = Split-Path -Parent $PSScriptRoot
 $ProjectDir = Split-Path -Parent (Split-Path -Parent $PluginDir)
 $OutputZip = Join-Path $ProjectDir "Monolith-v$Version.zip"
 $TempDir = Join-Path $env:TEMP "Monolith_Release_$Version"
