@@ -11,6 +11,7 @@
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
 #include "UObject/Package.h"
+#include "WorldPartition/WorldPartition.h"
 
 bool FLevelIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedAsset, FMonolithIndexDatabase& DB, int64 AssetId)
 {
@@ -99,6 +100,15 @@ bool FLevelIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedAsset
 			// Only index the persistent level - skip streaming sub-levels for performance
 			ULevel* Level = World->PersistentLevel;
 			ActorsInserted += IndexActorsInLevel(Level, DB, LevelAssetId);
+
+			// Uninitialize WorldPartition before unload - LoadPackage skips the editor teardown path, so GC would otherwise assert in UWorldPartitionSubsystem::Deinitialize
+			if (UWorldPartition* WP = World->GetWorldPartition())
+			{
+				if (WP->IsInitialized())
+				{
+					WP->Uninitialize();
+				}
+			}
 
 			// Mark world/package for unloading after indexing
 			FMonolithMemoryHelper::TryUnloadPackage(World);
