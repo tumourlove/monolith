@@ -3,6 +3,7 @@
 #include "MonolithSettings.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
+#include "Editor.h"
 #include "Engine/World.h"
 #include "Engine/Level.h"
 #include "GameFramework/Actor.h"
@@ -101,17 +102,22 @@ bool FLevelIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedAsset
 			ULevel* Level = World->PersistentLevel;
 			ActorsInserted += IndexActorsInLevel(Level, DB, LevelAssetId);
 
-			// Uninitialize WorldPartition before unload - LoadPackage skips the editor teardown path, so GC would otherwise assert in UWorldPartitionSubsystem::Deinitialize
-			if (UWorldPartition* WP = World->GetWorldPartition())
+			// Skip teardown if this is the world currently open in the editor - uninit would stop viewport WP cell streaming and unload would close the level
+			UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+			if (World != EditorWorld)
 			{
-				if (WP->IsInitialized())
+				// Uninitialize WorldPartition before unload - LoadPackage skips the editor teardown path, so GC would otherwise assert in UWorldPartitionSubsystem::Deinitialize
+				if (UWorldPartition* WP = World->GetWorldPartition())
 				{
-					WP->Uninitialize();
+					if (WP->IsInitialized())
+					{
+						WP->Uninitialize();
+					}
 				}
-			}
 
-			// Mark world/package for unloading after indexing
-			FMonolithMemoryHelper::TryUnloadPackage(World);
+				// Mark world/package for unloading after indexing
+				FMonolithMemoryHelper::TryUnloadPackage(World);
+			}
 
 			LevelsProcessed++;
 		}
