@@ -15,6 +15,13 @@
 #include "AnimGraphNode_LayeredBoneBlend.h"
 #include "AnimGraphNode_StateMachine.h"
 #include "AnimGraphNode_StateResult.h"
+#include "AnimGraphNode_TwoBoneIK.h"
+#include "AnimGraphNode_ModifyBone.h"
+#include "AnimGraphNode_LocalToComponentSpace.h"
+#include "AnimGraphNode_ComponentToLocalSpace.h"
+#include "K2Node_VariableGet.h"
+#include "BoneControllers/AnimNode_SkeletalControlBase.h"
+#include "Engine/MemberReference.h"
 #include "AnimationGraph.h"
 #include "AnimationStateGraph.h"
 #include "AnimationStateMachineGraph.h"
@@ -38,16 +45,21 @@ void FMonolithAbpWriteActions::RegisterActions(FMonolithToolRegistry& Registry)
 {
 	// --- add_anim_graph_node ---
 	Registry.RegisterAction(TEXT("animation"), TEXT("add_anim_graph_node"),
-		TEXT("Place an animation graph node (SequencePlayer, BlendSpacePlayer, TwoWayBlend, BlendListByBool, LayeredBoneBlend, MotionMatching) in a state or the main AnimGraph"),
+		TEXT("Place an animation graph node (SequencePlayer, BlendSpacePlayer, TwoWayBlend, BlendListByBool, LayeredBoneBlend, MotionMatching, TwoBoneIK, ModifyBone, LocalToComponentSpace, ComponentToLocalSpace) in a state or the main AnimGraph"),
 		FMonolithActionHandler::CreateStatic(&HandleAddAnimGraphNode),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Animation Blueprint asset path"))
-			.Required(TEXT("node_type"), TEXT("string"), TEXT("Node type: SequencePlayer, BlendSpacePlayer, TwoWayBlend, BlendListByBool, LayeredBoneBlend, MotionMatching"))
+			.Required(TEXT("node_type"), TEXT("string"), TEXT("Node type: SequencePlayer, BlendSpacePlayer, TwoWayBlend, BlendListByBool, LayeredBoneBlend, MotionMatching, TwoBoneIK, ModifyBone, LocalToComponentSpace, ComponentToLocalSpace"))
 			.Optional(TEXT("graph_name"), TEXT("string"), TEXT("Target graph name — 'AnimGraph' for top-level, or a state name for state inner graphs (default: AnimGraph)"), TEXT("AnimGraph"))
 			.Optional(TEXT("state_name"), TEXT("string"), TEXT("State name — if set, node is placed inside this state's inner graph (searched within the state machine found via graph_name if graph_name is a SM name, otherwise searches all SMs)"))
 			.Optional(TEXT("position_x"), TEXT("number"), TEXT("Node X position (default: 200)"), TEXT("200"))
 			.Optional(TEXT("position_y"), TEXT("number"), TEXT("Node Y position (default: 0)"), TEXT("0"))
 			.Optional(TEXT("anim_asset"), TEXT("string"), TEXT("Animation/BlendSpace asset path — for SequencePlayer and BlendSpacePlayer nodes"))
+			.Optional(TEXT("ik_bone"), TEXT("string"), TEXT("TwoBoneIK only: end-of-chain bone name (e.g. 'hand_l')"))
+			.Optional(TEXT("effector_space"), TEXT("string"), TEXT("TwoBoneIK only: EffectorLocationSpace — WorldSpace, ComponentSpace (default), ParentBoneSpace, BoneSpace"))
+			.Optional(TEXT("joint_target_space"), TEXT("string"), TEXT("TwoBoneIK only: JointTargetLocationSpace — WorldSpace, ComponentSpace (default), ParentBoneSpace, BoneSpace"))
+			.Optional(TEXT("bone_to_modify"), TEXT("string"), TEXT("ModifyBone only: bone to modify (e.g. 'spine_01')"))
+			.Optional(TEXT("expose_pins"), TEXT("array"), TEXT("Names of optional properties to expose as input pins (e.g. ['EffectorLocation','JointTargetLocation','Alpha']). TwoBoneIK exposes these three by default."))
 			.Build());
 
 	// --- connect_anim_graph_pins ---
@@ -63,6 +75,19 @@ void FMonolithAbpWriteActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("graph_name"), TEXT("string"), TEXT("Graph name to search in (default: searches all graphs)"))
 			.Optional(TEXT("state_name"), TEXT("string"), TEXT("State name to search in — narrows to a specific state's inner graph"))
 			.Optional(TEXT("compile"), TEXT("bool"), TEXT("Compile ABP after wiring (default: true)"), TEXT("true"))
+			.Build());
+
+	// --- add_variable_get ---
+	Registry.RegisterAction(TEXT("animation"), TEXT("add_variable_get"),
+		TEXT("Place a variable Get node (K2Node_VariableGet) in the AnimGraph — used to drive AnimGraph pins from AnimInstance members."),
+		FMonolithActionHandler::CreateStatic(&HandleAddVariableGet),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Animation Blueprint asset path"))
+			.Required(TEXT("variable_name"), TEXT("string"), TEXT("Variable name as exposed on the AnimInstance (C++ UPROPERTY or BP variable)"))
+			.Optional(TEXT("graph_name"), TEXT("string"), TEXT("Target graph name (default: AnimGraph)"), TEXT("AnimGraph"))
+			.Optional(TEXT("state_name"), TEXT("string"), TEXT("Optional state name to scope the search to a state inner graph"))
+			.Optional(TEXT("position_x"), TEXT("number"), TEXT("Node X position (default: 0)"), TEXT("0"))
+			.Optional(TEXT("position_y"), TEXT("number"), TEXT("Node Y position (default: 0)"), TEXT("0"))
 			.Build());
 
 	// --- set_state_animation ---
@@ -101,7 +126,25 @@ UClass* ResolveNodeClass(const FString& NodeType)
 		return UAnimGraphNode_LayeredBoneBlend::StaticClass();
 	if (NodeType.Equals(TEXT("MotionMatching"), ESearchCase::IgnoreCase))
 		return UAnimGraphNode_MotionMatching::StaticClass();
+	if (NodeType.Equals(TEXT("TwoBoneIK"), ESearchCase::IgnoreCase))
+		return UAnimGraphNode_TwoBoneIK::StaticClass();
+	if (NodeType.Equals(TEXT("ModifyBone"), ESearchCase::IgnoreCase))
+		return UAnimGraphNode_ModifyBone::StaticClass();
+	if (NodeType.Equals(TEXT("LocalToComponentSpace"), ESearchCase::IgnoreCase))
+		return UAnimGraphNode_LocalToComponentSpace::StaticClass();
+	if (NodeType.Equals(TEXT("ComponentToLocalSpace"), ESearchCase::IgnoreCase))
+		return UAnimGraphNode_ComponentToLocalSpace::StaticClass();
 	return nullptr;
+}
+
+/** Parse a bone-control-space string. Defaults to ComponentSpace when missing/unrecognized. */
+EBoneControlSpace ParseBoneControlSpace(const FString& Str, EBoneControlSpace Default = BCS_ComponentSpace)
+{
+	if (Str.Equals(TEXT("WorldSpace"), ESearchCase::IgnoreCase))      return BCS_WorldSpace;
+	if (Str.Equals(TEXT("ComponentSpace"), ESearchCase::IgnoreCase))  return BCS_ComponentSpace;
+	if (Str.Equals(TEXT("ParentBoneSpace"), ESearchCase::IgnoreCase)) return BCS_ParentBoneSpace;
+	if (Str.Equals(TEXT("BoneSpace"), ESearchCase::IgnoreCase))       return BCS_BoneSpace;
+	return Default;
 }
 
 /** Find a state machine graph by its display title (same lookup as Wave 10 add_state_to_machine). */
@@ -351,6 +394,35 @@ FMonolithActionResult FMonolithAbpWriteActions::HandleAddAnimGraphNode(const TSh
 		}
 	}
 
+	// Skeletal control node configuration (bone name, bone-control spaces) — set on the
+	// template before spawn so the duplicated node carries the config.
+	if (UAnimGraphNode_TwoBoneIK* IKTemplate = Cast<UAnimGraphNode_TwoBoneIK>(Template))
+	{
+		FString IKBone;
+		if (Params->TryGetStringField(TEXT("ik_bone"), IKBone) && !IKBone.IsEmpty())
+		{
+			IKTemplate->Node.IKBone.BoneName = FName(*IKBone);
+		}
+		FString EffectorSpace;
+		if (Params->TryGetStringField(TEXT("effector_space"), EffectorSpace))
+		{
+			IKTemplate->Node.EffectorLocationSpace = ParseBoneControlSpace(EffectorSpace);
+		}
+		FString JointTargetSpace;
+		if (Params->TryGetStringField(TEXT("joint_target_space"), JointTargetSpace))
+		{
+			IKTemplate->Node.JointTargetLocationSpace = ParseBoneControlSpace(JointTargetSpace);
+		}
+	}
+	else if (UAnimGraphNode_ModifyBone* ModifyTemplate = Cast<UAnimGraphNode_ModifyBone>(Template))
+	{
+		FString ModifyBoneName;
+		if (Params->TryGetStringField(TEXT("bone_to_modify"), ModifyBoneName) && !ModifyBoneName.IsEmpty())
+		{
+			ModifyTemplate->Node.BoneToModify.BoneName = FName(*ModifyBoneName);
+		}
+	}
+
 	GEditor->BeginTransaction(FText::FromString(TEXT("Add Anim Graph Node")));
 	TargetGraph->Modify();
 
@@ -366,6 +438,48 @@ FMonolithActionResult FMonolithAbpWriteActions::HandleAddAnimGraphNode(const TSh
 		return FMonolithActionResult::Error(TEXT("PerformAction failed — node was not spawned. Check that the target graph supports this node type."));
 	}
 
+	// Expose optional-pin properties on the spawned node (e.g. EffectorLocation,
+	// JointTargetLocation, Alpha on TwoBoneIK) so they can receive wire inputs.
+	// For TwoBoneIK we auto-expose the common set unless overridden.
+	{
+		UAnimGraphNode_Base* SpawnedAnim = Cast<UAnimGraphNode_Base>(SpawnedNode);
+		if (SpawnedAnim)
+		{
+			TArray<FName> PinsToExpose;
+
+			const TArray<TSharedPtr<FJsonValue>>* ExposePinsArr = nullptr;
+			if (Params->TryGetArrayField(TEXT("expose_pins"), ExposePinsArr) && ExposePinsArr)
+			{
+				for (const TSharedPtr<FJsonValue>& V : *ExposePinsArr)
+				{
+					if (V.IsValid()) PinsToExpose.AddUnique(FName(*V->AsString()));
+				}
+			}
+
+			// Defaults: TwoBoneIK commonly needs target + joint target + alpha as input pins.
+			if (Cast<UAnimGraphNode_TwoBoneIK>(SpawnedAnim) && PinsToExpose.Num() == 0)
+			{
+				PinsToExpose.Add(TEXT("EffectorLocation"));
+				PinsToExpose.Add(TEXT("JointTargetLocation"));
+				PinsToExpose.Add(TEXT("Alpha"));
+			}
+
+			bool bAnyExposed = false;
+			for (FOptionalPinFromProperty& OptPin : SpawnedAnim->ShowPinForProperties)
+			{
+				if (PinsToExpose.Contains(OptPin.PropertyName) && !OptPin.bShowPin)
+				{
+					OptPin.bShowPin = true;
+					bAnyExposed = true;
+				}
+			}
+			if (bAnyExposed)
+			{
+				SpawnedAnim->ReconstructNode();
+			}
+		}
+	}
+
 	// Do NOT compile here — caller should batch node adds then wire, then compile once.
 	// Just mark dirty.
 	ABP->MarkPackageDirty();
@@ -375,6 +489,74 @@ FMonolithActionResult FMonolithAbpWriteActions::HandleAddAnimGraphNode(const TSh
 	Root->SetStringField(TEXT("node_name"), SpawnedNode->GetName());
 	Root->SetStringField(TEXT("node_class"), SpawnedNode->GetClass()->GetName());
 	Root->SetStringField(TEXT("node_guid"), SpawnedNode->NodeGuid.ToString());
+	Root->SetNumberField(TEXT("position_x"), SpawnedNode->NodePosX);
+	Root->SetNumberField(TEXT("position_y"), SpawnedNode->NodePosY);
+	Root->SetArrayField(TEXT("pins"), BuildPinList(SpawnedNode));
+	return FMonolithActionResult::Success(Root);
+}
+
+// ---------------------------------------------------------------------------
+// Action: add_variable_get
+// ---------------------------------------------------------------------------
+
+FMonolithActionResult FMonolithAbpWriteActions::HandleAddVariableGet(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+	FString VarName   = Params->GetStringField(TEXT("variable_name"));
+	FString GraphName = Params->HasField(TEXT("graph_name")) ? Params->GetStringField(TEXT("graph_name")) : TEXT("AnimGraph");
+	FString StateName = Params->HasField(TEXT("state_name")) ? Params->GetStringField(TEXT("state_name")) : TEXT("");
+
+	double TempVal;
+	float PosX = 0.f;
+	float PosY = 0.f;
+	if (Params->TryGetNumberField(TEXT("position_x"), TempVal)) PosX = static_cast<float>(TempVal);
+	if (Params->TryGetNumberField(TEXT("position_y"), TempVal)) PosY = static_cast<float>(TempVal);
+
+	if (VarName.IsEmpty()) return FMonolithActionResult::Error(TEXT("Missing required parameter: variable_name"));
+
+	UAnimBlueprint* ABP = FMonolithAssetUtils::LoadAssetByPath<UAnimBlueprint>(AssetPath);
+	if (!ABP) return FMonolithActionResult::Error(FString::Printf(TEXT("AnimBlueprint not found: %s"), *AssetPath));
+
+	FString GraphError;
+	UEdGraph* TargetGraph = ResolveTargetGraph(ABP, GraphName, StateName, GraphError);
+	if (!TargetGraph) return FMonolithActionResult::Error(GraphError);
+
+	// Validate the variable exists on Self (either as a BP-declared var or a C++ UPROPERTY
+	// on the parent AnimInstance class). SetSelfMember resolves at compile time, but we
+	// eagerly check so the caller gets a clear error.
+	const FName VarFName(*VarName);
+	UClass* SkeletonClass = ABP->SkeletonGeneratedClass ? ABP->SkeletonGeneratedClass : ABP->GeneratedClass;
+	if (SkeletonClass && !SkeletonClass->FindPropertyByName(VarFName))
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Variable '%s' not found on %s — check spelling and BlueprintReadOnly/ReadWrite on the UPROPERTY."),
+			*VarName, *SkeletonClass->GetName()));
+	}
+
+	UK2Node_VariableGet* Template = NewObject<UK2Node_VariableGet>(GetTransientPackage());
+	Template->VariableReference.SetSelfMember(VarFName);
+
+	GEditor->BeginTransaction(FText::FromString(TEXT("Add Variable Get")));
+	TargetGraph->Modify();
+
+	FEdGraphSchemaAction_K2NewNode Action;
+	Action.NodeTemplate = Template;
+	UEdGraphNode* SpawnedNode = Action.PerformAction(TargetGraph, /*FromPin=*/nullptr, FVector2f(PosX, PosY), /*bSelectNewNode=*/false);
+
+	GEditor->EndTransaction();
+
+	if (!SpawnedNode)
+	{
+		return FMonolithActionResult::Error(TEXT("PerformAction failed for K2Node_VariableGet."));
+	}
+
+	ABP->MarkPackageDirty();
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("node_name"), SpawnedNode->GetName());
+	Root->SetStringField(TEXT("node_class"), SpawnedNode->GetClass()->GetName());
+	Root->SetStringField(TEXT("node_guid"), SpawnedNode->NodeGuid.ToString());
+	Root->SetStringField(TEXT("variable_name"), VarName);
 	Root->SetNumberField(TEXT("position_x"), SpawnedNode->NodePosX);
 	Root->SetNumberField(TEXT("position_y"), SpawnedNode->NodePosY);
 	Root->SetArrayField(TEXT("pins"), BuildPinList(SpawnedNode));
