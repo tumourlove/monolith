@@ -21,7 +21,9 @@ public class MonolithCore : ModuleRules
 			"Projects",
 			"AssetRegistry",
 			"EditorSubsystem",
-			"UnrealEd"
+			"UnrealEd",
+			"Sockets",
+			"Networking"
 		});
 	}
 }

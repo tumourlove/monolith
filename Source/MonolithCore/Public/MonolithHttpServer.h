@@ -24,6 +24,9 @@ public:
 	/** Stop the server and unbind all routes */
 	void Stop();
 
+	/** Stop then Start — useful after a silent bind failure */
+	bool Restart(int32 Port);
+
 	/** Is the server currently running? */
 	bool IsRunning() const { return bIsRunning; }
 
@@ -31,6 +34,12 @@ public:
 	int32 GetPort() const { return BoundPort; }
 
 private:
+	/** Register all HTTP routes on the current HttpRouter. */
+	void BindRoutes();
+
+	/** Probe 127.0.0.1:Port via a TCP connect to verify the listener is actually bound. */
+	static bool ProbePort(int32 Port);
+
 	// --- Route Handlers ---
 	bool HandlePostMcp(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleGetMcp(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);

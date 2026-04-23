@@ -6,9 +6,19 @@
 #include "MonolithCoreTools.h"
 #include "Misc/FileHelper.h"
 #include "GenericPlatform/GenericPlatformProcess.h"
+#include "HAL/IConsoleManager.h"
 #include "Interfaces/IPluginManager.h"
 
 #define LOCTEXT_NAMESPACE "FMonolithCoreModule"
+
+// Console command: `Monolith.Restart` — stops and restarts the MCP HTTP server
+// on its configured port. Useful when the initial bind failed silently (e.g.
+// port held by a zombie instance at UE boot).
+static FAutoConsoleCommand GMonolithRestartCmd(
+	TEXT("Monolith.Restart"),
+	TEXT("Restart the Monolith MCP HTTP server on its configured port."),
+	FConsoleCommandDelegate::CreateStatic(&FMonolithCoreModule::RestartHttpServer)
+);
 
 void FMonolithCoreModule::StartupModule()
 {
@@ -32,6 +42,36 @@ void FMonolithCoreModule::StartupModule()
 	else
 	{
 		UE_LOG(LogMonolith, Error, TEXT("Failed to start MCP server on port %d"), Port);
+	}
+}
+
+void FMonolithCoreModule::RestartHttpServer()
+{
+	if (!IsAvailable())
+	{
+		UE_LOG(LogMonolith, Warning, TEXT("Monolith.Restart: MonolithCore module not loaded"));
+		return;
+	}
+
+	FMonolithCoreModule& Module = Get();
+	if (!Module.HttpServer.IsValid())
+	{
+		UE_LOG(LogMonolith, Warning, TEXT("Monolith.Restart: HTTP server instance missing — creating new one"));
+		Module.HttpServer = MakeUnique<FMonolithHttpServer>();
+	}
+
+	const UMonolithSettings* Settings = UMonolithSettings::Get();
+	const int32 Port = Settings ? Settings->ServerPort : 9316;
+
+	UE_LOG(LogMonolith, Log, TEXT("Monolith.Restart: restarting HTTP server on port %d"), Port);
+	if (Module.HttpServer->Restart(Port))
+	{
+		Module.WriteSentinelFile(Port);
+		UE_LOG(LogMonolith, Log, TEXT("Monolith.Restart: success"));
+	}
+	else
+	{
+		UE_LOG(LogMonolith, Error, TEXT("Monolith.Restart: failed to rebind port %d"), Port);
 	}
 }
 
