@@ -102,6 +102,23 @@ void FMonolithAbpWriteActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("position_x"), TEXT("number"), TEXT("Node X position (default: 0)"), TEXT("0"))
 			.Optional(TEXT("position_y"), TEXT("number"), TEXT("Node Y position (default: 0)"), TEXT("0"))
 			.Build());
+
+	// --- set_anim_graph_node_property ---
+	// Mutates a property on the *source* UAnimGraphNode's inner FAnimNode struct.
+	// Writing via blueprint.set_cdo_property is wiped on compile because the AnimBP's
+	// CDO is regenerated from the graph nodes — this action edits the authoritative
+	// source so the change persists.
+	Registry.RegisterAction(TEXT("animation"), TEXT("set_anim_graph_node_property"),
+		TEXT("Mutate a property on an existing anim graph node's internal FAnimNode struct (e.g. ModifyBone.BoneToModify.BoneName, ModifyBone.RotationMode, TwoBoneIK.EffectorLocationSpace). Persists across compile — writes to the source UAnimGraphNode, not the CDO."),
+		FMonolithActionHandler::CreateStatic(&HandleSetAnimGraphNodeProperty),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Animation Blueprint asset path"))
+			.Required(TEXT("node_id"), TEXT("string"), TEXT("Node UObject name (e.g. 'AnimGraphNode_ModifyBone_7') — same id surfaced by get_graph_summary / add_anim_graph_node response"))
+			.Required(TEXT("property_path"), TEXT("string"), TEXT("Dotted property path inside the node's inner FAnimNode struct (e.g. 'BoneToModify.BoneName', 'RotationMode', 'EffectorLocationSpace', 'Alpha'). Do NOT prefix with 'Node.'."))
+			.Required(TEXT("value"), TEXT("string"), TEXT("Value as text — same format as ImportText in the Details panel. Enums: bare name (e.g. 'BMM_Additive', 'BCS_ComponentSpace'). FName: bare name. Struct: '(Field=Value,...)'."))
+			.Optional(TEXT("graph_name"), TEXT("string"), TEXT("Graph name to scope the search (default: searches all graphs)"))
+			.Optional(TEXT("state_name"), TEXT("string"), TEXT("State name to narrow the search to a specific state's inner graph"))
+			.Build());
 }
 
 // ---------------------------------------------------------------------------
@@ -861,5 +878,170 @@ FMonolithActionResult FMonolithAbpWriteActions::HandleAddVariableGet(const TShar
 	Root->SetNumberField(TEXT("position_x"), SpawnedNode->NodePosX);
 	Root->SetNumberField(TEXT("position_y"), SpawnedNode->NodePosY);
 	Root->SetArrayField(TEXT("pins"), BuildPinList(SpawnedNode));
+	return FMonolithActionResult::Success(Root);
+}
+
+// ---------------------------------------------------------------------------
+// Action: set_anim_graph_node_property
+// ---------------------------------------------------------------------------
+
+namespace
+{
+/**
+ * Resolve a dotted property path inside a container (struct value).
+ * On success, `OutProperty` is the final property, `OutContainer` is the
+ * address of the immediately-enclosing struct/object where that property lives.
+ *
+ *   path="BoneToModify.BoneName"  →  Prop=FNameProperty, Container=&Node.BoneToModify
+ *   path="RotationMode"            →  Prop=FEnumProperty,  Container=&Node
+ */
+bool ResolvePropertyPath(UStruct* StructType, void* StructAddr, const FString& Path,
+                         FProperty*& OutProperty, void*& OutContainer, FString& OutError)
+{
+	TArray<FString> Tokens;
+	Path.ParseIntoArray(Tokens, TEXT("."));
+	if (Tokens.Num() == 0)
+	{
+		OutError = TEXT("property_path is empty");
+		return false;
+	}
+
+	UStruct* Cursor = StructType;
+	void*    Addr   = StructAddr;
+
+	for (int32 i = 0; i < Tokens.Num(); ++i)
+	{
+		const FString& Tok = Tokens[i];
+		FProperty* Prop = Cursor ? Cursor->FindPropertyByName(FName(*Tok)) : nullptr;
+		if (!Prop)
+		{
+			OutError = FString::Printf(TEXT("Property '%s' not found on %s"),
+				*Tok, Cursor ? *Cursor->GetName() : TEXT("<null>"));
+			return false;
+		}
+
+		if (i == Tokens.Num() - 1)
+		{
+			OutProperty  = Prop;
+			OutContainer = Addr;
+			return true;
+		}
+
+		// Descend into nested structs.
+		FStructProperty* StructProp = CastField<FStructProperty>(Prop);
+		if (!StructProp)
+		{
+			OutError = FString::Printf(TEXT("Cannot descend into '%s' — not a struct property"), *Tok);
+			return false;
+		}
+		Cursor = StructProp->Struct;
+		Addr   = StructProp->ContainerPtrToValuePtr<void>(Addr);
+	}
+
+	OutError = TEXT("unreachable");
+	return false;
+}
+} // anonymous namespace
+
+FMonolithActionResult FMonolithAbpWriteActions::HandleSetAnimGraphNodeProperty(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath    = Params->GetStringField(TEXT("asset_path"));
+	FString NodeId       = Params->GetStringField(TEXT("node_id"));
+	FString PropertyPath = Params->GetStringField(TEXT("property_path"));
+	FString Value        = Params->GetStringField(TEXT("value"));
+	FString GraphName    = Params->HasField(TEXT("graph_name")) ? Params->GetStringField(TEXT("graph_name")) : TEXT("");
+	FString StateName    = Params->HasField(TEXT("state_name")) ? Params->GetStringField(TEXT("state_name")) : TEXT("");
+
+	if (NodeId.IsEmpty())       return FMonolithActionResult::Error(TEXT("Missing required parameter: node_id"));
+	if (PropertyPath.IsEmpty()) return FMonolithActionResult::Error(TEXT("Missing required parameter: property_path"));
+
+	UAnimBlueprint* ABP = FMonolithAssetUtils::LoadAssetByPath<UAnimBlueprint>(AssetPath);
+	if (!ABP) return FMonolithActionResult::Error(FString::Printf(TEXT("AnimBlueprint not found: %s"), *AssetPath));
+
+	// Optional graph scope — same resolution as connect_anim_graph_pins.
+	UEdGraph* ScopeGraph = nullptr;
+	if (!StateName.IsEmpty() || (!GraphName.IsEmpty() && !GraphName.Equals(TEXT("AnimGraph"), ESearchCase::IgnoreCase)))
+	{
+		FString GraphError;
+		ScopeGraph = ResolveTargetGraph(ABP, GraphName, StateName, GraphError);
+	}
+
+	UEdGraphNode* FoundNode = FindNodeByName(ABP, NodeId, ScopeGraph);
+	if (!FoundNode)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Node '%s' not found"), *NodeId));
+	}
+
+	UAnimGraphNode_Base* AnimNode = Cast<UAnimGraphNode_Base>(FoundNode);
+	if (!AnimNode)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Node '%s' is not a UAnimGraphNode_Base (class: %s) — this action only mutates anim graph nodes"),
+			*NodeId, *FoundNode->GetClass()->GetName()));
+	}
+
+	// Find the inner `Node` FStructProperty on the UAnimGraphNode subclass. Every
+	// UAnimGraphNode_X has a UPROPERTY-tagged FAnimNode_X field — conventionally
+	// named "Node", but some subclasses rename it, so we scan for any FStructProperty
+	// whose struct inherits from FAnimNode_Base.
+	FStructProperty* NodeStructProp = nullptr;
+	for (TFieldIterator<FStructProperty> It(AnimNode->GetClass()); It; ++It)
+	{
+		FStructProperty* P = *It;
+		if (!P || !P->Struct) continue;
+		// Heuristic: accept any struct derived from FAnimNode_Base.
+		if (P->Struct->IsChildOf(FAnimNode_Base::StaticStruct()))
+		{
+			NodeStructProp = P;
+			break;
+		}
+	}
+	if (!NodeStructProp)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Could not locate FAnimNode struct on '%s' — does the class inherit from FAnimNode_Base?"),
+			*AnimNode->GetClass()->GetName()));
+	}
+
+	void* NodeStructAddr = NodeStructProp->ContainerPtrToValuePtr<void>(AnimNode);
+
+	FProperty* TargetProp   = nullptr;
+	void*      TargetContainer = nullptr;
+	FString    ResolveError;
+	if (!ResolvePropertyPath(NodeStructProp->Struct, NodeStructAddr, PropertyPath, TargetProp, TargetContainer, ResolveError))
+	{
+		return FMonolithActionResult::Error(ResolveError);
+	}
+
+	// Capture old value for diff.
+	FString OldValueText;
+	TargetProp->ExportText_InContainer(0, OldValueText, TargetContainer, TargetContainer, nullptr, PPF_None);
+
+	// Write via ImportText — same parser the Details panel uses.
+	AnimNode->Modify();
+	const TCHAR* Buffer = *Value;
+	void* TargetValue = TargetProp->ContainerPtrToValuePtr<void>(TargetContainer);
+	const TCHAR* ImportResult = TargetProp->ImportText_Direct(Buffer, TargetValue, AnimNode, PPF_None);
+	if (!ImportResult)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("ImportText failed for property '%s' with value '%s'"),
+			*PropertyPath, *Value));
+	}
+
+	FString NewValueText;
+	TargetProp->ExportText_InContainer(0, NewValueText, TargetContainer, TargetContainer, nullptr, PPF_None);
+
+	// Refresh the node's UI and notify the BP so the change isn't lost on next save.
+	AnimNode->ReconstructNode();
+	ABP->MarkPackageDirty();
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(ABP);
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+	Root->SetStringField(TEXT("node_id"), AnimNode->GetName());
+	Root->SetStringField(TEXT("property_path"), PropertyPath);
+	Root->SetStringField(TEXT("old_value"), OldValueText);
+	Root->SetStringField(TEXT("new_value"), NewValueText);
 	return FMonolithActionResult::Success(Root);
 }
