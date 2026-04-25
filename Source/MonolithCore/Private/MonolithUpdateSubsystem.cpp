@@ -6,7 +6,6 @@
 #include "HttpModule.h"
 #include "Interfaces/IHttpRequest.h"
 #include "Interfaces/IHttpResponse.h"
-#include "GenericPlatform/GenericPlatformMisc.h"
 #include "HAL/PlatformMisc.h"
 #include "Internationalization/Regex.h"
 #include "Misc/FileHelper.h"
