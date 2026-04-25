@@ -22,6 +22,7 @@ public class MonolithAI : ModuleRules
 			"GameplayStateTreeModule",
 			"StateTreeModule", "StateTreeEditorModule", "PropertyBindingUtils", "StructUtils",
 			"SmartObjectsModule", "SmartObjectsEditorModule",
+			"Projects",  // IPluginManager (Phase D2)
 			"Json", "JsonUtilities",
 			"SQLiteCore"
 		});
@@ -40,6 +41,47 @@ public class MonolithAI : ModuleRules
 		{
 			EngineDir = Path.GetFullPath(Target.RelativeEnginePath);
 			EnginePluginsDir = Path.Combine(EngineDir, "Plugins");
+		}
+
+		// --- Conditional: GameplayAbilities (Phase I2: BT-to-GAS task) ---
+		// Engine plugin shipped with UE 5.7 by default. We probe the disk so a
+		// project that disables the plugin entirely still compiles MonolithAI.
+		// 3-location probe mirrors the canonical Build.cs pattern in
+		// MonolithGAS.Build.cs.
+		bool bHasGameplayAbilities = false;
+		if (!bReleaseBuild)
+		{
+			// 1. Engine Plugins/Runtime/GameplayAbilities (canonical UE 5.7 layout)
+			if (Directory.Exists(Path.Combine(EnginePluginsDir, "Runtime", "GameplayAbilities")))
+			{
+				bHasGameplayAbilities = true;
+			}
+			// 2. Engine Plugins/GameplayAbilities (older layout / project install)
+			else if (Directory.Exists(Path.Combine(EnginePluginsDir, "GameplayAbilities")))
+			{
+				bHasGameplayAbilities = true;
+			}
+			// 3. Project Plugins/ (manual install)
+			else if (Target.ProjectFile != null)
+			{
+				string ProjectPluginsDir = Path.Combine(
+					Target.ProjectFile.Directory.FullName, "Plugins");
+				if (Directory.Exists(ProjectPluginsDir))
+				{
+					bHasGameplayAbilities = Directory.Exists(
+						Path.Combine(ProjectPluginsDir, "GameplayAbilities"));
+				}
+			}
+		}
+
+		if (bHasGameplayAbilities)
+		{
+			PublicDependencyModuleNames.Add("GameplayAbilities");
+			PublicDefinitions.Add("WITH_GAMEPLAYABILITIES=1");
+		}
+		else
+		{
+			PublicDefinitions.Add("WITH_GAMEPLAYABILITIES=0");
 		}
 
 		// --- Conditional: GameplayBehaviors (Experimental) ---

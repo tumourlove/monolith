@@ -14,12 +14,12 @@
 
 | Class | Responsibility |
 |-------|---------------|
-| `FMonolithEditorModule` | Creates FMonolithLogCapture, attaches to GLog, registers 20 actions |
+| `FMonolithEditorModule` | Creates FMonolithLogCapture, attaches to GLog, registers 22 actions (20 base + 2 from `FMonolithEditorMapActions` Phase J F8) |
 | `FMonolithLogCapture` | FOutputDevice subclass. Ring buffer (10,000 entries max). Thread-safe. Tracks counts by verbosity |
 | `FMonolithEditorActions` | Static handlers for build and log operations. Hooks into `ILiveCodingModule::GetOnPatchCompleteDelegate()` to capture compile results and timestamps |
 | `FMonolithSettingsCustomization` | IDetailCustomization for UMonolithSettings. Adds re-index buttons for project and source databases in Project Settings UI |
 
-### Actions (19 — namespace: "editor")
+### Actions (22 — namespace: "editor")
 
 | Action | Description |
 |--------|-------------|
@@ -42,5 +42,7 @@
 | `stitch_flipbook` | Stitch multiple texture assets into a flipbook atlas. Params: `frames[]`, `columns`, `save_path` |
 | `delete_assets` | Delete one or more assets by path. Params: `asset_paths[]`, `force` |
 | `get_viewport_info` | Get active editor viewport camera location, rotation, FOV, resolution, realtime state |
+| `create_empty_map` | **Phase J F8.** Create a fully blank UWorld asset at `path` and save the package. v1 supports `map_template="blank"` only. Errors cleanly on path collision, malformed package path, factory/save failure |
+| `get_module_status` | **Phase J F8.** Report `{ module_name, plugin_name, enabled, loaded, is_runtime, version? }` for the named modules (or all Monolith modules if `module_names` is omitted). Unknown modules return `enabled=false / loaded=false / plugin_name=""` without error |
 
 ---

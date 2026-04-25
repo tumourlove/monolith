@@ -2,6 +2,8 @@
 #include "MonolithParamSchema.h"
 #include "MonolithAssetUtils.h"
 
+#include "Misc/Optional.h"
+
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/BlackboardData.h"
 #include "BehaviorTree/BTCompositeNode.h"
@@ -46,6 +48,15 @@
 #include "BehaviorTree/Tasks/BTTask_BlueprintBase.h"
 #include "BehaviorTree/Decorators/BTDecorator_BlueprintBase.h"
 #include "BehaviorTree/Services/BTService_BlueprintBase.h"
+#include "Interfaces/IPluginManager.h"  // Phase D2: GameplayBehaviorSmartObjects plugin probe
+
+// Phase I2: BT-to-GAS direct ability activation. Header self-gates on
+// WITH_GAMEPLAYABILITIES; the action handler also gates so the registry entry
+// returns a clear runtime error when the engine plugin is disabled.
+#if WITH_GAMEPLAYABILITIES
+#include "BehaviorTreeTasks/BTTask_TryActivateAbility.h"
+#include "Abilities/GameplayAbility.h"
+#endif
 
 // ============================================================
 //  Helpers
@@ -235,6 +246,53 @@ namespace
 		return nullptr;
 	}
 
+	/**
+	 * Phase J F15 — distinguish "invalid GUID format" from "unknown GUID" at the call site.
+	 *
+	 * The legacy `FindGraphNodeByGuid` collapses both failure modes into `nullptr`, so 16
+	 * sibling call sites in this file all returned the same "...not found" error regardless
+	 * of whether the caller typed garbage or a valid-but-unmatched GUID. Hoisted here so
+	 * every site emits one of two distinct, actionable messages:
+	 *   - parse fail:     `<ParamName> '<GuidStr>' is not a valid GUID`
+	 *   - lookup fail:    `No node with GUID '<GuidStr>' in BT '<BTName>'`
+	 *
+	 * Returns true on success (OutNode populated, OutError untouched).
+	 * Returns false on failure (OutNode = nullptr, OutError populated with the right message).
+	 *
+	 * Existing post-lookup validation (cast to subclass, ValidateParentForChildTask, etc.)
+	 * stays at each call site — this helper only replaces the parse + base-lookup steps.
+	 */
+	bool RequireBtNodeByGuid(
+		UBehaviorTreeGraph* Graph,
+		const FString& GuidStr,
+		const FString& ParamName,
+		const FString& BTName,
+		UBehaviorTreeGraphNode*& OutNode,
+		FString& OutError)
+	{
+		OutNode = nullptr;
+
+		FGuid Probe;
+		if (!FGuid::Parse(GuidStr, Probe))
+		{
+			OutError = FString::Printf(TEXT("%s '%s' is not a valid GUID"), *ParamName, *GuidStr);
+			return false;
+		}
+
+		UBehaviorTreeGraphNode* Found = FindGraphNodeByGuid(Graph, GuidStr);
+		if (!Found)
+		{
+			OutError = FString::Printf(
+				TEXT("No node with GUID '%s' in BT '%s'"),
+				*GuidStr,
+				BTName.IsEmpty() ? TEXT("(unknown)") : *BTName);
+			return false;
+		}
+
+		OutNode = Found;
+		return true;
+	}
+
 	/** Find the root graph node in a BT graph. */
 	UBehaviorTreeGraphNode_Root* FindRootNode(UBehaviorTreeGraph* Graph)
 	{
@@ -266,12 +324,92 @@ namespace
 		return Children;
 	}
 
-	/** Connect parent output pin to child input pin at a given index. */
+	/**
+	 * Phase F1: validate that a graph node is a legal parent for a *task* graph child.
+	 *
+	 * The crash this guards against: `UBehaviorTreeGraphNode_Root` is a UI-only sentinel
+	 * with `NodeInstance == nullptr` — wiring a Task directly under it produces an
+	 * invalid graph that crashes `UBehaviorTreeGraph::UpdateAsset()` at
+	 * `BehaviorTreeGraph.cpp:517` (`RootNode->Children.Reset()`, deref of null
+	 * `BTAsset->RootNode`). The engine's own schema (`UEdGraphSchema_BehaviorTree::
+	 * CanCreateConnection`) rejects Root->Task at the connection step ("Only
+	 * composite nodes are allowed"), but our `ConnectParentChild` helper bypasses
+	 * the schema by calling raw `MakeLinkTo`. This validator restores the schema
+	 * invariant at the API entry point.
+	 *
+	 * Returns `TOptional<FString>` — `Some(error)` rejects the call, `Unset` accepts.
+	 * `ActionName` is interpolated into the error so callers don't all hand-roll
+	 * the same prefix.
+	 */
+	TOptional<FString> ValidateParentForChildTask(const UBehaviorTreeGraphNode* ParentGraphNode, const TCHAR* ActionName)
+	{
+		if (!ParentGraphNode)
+		{
+			return FString::Printf(TEXT("%s: parent graph node is null"), ActionName);
+		}
+
+		// Root edge node has no NodeInstance by engine design (BehaviorTreeGraphNode_Root.cpp:54-57).
+		if (ParentGraphNode->IsA<UBehaviorTreeGraphNode_Root>() && ParentGraphNode->NodeInstance == nullptr)
+		{
+			return FString::Printf(TEXT(
+				"%s: Cannot add task as direct child of root: BT root has no composite. "
+				"Add a composite node first via add_bt_node(class=BTComposite_Selector) "
+				"then re-target this action with parent_id=<composite_guid>."),
+				ActionName);
+		}
+
+		// Non-root parent must wrap a UBTCompositeNode at runtime — tasks may only attach to composites.
+		const UBTNode* ParentBTNode = Cast<UBTNode>(ParentGraphNode->NodeInstance);
+		if (!ParentBTNode)
+		{
+			// Root-with-null already errored above; any other graph node lacking a NodeInstance is malformed.
+			return FString::Printf(TEXT(
+				"%s: parent graph node '%s' has no BT node instance — graph is malformed. "
+				"Add a composite first via add_bt_node(class=BTComposite_Selector)."),
+				ActionName, *ParentGraphNode->NodeGuid.ToString());
+		}
+		if (!ParentBTNode->IsA<UBTCompositeNode>())
+		{
+			return FString::Printf(TEXT(
+				"%s: parent node '%s' is a %s; tasks may only be attached to composites "
+				"(Selector/Sequence/Parallel/SimpleParallel)."),
+				ActionName,
+				*ParentGraphNode->NodeGuid.ToString(),
+				*ParentBTNode->GetClass()->GetName());
+		}
+
+		return TOptional<FString>(); // unset = valid
+	}
+
+	/**
+	 * Connect parent output pin to child input pin at a given index.
+	 *
+	 * Phase F1 belt-and-suspenders: route through `UEdGraphSchema::CanCreateConnection`
+	 * before calling `MakeLinkTo`. The entry-point validator (`ValidateParentForChildTask`)
+	 * is the primary defense, but routing through the schema here also protects:
+	 *  - future internal callers who skip the entry guard
+	 *  - composite-of-composite / decorator wiring edge cases the schema enforces
+	 *
+	 * Schema reference: `UEdGraphSchema_BehaviorTree::CanCreateConnection`
+	 * (`Engine/Source/Editor/BehaviorTreeEditor/Private/EdGraphSchema_BehaviorTree.cpp:238`).
+	 */
 	bool ConnectParentChild(UBehaviorTreeGraphNode* Parent, UBehaviorTreeGraphNode* Child, int32 Index = -1)
 	{
-		UEdGraphPin* ParentOut = Parent->GetOutputPin();
-		UEdGraphPin* ChildIn = Child->GetInputPin();
+		UEdGraphPin* ParentOut = Parent ? Parent->GetOutputPin() : nullptr;
+		UEdGraphPin* ChildIn  = Child  ? Child->GetInputPin()  : nullptr;
 		if (!ParentOut || !ChildIn) return false;
+
+		const UEdGraph* OwnerGraph = Parent->GetGraph();
+		if (const UEdGraphSchema* Schema = OwnerGraph ? OwnerGraph->GetSchema() : nullptr)
+		{
+			const FPinConnectionResponse Resp = Schema->CanCreateConnection(ParentOut, ChildIn);
+			if (Resp.Response == CONNECT_RESPONSE_DISALLOW)
+			{
+				UE_LOG(LogMonolithAI, Warning,
+					TEXT("ConnectParentChild rejected by schema: %s"), *Resp.Message.ToString());
+				return false;
+			}
+		}
 
 		ParentOut->MakeLinkTo(ChildIn);
 		return true;
@@ -369,6 +507,23 @@ namespace
 			FName StructFName = StructProp->Struct->GetFName();
 			if (StructFName == FName(TEXT("AIDataProviderFloatValue")) || StructFName == FName(TEXT("ValueOrBBKey_Float")))
 			{
+				// Phase D3: if caller passed a struct literal like "(DefaultValue=5.0)" as a string,
+				// route through ImportText_Direct so we don't atod-zero the wrapped numeric.
+				if (Value->Type == EJson::String)
+				{
+					FString StrVal = Value->AsString();
+					if (StrVal.TrimStartAndEnd().StartsWith(TEXT("(")))
+					{
+						const TCHAR* Buffer = *StrVal;
+						if (StructProp->ImportText_Direct(Buffer, PropAddr, Obj, PPF_None) != nullptr)
+						{
+							return true;
+						}
+						OutError = FString::Printf(TEXT("Failed to ImportText for FAIDataProviderFloatValue literal '%s' on '%s'"), *StrVal, *PropName);
+						return false;
+					}
+				}
+
 				// Set DefaultValue directly — the struct wraps a float with optional data binding
 				FProperty* DefaultValProp = StructProp->Struct->FindPropertyByName(TEXT("DefaultValue"));
 				if (DefaultValProp)
@@ -385,6 +540,22 @@ namespace
 			}
 			if (StructFName == FName(TEXT("AIDataProviderBoolValue")) || StructFName == FName(TEXT("ValueOrBBKey_Bool")))
 			{
+				// Phase D3: handle struct-literal string form before AsBool().
+				if (Value->Type == EJson::String)
+				{
+					FString StrVal = Value->AsString();
+					if (StrVal.TrimStartAndEnd().StartsWith(TEXT("(")))
+					{
+						const TCHAR* Buffer = *StrVal;
+						if (StructProp->ImportText_Direct(Buffer, PropAddr, Obj, PPF_None) != nullptr)
+						{
+							return true;
+						}
+						OutError = FString::Printf(TEXT("Failed to ImportText for FAIDataProviderBoolValue literal '%s' on '%s'"), *StrVal, *PropName);
+						return false;
+					}
+				}
+
 				FProperty* DefaultValProp = StructProp->Struct->FindPropertyByName(TEXT("DefaultValue"));
 				if (DefaultValProp)
 				{
@@ -509,6 +680,20 @@ namespace
 
 			if (bIsFloatWrapper)
 			{
+				// Phase D3: handle struct-literal string form before AsNumber() atod-zeros it.
+				if (Value->Type == EJson::String)
+				{
+					FString StrVal = Value->AsString();
+					if (StrVal.TrimStartAndEnd().StartsWith(TEXT("(")))
+					{
+						const TCHAR* Buffer = *StrVal;
+						if (StructProp->ImportText_Direct(Buffer, PropAddr, Obj, PPF_None) != nullptr)
+						{
+							return true;
+						}
+					}
+				}
+
 				FProperty* DVP = StructProp->Struct->FindPropertyByName(TEXT("DefaultValue"));
 				if (DVP)
 				{
@@ -522,6 +707,20 @@ namespace
 			}
 			if (bIsBoolWrapper)
 			{
+				// Phase D3: handle struct-literal string form before AsBool().
+				if (Value->Type == EJson::String)
+				{
+					FString StrVal = Value->AsString();
+					if (StrVal.TrimStartAndEnd().StartsWith(TEXT("(")))
+					{
+						const TCHAR* Buffer = *StrVal;
+						if (StructProp->ImportText_Direct(Buffer, PropAddr, Obj, PPF_None) != nullptr)
+						{
+							return true;
+						}
+					}
+				}
+
 				FProperty* DVP = StructProp->Struct->FindPropertyByName(TEXT("DefaultValue"));
 				if (DVP)
 				{
@@ -535,6 +734,15 @@ namespace
 			}
 
 			// Generic struct import
+			// Phase D3: guard against EJson::Number — AsString() can't coerce a numeric value to a struct literal.
+			if (Value->Type == EJson::Number)
+			{
+				OutError = FString::Printf(TEXT(
+					"Cannot set struct property '%s' (struct: %s) from a JSON number — pass a struct literal "
+					"string like \"(Field=Value)\" or, if this struct wraps a single numeric, use the wrapper-aware path."),
+					*PropName, *StructName.ToString());
+				return false;
+			}
 			FString StructStr = Value->AsString();
 			const TCHAR* Buffer = *StructStr;
 			if (StructProp->ImportText_Direct(Buffer, PropAddr, Obj, PPF_None) != nullptr)
@@ -554,7 +762,7 @@ namespace
 				ObjProp->SetPropertyValue(PropAddr, nullptr);
 				return true;
 			}
-			UObject* RefObj = StaticLoadObject(ObjProp->PropertyClass, nullptr, *ObjPath);
+			UObject* RefObj = FMonolithAssetUtils::LoadAssetByPath(ObjProp->PropertyClass, ObjPath);
 			if (!RefObj)
 			{
 				OutError = FString::Printf(TEXT("Object not found: %s"), *ObjPath);
@@ -1490,6 +1698,31 @@ void FMonolithAIBehaviorTreeActions::RegisterActions(FMonolithToolRegistry& Regi
 			.Optional(TEXT("search_radius"), TEXT("number"), TEXT("Search radius for smart objects (default 5000)"))
 			.Build());
 
+	// 31b. add_bt_use_ability_task — Phase I2 (BT-to-GAS direct activation)
+	// Drops a UBTTask_TryActivateAbility node into the target BT, configured
+	// to fire a Gameplay Ability when reached at tick. K2 aliases support the
+	// shorter `ability` / `tags` synonyms agents tend to emit.
+	Registry.RegisterAction(TEXT("ai"), TEXT("add_bt_use_ability_task"),
+		TEXT("Convenience: add a fully configured TryActivateAbility task node that fires a GAS ability on tick"),
+		FMonolithActionHandler::CreateStatic(&HandleAddBTUseAbilityTask),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Behavior Tree asset path"))
+			.Optional(TEXT("parent_id"), TEXT("string"), TEXT("GUID of parent composite node (null = root)"))
+			.Optional(TEXT("ability_class"), TEXT("string"),
+				TEXT("Asset path or class name of UGameplayAbility subclass (mutually exclusive with ability_tags)"),
+				{ TEXT("ability") })
+			.Optional(TEXT("ability_tags"), TEXT("string"),
+				TEXT("Comma-separated gameplay tags — activate first granted ability matching ALL (mutually exclusive with ability_class)"),
+				{ TEXT("tags") })
+			.Optional(TEXT("wait_for_end"), TEXT("boolean"),
+				TEXT("If true, hold InProgress until ability ends (default true)"), TEXT("true"))
+			.Optional(TEXT("succeed_on_blocked"), TEXT("boolean"),
+				TEXT("If true, return Succeeded when activation is blocked (default false)"), TEXT("false"))
+			.Optional(TEXT("event_tag"), TEXT("string"),
+				TEXT("Optional gameplay tag — send a gameplay event with this tag after successful activation"))
+			.Optional(TEXT("node_name"), TEXT("string"), TEXT("Override the BT node display name"))
+			.Build());
+
 	// 32. build_behavior_tree_from_spec
 	Registry.RegisterAction(TEXT("ai"), TEXT("build_behavior_tree_from_spec"),
 		TEXT("Create a complete Behavior Tree from a declarative JSON spec — the crown jewel"),
@@ -1497,6 +1730,7 @@ void FMonolithAIBehaviorTreeActions::RegisterActions(FMonolithToolRegistry& Regi
 		FParamSchemaBuilder()
 			.Required(TEXT("save_path"), TEXT("string"), TEXT("Asset save path (e.g. /Game/AI/BT_Enemy)"))
 			.Required(TEXT("spec"), TEXT("object"), TEXT("Full tree spec with root, children, decorators, services, properties"))
+			.Optional(TEXT("strict_mode"), TEXT("boolean"), TEXT("If true, abort with error (no save) when any node fails to resolve"), TEXT("false"))
 			.Build());
 
 	// 33. export_bt_spec
@@ -1591,6 +1825,16 @@ void FMonolithAIBehaviorTreeActions::RegisterActions(FMonolithToolRegistry& Regi
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Behavior Tree asset path"))
 			.Optional(TEXT("format"), TEXT("string"), TEXT("Output format: ascii (default) or mermaid"))
 			.Build());
+
+	// F8 (J-phase) — flat graph topology with parent_id + children GUIDs.
+	// Distinct from get_behavior_tree (recursive nested tree). Used by
+	// J2 §TC2.18 to look up a single node's GUID from the BT.
+	Registry.RegisterAction(TEXT("ai"), TEXT("get_bt_graph"),
+		TEXT("Flat node array with parent_id + children GUIDs. Use when you need to look up a node by ID without walking the full tree (vs get_behavior_tree which returns a nested tree)."),
+		FMonolithActionHandler::CreateStatic(&HandleGetBTGraph),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Behavior Tree asset path"))
+			.Build());
 }
 
 // ============================================================
@@ -1644,7 +1888,7 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleCreateBehaviorTree(c
 	FString BBPath = Params->GetStringField(TEXT("blackboard_path"));
 	if (!BBPath.IsEmpty())
 	{
-		UBlackboardData* BB = Cast<UBlackboardData>(StaticLoadObject(UBlackboardData::StaticClass(), nullptr, *BBPath));
+		UBlackboardData* BB = Cast<UBlackboardData>(FMonolithAssetUtils::LoadAssetByPath(UBlackboardData::StaticClass(), BBPath));
 		if (!BB)
 		{
 			return FMonolithActionResult::Error(FString::Printf(TEXT("Blackboard not found: %s"), *BBPath));
@@ -1784,7 +2028,7 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleDeleteBehaviorTree(c
 		return ErrResult;
 	}
 
-	UObject* Asset = StaticLoadObject(UBehaviorTree::StaticClass(), nullptr, *AssetPath);
+	UObject* Asset = FMonolithAssetUtils::LoadAssetByPath(UBehaviorTree::StaticClass(), AssetPath);
 	if (!Asset)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Behavior Tree not found: %s"), *AssetPath));
@@ -1824,7 +2068,7 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleDuplicateBehaviorTre
 		return ErrResult;
 	}
 
-	UBehaviorTree* SourceBT = Cast<UBehaviorTree>(StaticLoadObject(UBehaviorTree::StaticClass(), nullptr, *SourcePath));
+	UBehaviorTree* SourceBT = Cast<UBehaviorTree>(FMonolithAssetUtils::LoadAssetByPath(UBehaviorTree::StaticClass(), SourcePath));
 	if (!SourceBT)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Source Behavior Tree not found: %s"), *SourcePath));
@@ -1887,7 +2131,7 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleSetBTBlackboard(cons
 	}
 	else
 	{
-		UBlackboardData* BB = Cast<UBlackboardData>(StaticLoadObject(UBlackboardData::StaticClass(), nullptr, *BBPath));
+		UBlackboardData* BB = Cast<UBlackboardData>(FMonolithAssetUtils::LoadAssetByPath(UBlackboardData::StaticClass(), BBPath));
 		if (!BB)
 		{
 			return FMonolithActionResult::Error(FString::Printf(TEXT("Blackboard not found: %s"), *BBPath));
@@ -1993,17 +2237,29 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleAddBTNode(const TSha
 	{
 		// Use root
 		ParentGraphNode = FindRootNode(BTGraph);
+		if (!ParentGraphNode)
+		{
+			return FMonolithActionResult::Error(TEXT("Root node not found in BT graph"));
+		}
 	}
 	else
 	{
-		ParentGraphNode = FindGraphNodeByGuid(BTGraph, ParentIdStr);
+		FString GuidErr;
+		if (!RequireBtNodeByGuid(BTGraph, ParentIdStr, TEXT("parent_id"), BT->GetName(), ParentGraphNode, GuidErr))
+		{
+			return FMonolithActionResult::Error(MoveTemp(GuidErr));
+		}
 	}
 
-	if (!ParentGraphNode)
+	// Phase F1: when adding a Task, the parent MUST be a composite. The Root edge node
+	// has no NodeInstance and tasks-under-root crash UpdateAsset. Composites are exempt
+	// — Root accepts a single composite child by engine design.
+	if (BTNodeClass->IsChildOf(UBTTaskNode::StaticClass()))
 	{
-		return FMonolithActionResult::Error(ParentIdStr.IsEmpty()
-			? TEXT("Root node not found in BT graph")
-			: FString::Printf(TEXT("Parent node not found: %s"), *ParentIdStr));
+		if (TOptional<FString> ParentErr = ValidateParentForChildTask(ParentGraphNode, TEXT("add_bt_node")))
+		{
+			return FMonolithActionResult::Error(MoveTemp(*ParentErr));
+		}
 	}
 
 	// Determine graph node class
@@ -2077,10 +2333,13 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleRemoveBTNode(const T
 		return ErrResult;
 	}
 
-	UBehaviorTreeGraphNode* TargetNode = FindGraphNodeByGuid(BTGraph, NodeId);
-	if (!TargetNode)
+	UBehaviorTreeGraphNode* TargetNode = nullptr;
 	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found: %s"), *NodeId));
+		FString GuidErr;
+		if (!RequireBtNodeByGuid(BTGraph, NodeId, TEXT("node_id"), BT->GetName(), TargetNode, GuidErr))
+		{
+			return FMonolithActionResult::Error(MoveTemp(GuidErr));
+		}
 	}
 
 	// Don't allow removing the root
@@ -2139,16 +2398,37 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleMoveBTNode(const TSh
 		return ErrResult;
 	}
 
-	UBehaviorTreeGraphNode* TargetNode = FindGraphNodeByGuid(BTGraph, NodeId);
-	if (!TargetNode)
+	UBehaviorTreeGraphNode* TargetNode = nullptr;
 	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found: %s"), *NodeId));
+		FString GuidErr;
+		if (!RequireBtNodeByGuid(BTGraph, NodeId, TEXT("node_id"), BT->GetName(), TargetNode, GuidErr))
+		{
+			return FMonolithActionResult::Error(MoveTemp(GuidErr));
+		}
 	}
 
-	UBehaviorTreeGraphNode* NewParent = FindGraphNodeByGuid(BTGraph, NewParentId);
-	if (!NewParent)
+	UBehaviorTreeGraphNode* NewParent = nullptr;
 	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("New parent not found: %s"), *NewParentId));
+		FString GuidErr;
+		if (!RequireBtNodeByGuid(BTGraph, NewParentId, TEXT("new_parent_id"), BT->GetName(), NewParent, GuidErr))
+		{
+			return FMonolithActionResult::Error(MoveTemp(GuidErr));
+		}
+	}
+
+	// Phase F1: if we're reparenting a Task, the new parent must be a composite.
+	// Same hazard as add_bt_use_ability_task — wiring a Task under Root crashes
+	// UpdateAsset() (BehaviorTreeGraph.cpp:517). Composites can be moved under Root
+	// (engine accepts a single composite child of Root).
+	if (const UBTNode* TargetBTNode = Cast<UBTNode>(TargetNode->NodeInstance))
+	{
+		if (TargetBTNode->IsA<UBTTaskNode>())
+		{
+			if (TOptional<FString> ParentErr = ValidateParentForChildTask(NewParent, TEXT("move_bt_node")))
+			{
+				return FMonolithActionResult::Error(MoveTemp(*ParentErr));
+			}
+		}
 	}
 
 	FScopedTransaction Transaction(FText::FromString(TEXT("Monolith: Move BT Node")));
@@ -2200,10 +2480,13 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleAddBTDecorator(const
 		return ErrResult;
 	}
 
-	UBehaviorTreeGraphNode* TargetNode = FindGraphNodeByGuid(BTGraph, NodeId);
-	if (!TargetNode)
+	UBehaviorTreeGraphNode* TargetNode = nullptr;
 	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found: %s"), *NodeId));
+		FString GuidErr;
+		if (!RequireBtNodeByGuid(BTGraph, NodeId, TEXT("node_id"), BT->GetName(), TargetNode, GuidErr))
+		{
+			return FMonolithActionResult::Error(MoveTemp(GuidErr));
+		}
 	}
 
 	// Find decorator class
@@ -2273,10 +2556,13 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleRemoveBTDecorator(co
 
 	int32 DecoratorIndex = (int32)Params->GetNumberField(TEXT("decorator_index"));
 
-	UBehaviorTreeGraphNode* TargetNode = FindGraphNodeByGuid(BTGraph, NodeId);
-	if (!TargetNode)
+	UBehaviorTreeGraphNode* TargetNode = nullptr;
 	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found: %s"), *NodeId));
+		FString GuidErr;
+		if (!RequireBtNodeByGuid(BTGraph, NodeId, TEXT("node_id"), BT->GetName(), TargetNode, GuidErr))
+		{
+			return FMonolithActionResult::Error(MoveTemp(GuidErr));
+		}
 	}
 
 	if (DecoratorIndex < 0 || DecoratorIndex >= TargetNode->Decorators.Num())
@@ -2327,10 +2613,13 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleAddBTService(const T
 		return ErrResult;
 	}
 
-	UBehaviorTreeGraphNode* TargetNode = FindGraphNodeByGuid(BTGraph, NodeId);
-	if (!TargetNode)
+	UBehaviorTreeGraphNode* TargetNode = nullptr;
 	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found: %s"), *NodeId));
+		FString GuidErr;
+		if (!RequireBtNodeByGuid(BTGraph, NodeId, TEXT("node_id"), BT->GetName(), TargetNode, GuidErr))
+		{
+			return FMonolithActionResult::Error(MoveTemp(GuidErr));
+		}
 	}
 
 	// Find service class
@@ -2400,10 +2689,13 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleRemoveBTService(cons
 
 	int32 ServiceIndex = (int32)Params->GetNumberField(TEXT("service_index"));
 
-	UBehaviorTreeGraphNode* TargetNode = FindGraphNodeByGuid(BTGraph, NodeId);
-	if (!TargetNode)
+	UBehaviorTreeGraphNode* TargetNode = nullptr;
 	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found: %s"), *NodeId));
+		FString GuidErr;
+		if (!RequireBtNodeByGuid(BTGraph, NodeId, TEXT("node_id"), BT->GetName(), TargetNode, GuidErr))
+		{
+			return FMonolithActionResult::Error(MoveTemp(GuidErr));
+		}
 	}
 
 	if (ServiceIndex < 0 || ServiceIndex >= TargetNode->Services.Num())
@@ -2454,10 +2746,13 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleSetBTNodeProperty(co
 		return ErrResult;
 	}
 
-	UBehaviorTreeGraphNode* GraphNode = FindGraphNodeByGuid(BTGraph, NodeId);
-	if (!GraphNode)
+	UBehaviorTreeGraphNode* GraphNode = nullptr;
 	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found: %s"), *NodeId));
+		FString GuidErr;
+		if (!RequireBtNodeByGuid(BTGraph, NodeId, TEXT("node_id"), BT->GetName(), GraphNode, GuidErr))
+		{
+			return FMonolithActionResult::Error(MoveTemp(GuidErr));
+		}
 	}
 
 	UBTNode* BTNode = Cast<UBTNode>(GraphNode->NodeInstance);
@@ -2513,10 +2808,13 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleGetBTNodeProperties(
 		return ErrResult;
 	}
 
-	UBehaviorTreeGraphNode* GraphNode = FindGraphNodeByGuid(BTGraph, NodeId);
-	if (!GraphNode)
+	UBehaviorTreeGraphNode* GraphNode = nullptr;
 	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found: %s"), *NodeId));
+		FString GuidErr;
+		if (!RequireBtNodeByGuid(BTGraph, NodeId, TEXT("node_id"), BT->GetName(), GraphNode, GuidErr))
+		{
+			return FMonolithActionResult::Error(MoveTemp(GuidErr));
+		}
 	}
 
 	UBTNode* BTNode = Cast<UBTNode>(GraphNode->NodeInstance);
@@ -2554,11 +2852,21 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleReorderBTChildren(co
 		return ErrResult;
 	}
 
-	UBehaviorTreeGraphNode* ParentNode = FindGraphNodeByGuid(BTGraph, ParentId);
-	if (!ParentNode)
+	UBehaviorTreeGraphNode* ParentNode = nullptr;
 	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Parent node not found: %s"), *ParentId));
+		FString GuidErr;
+		if (!RequireBtNodeByGuid(BTGraph, ParentId, TEXT("parent_id"), BT->GetName(), ParentNode, GuidErr))
+		{
+			return FMonolithActionResult::Error(MoveTemp(GuidErr));
+		}
 	}
+
+	// Phase F1 note: reorder is a permutation of EXISTING children — it cannot introduce
+	// a Task-under-Root pairing that wasn't already wired. The count-mismatch guard below
+	// rejects empty `new_order` against a populated parent and vice-versa, so we cannot
+	// wire a Task into an empty Root-only graph through this path. The hardened
+	// ConnectParentChild also schema-rejects any malformed pairing it's asked to recreate.
+	// No additional ValidateParentForChildTask guard needed here.
 
 	// Parse new_order array
 	const TArray<TSharedPtr<FJsonValue>>* NewOrderArr = nullptr;
@@ -2665,7 +2973,7 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleAddBTRunEQSTask(cons
 	}
 
 	// Verify the EQS asset exists
-	UEnvQuery* EQSQuery = Cast<UEnvQuery>(StaticLoadObject(UEnvQuery::StaticClass(), nullptr, *EQSPath));
+	UEnvQuery* EQSQuery = Cast<UEnvQuery>(FMonolithAssetUtils::LoadAssetByPath(UEnvQuery::StaticClass(), EQSPath));
 	if (!EQSQuery)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("EQS query not found: %s"), *EQSPath));
@@ -2688,14 +2996,24 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleAddBTRunEQSTask(cons
 	if (ParentIdStr.IsEmpty())
 	{
 		ParentGraphNode = FindRootNode(BTGraph);
+		if (!ParentGraphNode)
+		{
+			return FMonolithActionResult::Error(TEXT("Root node not found in BT graph"));
+		}
 	}
 	else
 	{
-		ParentGraphNode = FindGraphNodeByGuid(BTGraph, ParentIdStr);
+		FString GuidErr;
+		if (!RequireBtNodeByGuid(BTGraph, ParentIdStr, TEXT("parent_id"), BT->GetName(), ParentGraphNode, GuidErr))
+		{
+			return FMonolithActionResult::Error(MoveTemp(GuidErr));
+		}
 	}
-	if (!ParentGraphNode)
+
+	// Phase F1: parent must be a composite (RunEQSQuery is always a Task).
+	if (TOptional<FString> ParentErr = ValidateParentForChildTask(ParentGraphNode, TEXT("add_bt_run_eqs_task")))
 	{
-		return FMonolithActionResult::Error(TEXT("Parent node not found"));
+		return FMonolithActionResult::Error(MoveTemp(*ParentErr));
 	}
 
 	FScopedTransaction Transaction(FText::FromString(TEXT("Monolith: Add RunEQSQuery Task")));
@@ -2771,7 +3089,22 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleAddBTSmartObjectTask
 		return ErrResult;
 	}
 
+	// Phase D2: pre-check that the GameplayBehaviorSmartObjects plugin is enabled
+	// (the actual SO BT task class lives in this plugin, NOT in core SmartObjects)
+	{
+		TSharedPtr<IPlugin> GBSOPlugin = IPluginManager::Get().FindPlugin(TEXT("GameplayBehaviorSmartObjects"));
+		if (!GBSOPlugin.IsValid() || !GBSOPlugin->IsEnabled())
+		{
+			return FMonolithActionResult::Error(TEXT(
+				"Smart Object BT task requires the 'GameplayBehaviorSmartObjects' plugin "
+				"(Edit > Plugins > AI > GameplayBehaviorSmartObjects). "
+				"This is separate from the core 'SmartObjects' plugin. "
+				"Enable it and restart the editor."));
+		}
+	}
+
 	// Find smart object task class — try common names
+	// Canonical: BTTask_FindAndUseGameplayBehaviorSmartObject (from GameplayBehaviorSmartObjects plugin)
 	UClass* SOTaskClass = nullptr;
 	static const TCHAR* SOClassNames[] = {
 		TEXT("BTTask_FindAndUseGameplayBehaviorSmartObject"),
@@ -2794,7 +3127,10 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleAddBTSmartObjectTask
 
 	if (!SOTaskClass)
 	{
-		return FMonolithActionResult::Error(TEXT("Smart Object BT task class not found — ensure SmartObjects plugin is enabled"));
+		return FMonolithActionResult::Error(TEXT(
+			"Smart Object BT task class not found. Expected 'BTTask_FindAndUseGameplayBehaviorSmartObject' "
+			"from the 'GameplayBehaviorSmartObjects' plugin. The plugin is reported enabled but the class "
+			"could not be resolved — this usually means the editor needs to be restarted after enabling the plugin."));
 	}
 
 	// Find parent
@@ -2803,14 +3139,24 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleAddBTSmartObjectTask
 	if (ParentIdStr.IsEmpty())
 	{
 		ParentGraphNode = FindRootNode(BTGraph);
+		if (!ParentGraphNode)
+		{
+			return FMonolithActionResult::Error(TEXT("Root node not found in BT graph"));
+		}
 	}
 	else
 	{
-		ParentGraphNode = FindGraphNodeByGuid(BTGraph, ParentIdStr);
+		FString GuidErr;
+		if (!RequireBtNodeByGuid(BTGraph, ParentIdStr, TEXT("parent_id"), BT->GetName(), ParentGraphNode, GuidErr))
+		{
+			return FMonolithActionResult::Error(MoveTemp(GuidErr));
+		}
 	}
-	if (!ParentGraphNode)
+
+	// Phase F1: parent must be a composite (SmartObject task is always a Task).
+	if (TOptional<FString> ParentErr = ValidateParentForChildTask(ParentGraphNode, TEXT("add_bt_smart_object_task")))
 	{
-		return FMonolithActionResult::Error(TEXT("Parent node not found"));
+		return FMonolithActionResult::Error(MoveTemp(*ParentErr));
 	}
 
 	FScopedTransaction Transaction(FText::FromString(TEXT("Monolith: Add Smart Object Task")));
@@ -2872,6 +3218,272 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleAddBTSmartObjectTask
 }
 
 // ============================================================
+//  31b. add_bt_use_ability_task — Phase I2 (BT-to-GAS)
+// ============================================================
+
+FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleAddBTUseAbilityTask(const TSharedPtr<FJsonObject>& Params)
+{
+#if !WITH_GAMEPLAYABILITIES
+	return FMonolithActionResult::Error(TEXT(
+		"add_bt_use_ability_task requires the GameplayAbilities engine plugin. "
+		"Enable Edit > Plugins > Gameplay > Gameplay Abilities and rebuild MonolithAI."));
+#else
+	// 1. Load BT + graph
+	FString AssetPath, Error;
+	UBehaviorTree* BT = nullptr;
+	UBehaviorTreeGraph* BTGraph = nullptr;
+	if (!LoadBTAndGraph(Params, BT, BTGraph, AssetPath, Error))
+	{
+		return FMonolithActionResult::Error(Error);
+	}
+
+	// 2. Mutual-exclusion validation
+	FString AbilityClassPath;
+	const bool bHasAbilityClass = Params->TryGetStringField(TEXT("ability_class"), AbilityClassPath)
+		&& !AbilityClassPath.IsEmpty();
+
+	// ability_tags accepts either a comma-separated string OR a JSON array of strings
+	TArray<FString> RawTagList;
+	bool bHasAbilityTags = false;
+	{
+		const TArray<TSharedPtr<FJsonValue>>* TagsArrayPtr = nullptr;
+		if (Params->TryGetArrayField(TEXT("ability_tags"), TagsArrayPtr) && TagsArrayPtr)
+		{
+			for (const TSharedPtr<FJsonValue>& Val : *TagsArrayPtr)
+			{
+				FString S;
+				if (Val.IsValid() && Val->TryGetString(S) && !S.IsEmpty())
+				{
+					RawTagList.Add(S);
+				}
+			}
+			bHasAbilityTags = RawTagList.Num() > 0;
+		}
+		else
+		{
+			FString TagsStr;
+			if (Params->TryGetStringField(TEXT("ability_tags"), TagsStr) && !TagsStr.IsEmpty())
+			{
+				TagsStr.ParseIntoArray(RawTagList, TEXT(","), /*InCullEmpty=*/true);
+				for (FString& T : RawTagList) { T.TrimStartAndEndInline(); }
+				bHasAbilityTags = RawTagList.Num() > 0;
+			}
+		}
+	}
+
+	if (bHasAbilityClass && bHasAbilityTags)
+	{
+		return FMonolithActionResult::Error(TEXT(
+			"add_bt_use_ability_task: ability_class and ability_tags are mutually exclusive — supply exactly one"));
+	}
+	if (!bHasAbilityClass && !bHasAbilityTags)
+	{
+		return FMonolithActionResult::Error(TEXT(
+			"add_bt_use_ability_task: must supply either ability_class or ability_tags"));
+	}
+
+	// 3. Resolve ability class (asset path -> Blueprint -> GeneratedClass; or native class name)
+	UClass* ResolvedAbilityClass = nullptr;
+	if (bHasAbilityClass)
+	{
+		// Asset path form (e.g. /Game/AI/Abilities/GA_Roar) — load the Blueprint, take its GeneratedClass.
+		if (AbilityClassPath.StartsWith(TEXT("/")))
+		{
+			UObject* Loaded = FMonolithAssetUtils::LoadAssetByPath(UObject::StaticClass(), AbilityClassPath);
+			if (UBlueprint* BP = Cast<UBlueprint>(Loaded))
+			{
+				ResolvedAbilityClass = BP->GeneratedClass;
+			}
+			else if (UClass* DirectCls = Cast<UClass>(Loaded))
+			{
+				// Some pipelines expose the generated class directly
+				ResolvedAbilityClass = DirectCls;
+			}
+		}
+
+		// Class-name fallback: native or already-loaded Blueprint class
+		if (!ResolvedAbilityClass)
+		{
+			ResolvedAbilityClass = FindFirstObject<UClass>(*AbilityClassPath, EFindFirstObjectOptions::EnsureIfAmbiguous);
+			if (!ResolvedAbilityClass)
+			{
+				// Try with a 'U' prefix (native class convention)
+				ResolvedAbilityClass = FindFirstObject<UClass>(
+					*(FString(TEXT("U")) + AbilityClassPath),
+					EFindFirstObjectOptions::EnsureIfAmbiguous);
+			}
+		}
+
+		if (!ResolvedAbilityClass)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("add_bt_use_ability_task: ability_class '%s' could not be resolved (asset path or class name)"),
+				*AbilityClassPath));
+		}
+
+		if (!ResolvedAbilityClass->IsChildOf(UGameplayAbility::StaticClass()))
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("add_bt_use_ability_task: '%s' is not a UGameplayAbility subclass"),
+				*ResolvedAbilityClass->GetName()));
+		}
+	}
+
+	// 4. Parse tag container
+	FGameplayTagContainer ResolvedTags;
+	if (bHasAbilityTags)
+	{
+		for (const FString& TagStr : RawTagList)
+		{
+			const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(*TagStr, /*ErrorIfNotFound=*/false);
+			if (Tag.IsValid())
+			{
+				ResolvedTags.AddTag(Tag);
+			}
+			else
+			{
+				UE_LOG(LogMonolithAI, Warning,
+					TEXT("add_bt_use_ability_task: unknown gameplay tag '%s' (will not be added to query)"),
+					*TagStr);
+			}
+		}
+		if (ResolvedTags.IsEmpty())
+		{
+			return FMonolithActionResult::Error(TEXT(
+				"add_bt_use_ability_task: ability_tags supplied but none resolved to valid GameplayTags"));
+		}
+	}
+
+	// 5. Validate optional event_tag (non-fatal: warn only)
+	FGameplayTag EventTag;
+	{
+		FString EventTagStr;
+		if (Params->TryGetStringField(TEXT("event_tag"), EventTagStr) && !EventTagStr.IsEmpty())
+		{
+			EventTag = FGameplayTag::RequestGameplayTag(*EventTagStr, /*ErrorIfNotFound=*/false);
+			if (!EventTag.IsValid())
+			{
+				UE_LOG(LogMonolithAI, Warning,
+					TEXT("add_bt_use_ability_task: event_tag '%s' is not a registered GameplayTag — will be ignored at runtime"),
+					*EventTagStr);
+			}
+		}
+	}
+
+	// 6. Find parent
+	FString ParentIdStr;
+	Params->TryGetStringField(TEXT("parent_id"), ParentIdStr);
+	UBehaviorTreeGraphNode* ParentGraphNode = nullptr;
+	if (ParentIdStr.IsEmpty())
+	{
+		ParentGraphNode = FindRootNode(BTGraph);
+		if (!ParentGraphNode)
+		{
+			return FMonolithActionResult::Error(TEXT("add_bt_use_ability_task: Root node not found in BT graph"));
+		}
+	}
+	else
+	{
+		FString GuidErr;
+		if (!RequireBtNodeByGuid(BTGraph, ParentIdStr, TEXT("parent_id"), BT->GetName(), ParentGraphNode, GuidErr))
+		{
+			return FMonolithActionResult::Error(MoveTemp(GuidErr));
+		}
+	}
+
+	// Phase F1 (the original crash site): parent must be a composite. Wiring a Task
+	// directly under the Root edge node crashes UBehaviorTreeGraph::UpdateAsset() at
+	// BehaviorTreeGraph.cpp:517 (deref of null BTAsset->RootNode).
+	if (TOptional<FString> ParentErr = ValidateParentForChildTask(ParentGraphNode, TEXT("add_bt_use_ability_task")))
+	{
+		return FMonolithActionResult::Error(MoveTemp(*ParentErr));
+	}
+
+	// 7. Build the graph node + node instance
+	FScopedTransaction Transaction(FText::FromString(TEXT("Monolith: Add TryActivateAbility Task")));
+	BTGraph->Modify();
+
+	UBehaviorTreeGraphNode_Task* TaskGraphNode = NewObject<UBehaviorTreeGraphNode_Task>(BTGraph);
+	TaskGraphNode->SetFlags(RF_Transactional);
+	BTGraph->AddNode(TaskGraphNode, /*bUserAction=*/false, /*bSelectNewNode=*/false);
+	TaskGraphNode->CreateNewGuid();
+	TaskGraphNode->AllocateDefaultPins();
+
+	UBTTask_TryActivateAbility* TaskNode = NewObject<UBTTask_TryActivateAbility>(
+		TaskGraphNode, UBTTask_TryActivateAbility::StaticClass());
+	TaskGraphNode->NodeInstance = TaskNode;
+
+	// Position
+	TaskGraphNode->NodePosX = ParentGraphNode->NodePosX + 200;
+	TaskGraphNode->NodePosY = ParentGraphNode->NodePosY + 150;
+
+	// Wire parent -> child
+	ConnectParentChild(ParentGraphNode, TaskGraphNode);
+
+	// 8. Apply configuration directly (we own the UCLASS so no reflection needed)
+	if (ResolvedAbilityClass)
+	{
+		TaskNode->AbilityClass = ResolvedAbilityClass;
+	}
+	if (!ResolvedTags.IsEmpty())
+	{
+		TaskNode->AbilityTags = ResolvedTags;
+	}
+
+	bool bWaitForEnd = true;
+	Params->TryGetBoolField(TEXT("wait_for_end"), bWaitForEnd);
+	TaskNode->bWaitForEnd = bWaitForEnd;
+
+	bool bSucceedOnBlocked = false;
+	Params->TryGetBoolField(TEXT("succeed_on_blocked"), bSucceedOnBlocked);
+	TaskNode->bSucceedOnBlocked = bSucceedOnBlocked;
+
+	if (EventTag.IsValid())
+	{
+		TaskNode->EventTagOnActivate = EventTag;
+	}
+
+	// Optional node-name override
+	FString NodeName;
+	if (Params->TryGetStringField(TEXT("node_name"), NodeName) && !NodeName.IsEmpty())
+	{
+		TaskNode->NodeName = NodeName;
+	}
+
+	TaskGraphNode->InitializeInstance();
+	BTGraph->UpdateAsset();
+	BT->MarkPackageDirty();
+
+	// 9. Return result
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("asset_path"), AssetPath);
+	Result->SetStringField(TEXT("node_id"), TaskGraphNode->NodeGuid.ToString());
+	Result->SetStringField(TEXT("node_class"), UBTTask_TryActivateAbility::StaticClass()->GetName());
+	if (ResolvedAbilityClass)
+	{
+		Result->SetStringField(TEXT("ability_class"), ResolvedAbilityClass->GetPathName());
+	}
+	if (!ResolvedTags.IsEmpty())
+	{
+		TArray<TSharedPtr<FJsonValue>> TagsArr;
+		for (const FGameplayTag& T : ResolvedTags)
+		{
+			TagsArr.Add(MakeShared<FJsonValueString>(T.ToString()));
+		}
+		Result->SetArrayField(TEXT("ability_tags"), TagsArr);
+	}
+	Result->SetBoolField(TEXT("wait_for_end"), bWaitForEnd);
+	Result->SetBoolField(TEXT("succeed_on_blocked"), bSucceedOnBlocked);
+	if (EventTag.IsValid())
+	{
+		Result->SetStringField(TEXT("event_tag"), EventTag.ToString());
+	}
+	Result->SetStringField(TEXT("message"), TEXT("TryActivateAbility task added and configured"));
+	return FMonolithActionResult::Success(Result);
+#endif // WITH_GAMEPLAYABILITIES
+}
+
+// ============================================================
 //  32. build_behavior_tree_from_spec
 // ============================================================
 
@@ -2891,11 +3503,103 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleBuildBTFromSpec(cons
 	}
 	const TSharedPtr<FJsonObject>& Spec = *SpecObjPtr;
 
+	bool bStrictMode = false;
+	Params->TryGetBoolField(TEXT("strict_mode"), bStrictMode);
+
 	// Validate root exists
 	const TSharedPtr<FJsonObject>* RootObjPtr = nullptr;
 	if (!Spec->TryGetObjectField(TEXT("root"), RootObjPtr) || !RootObjPtr || !(*RootObjPtr).IsValid())
 	{
 		return FMonolithActionResult::Error(TEXT("Spec missing 'root' field"));
+	}
+
+	// =====================================================================
+	// PRE-VALIDATION — resolve the root node's class BEFORE creating any
+	// package. If the root cannot be added we must NOT save a zero-node BT.
+	// =====================================================================
+	{
+		const FString RootType = (*RootObjPtr)->GetStringField(TEXT("type"));
+		if (RootType.IsEmpty())
+		{
+			return FMonolithActionResult::Error(TEXT("Spec root missing 'type' field — refusing to create empty BT"));
+		}
+		UClass* RootBTClass = ResolveNodeClass(RootType);
+		if (!RootBTClass)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Spec root type '%s' does not resolve to a UClass — refusing to create empty BT"), *RootType));
+		}
+		const bool bRootIsComposite = RootBTClass->IsChildOf(UBTCompositeNode::StaticClass());
+		const bool bRootIsTask = RootBTClass->IsChildOf(UBTTaskNode::StaticClass());
+		if (!bRootIsComposite && !bRootIsTask)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Spec root type '%s' is neither composite nor task — refusing to create empty BT"), *RootType));
+		}
+
+		// Phase F1: reject Task-as-spec-root. The BT runtime root must be a composite
+		// (Selector/Sequence/Parallel/SimpleParallel) — a bare task at root produces an
+		// invalid graph that crashes UpdateAsset() at BehaviorTreeGraph.cpp:517.
+		// Per ADR: do NOT auto-wrap; auto-wrap masks user intent.
+		if (bRootIsTask)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("build_behavior_tree_from_spec: BT root must be a Composite node "
+					 "(Selector/Sequence/Parallel/SimpleParallel), got Task '%s'. "
+					 "Wrap your task in a composite."),
+				*RootType));
+		}
+	}
+
+	// In strict mode, walk the entire spec tree and collect ALL unresolvable
+	// types before any mutation; bail out if anything fails to resolve.
+	if (bStrictMode)
+	{
+		TArray<FString> StrictErrors;
+		TFunction<void(const TSharedPtr<FJsonObject>&, const FString&)> WalkSpec;
+		WalkSpec = [&](const TSharedPtr<FJsonObject>& NodeSpec, const FString& Path)
+		{
+			if (!NodeSpec.IsValid()) return;
+			const FString TypeName = NodeSpec->GetStringField(TEXT("type"));
+			if (TypeName.IsEmpty())
+			{
+				StrictErrors.Add(FString::Printf(TEXT("%s: missing 'type' field"), *Path));
+			}
+			else
+			{
+				UClass* Cls = ResolveNodeClass(TypeName);
+				if (!Cls)
+				{
+					StrictErrors.Add(FString::Printf(TEXT("%s: type '%s' does not resolve"), *Path, *TypeName));
+				}
+				else if (!Cls->IsChildOf(UBTCompositeNode::StaticClass()) && !Cls->IsChildOf(UBTTaskNode::StaticClass()))
+				{
+					StrictErrors.Add(FString::Printf(TEXT("%s: type '%s' is not a composite or task"), *Path, *TypeName));
+				}
+			}
+			const TArray<TSharedPtr<FJsonValue>>* ChildrenArr = nullptr;
+			if (NodeSpec->TryGetArrayField(TEXT("children"), ChildrenArr) && ChildrenArr)
+			{
+				for (int32 i = 0; i < ChildrenArr->Num(); ++i)
+				{
+					const TSharedPtr<FJsonObject>* ChildObj = nullptr;
+					if ((*ChildrenArr)[i]->TryGetObject(ChildObj) && ChildObj && (*ChildObj).IsValid())
+					{
+						WalkSpec(*ChildObj, FString::Printf(TEXT("%s.children[%d]"), *Path, i));
+					}
+				}
+			}
+		};
+		WalkSpec(*RootObjPtr, TEXT("root"));
+		if (StrictErrors.Num() > 0)
+		{
+			FString Msg = TEXT("strict_mode: spec validation failed (asset NOT saved):");
+			for (const FString& E : StrictErrors)
+			{
+				Msg += TEXT("\n  - ") + E;
+			}
+			return FMonolithActionResult::Error(Msg);
+		}
 	}
 
 	FString AssetName = FPackageName::GetShortName(SavePath);
@@ -2928,7 +3632,7 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleBuildBTFromSpec(cons
 	FString BBPath = Spec->GetStringField(TEXT("blackboard_path"));
 	if (!BBPath.IsEmpty())
 	{
-		UBlackboardData* BB = Cast<UBlackboardData>(StaticLoadObject(UBlackboardData::StaticClass(), nullptr, *BBPath));
+		UBlackboardData* BB = Cast<UBlackboardData>(FMonolithAssetUtils::LoadAssetByPath(UBlackboardData::StaticClass(), BBPath));
 		if (!BB)
 		{
 			return FMonolithActionResult::Error(FString::Printf(TEXT("Blackboard not found: %s"), *BBPath));
@@ -2990,6 +3694,23 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleBuildBTFromSpec(cons
 
 	UBehaviorTreeGraphNode* FirstNode = BuildNodeFromSpec(*RootObjPtr, RootGraphNode, 0, 0, Ctx);
 
+	// If the build produced zero usable nodes, refuse to save a husk asset.
+	// Pre-validation should have caught this for root, but children-only failures
+	// could still reach here in pathological cases.
+	if (Ctx.NodeCount == 0 || !FirstNode)
+	{
+		FString Msg = TEXT("All spec nodes failed to resolve — refusing to save zero-node BT.");
+		if (Ctx.Warnings.Num() > 0)
+		{
+			Msg += TEXT(" Warnings:");
+			for (const FString& W : Ctx.Warnings)
+			{
+				Msg += TEXT("\n  - ") + W;
+			}
+		}
+		return FMonolithActionResult::Error(Msg);
+	}
+
 	// Ensure all graph nodes have their graph reference set before UpdateAsset
 	for (UEdGraphNode* Node : BTGraph->Nodes)
 	{
@@ -3012,15 +3733,23 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleBuildBTFromSpec(cons
 	{
 		Result->SetStringField(TEXT("blackboard"), BT->BlackboardAsset->GetPathName());
 	}
+
+	// Always emit skipped_nodes (may be empty); keep legacy 'warnings' too for back-compat.
+	TArray<TSharedPtr<FJsonValue>> SkippedArr;
 	if (Ctx.Warnings.Num() > 0)
 	{
 		TArray<TSharedPtr<FJsonValue>> WarnArr;
 		for (const FString& W : Ctx.Warnings)
 		{
 			WarnArr.Add(MakeShared<FJsonValueString>(W));
+			SkippedArr.Add(MakeShared<FJsonValueString>(W));
 		}
 		Result->SetArrayField(TEXT("warnings"), WarnArr);
+		Result->SetStringField(TEXT("warning"), FString::Printf(
+			TEXT("%d spec items were skipped during build — see skipped_nodes. Use strict_mode=true to abort instead."), Ctx.Warnings.Num()));
 	}
+	Result->SetArrayField(TEXT("skipped_nodes"), SkippedArr);
+
 	Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Behavior Tree built from spec — %d nodes created"), Ctx.NodeCount));
 	return FMonolithActionResult::Success(Result);
 }
@@ -3107,7 +3836,7 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleImportBTSpec(const T
 	FString BBPath = Spec->GetStringField(TEXT("blackboard_path"));
 	if (!BBPath.IsEmpty())
 	{
-		UBlackboardData* BB = Cast<UBlackboardData>(StaticLoadObject(UBlackboardData::StaticClass(), nullptr, *BBPath));
+		UBlackboardData* BB = Cast<UBlackboardData>(FMonolithAssetUtils::LoadAssetByPath(UBlackboardData::StaticClass(), BBPath));
 		if (BB)
 		{
 			BT->BlackboardAsset = BB;
@@ -3357,10 +4086,13 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleCloneBTSubtree(const
 	}
 
 	// Find the source subtree root
-	UBehaviorTreeGraphNode* SubtreeRoot = FindGraphNodeByGuid(SrcGraph, NodeIdStr);
-	if (!SubtreeRoot)
+	UBehaviorTreeGraphNode* SubtreeRoot = nullptr;
 	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found in source BT: %s"), *NodeIdStr));
+		FString GuidErr;
+		if (!RequireBtNodeByGuid(SrcGraph, NodeIdStr, TEXT("node_id"), SrcBT->GetName(), SubtreeRoot, GuidErr))
+		{
+			return FMonolithActionResult::Error(MoveTemp(GuidErr));
+		}
 	}
 
 	// Export the subtree as spec
@@ -3385,10 +4117,10 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleCloneBTSubtree(const
 	UBehaviorTreeGraphNode* DestParent = nullptr;
 	if (!DestParentIdStr.IsEmpty())
 	{
-		DestParent = FindGraphNodeByGuid(DestGraph, DestParentIdStr);
-		if (!DestParent)
+		FString GuidErr;
+		if (!RequireBtNodeByGuid(DestGraph, DestParentIdStr, TEXT("dest_parent_id"), DestBT->GetName(), DestParent, GuidErr))
 		{
-			return FMonolithActionResult::Error(FString::Printf(TEXT("Dest parent node not found: %s"), *DestParentIdStr));
+			return FMonolithActionResult::Error(MoveTemp(GuidErr));
 		}
 	}
 	else
@@ -4306,4 +5038,154 @@ FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleGenerateBTDiagram(co
 	Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Generated %s diagram with %d nodes"), *Format.ToUpper(), NodeCount));
 
 	return FMonolithActionResult::Success(Result);
+}
+
+// ============================================================
+//  F8 (J-phase): get_bt_graph — flat node array with parent_id
+// ============================================================
+//
+// Walks BT->BTGraph->Nodes (UEdGraph node list) and emits a flat array of
+// { node_id, node_class, node_name, parent_id, children[] } records, where
+// node_id is the editor-assigned NodeGuid. Parent linkage is derived from each
+// node's input pin LinkedTo set; children from output pins. The Root node has
+// parent_id = null. The action returns root_id pointing at the Root graph
+// node's GUID for convenience.
+//
+// Failure modes (no crashes — clean ok=false):
+//   * BT not loadable / wrong type (handled by LoadBehaviorTreeFromParams).
+//   * BT has no editor graph yet (returns ok=true with empty nodes array and
+//     a "note" field — same fallback policy as get_behavior_tree).
+
+FMonolithActionResult FMonolithAIBehaviorTreeActions::HandleGetBTGraph(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath, Error;
+	UBehaviorTree* BT = MonolithAI::LoadBehaviorTreeFromParams(Params, AssetPath, Error);
+	if (!BT)
+	{
+		return FMonolithActionResult::Error(Error);
+	}
+
+#if WITH_EDITORONLY_DATA
+	UBehaviorTreeGraph* BTGraph = Cast<UBehaviorTreeGraph>(BT->BTGraph);
+	if (!BTGraph)
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("ok"), true);
+		Result->SetStringField(TEXT("asset_path"), AssetPath);
+		const TArray<TSharedPtr<FJsonValue>> EmptyArr;
+		Result->SetArrayField(TEXT("nodes"), EmptyArr);
+		Result->SetStringField(TEXT("note"), TEXT("No editor graph available — BT may not have been opened in editor yet"));
+		return FMonolithActionResult::Success(Result);
+	}
+
+	FString RootIdStr;
+	TArray<TSharedPtr<FJsonValue>> NodesArr;
+
+	for (UEdGraphNode* GraphNode : BTGraph->Nodes)
+	{
+		if (!GraphNode) continue;
+
+		TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
+		const FString NodeIdStr = GraphNode->NodeGuid.ToString();
+		NodeObj->SetStringField(TEXT("node_id"), NodeIdStr);
+
+		// node_class — prefer the underlying BT node class; fall back to the
+		// graph-node class for the Root (which has nullptr NodeInstance by design).
+		FString NodeClass;
+		FString NodeName;
+		if (UBehaviorTreeGraphNode* BTGraphNode = Cast<UBehaviorTreeGraphNode>(GraphNode))
+		{
+			if (UBTNode* BTNode = Cast<UBTNode>(BTGraphNode->NodeInstance))
+			{
+				NodeClass = BTNode->GetClass()->GetName();
+				NodeName = BTNode->GetNodeName();
+			}
+		}
+		if (NodeClass.IsEmpty())
+		{
+			NodeClass = GraphNode->GetClass()->GetName();
+		}
+		if (NodeName.IsEmpty())
+		{
+			NodeName = GraphNode->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
+		}
+		NodeObj->SetStringField(TEXT("node_class"), NodeClass);
+		NodeObj->SetStringField(TEXT("node_name"), NodeName);
+
+		// Identify the Root by graph-node class — same idiom as
+		// HandleGetBehaviorTree (it scans for UBehaviorTreeGraphNode_Root).
+		const bool bIsRoot = GraphNode->IsA(UBehaviorTreeGraphNode_Root::StaticClass());
+		if (bIsRoot && RootIdStr.IsEmpty())
+		{
+			RootIdStr = NodeIdStr;
+		}
+
+		// Parent: walk input-pin LinkedTo. Multi-parent shouldn't happen in BTs
+		// (DAG of single-parent nodes), but we still pick the first to keep
+		// the schema scalar.
+		FString ParentIdStr;
+		for (UEdGraphPin* Pin : GraphNode->Pins)
+		{
+			if (Pin->Direction != EGPD_Input) continue;
+			for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
+			{
+				if (LinkedPin && LinkedPin->GetOwningNode())
+				{
+					ParentIdStr = LinkedPin->GetOwningNode()->NodeGuid.ToString();
+					break;
+				}
+			}
+			if (!ParentIdStr.IsEmpty()) break;
+		}
+		if (ParentIdStr.IsEmpty() || bIsRoot)
+		{
+			NodeObj->SetField(TEXT("parent_id"), MakeShared<FJsonValueNull>());
+		}
+		else
+		{
+			NodeObj->SetStringField(TEXT("parent_id"), ParentIdStr);
+		}
+
+		// Children: walk output-pin LinkedTo.
+		TArray<TSharedPtr<FJsonValue>> ChildrenArr;
+		for (UEdGraphPin* Pin : GraphNode->Pins)
+		{
+			if (Pin->Direction != EGPD_Output) continue;
+			for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
+			{
+				if (LinkedPin && LinkedPin->GetOwningNode())
+				{
+					ChildrenArr.Add(MakeShared<FJsonValueString>(LinkedPin->GetOwningNode()->NodeGuid.ToString()));
+				}
+			}
+		}
+		NodeObj->SetArrayField(TEXT("children"), ChildrenArr);
+
+		NodesArr.Add(MakeShared<FJsonValueObject>(NodeObj));
+	}
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("ok"), true);
+	Result->SetStringField(TEXT("asset_path"), AssetPath);
+	if (!RootIdStr.IsEmpty())
+	{
+		Result->SetStringField(TEXT("root_id"), RootIdStr);
+	}
+	else
+	{
+		Result->SetField(TEXT("root_id"), MakeShared<FJsonValueNull>());
+	}
+	Result->SetArrayField(TEXT("nodes"), NodesArr);
+	Result->SetNumberField(TEXT("node_count"), NodesArr.Num());
+	return FMonolithActionResult::Success(Result);
+
+#else
+	// Runtime/non-editor builds — Monolith is editor-only, but keep the symbol
+	// stable so callers see a clear message rather than a link error.
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("ok"), false);
+	Result->SetStringField(TEXT("asset_path"), AssetPath);
+	Result->SetStringField(TEXT("error"), TEXT("get_bt_graph requires editor builds (WITH_EDITORONLY_DATA)"));
+	return FMonolithActionResult::Success(Result);
+#endif
 }

@@ -448,7 +448,7 @@ FMonolithActionResult FMonolithAIBlackboardActions::HandleCreateBlackboard(const
 	FString ParentPath = Params->GetStringField(TEXT("parent_bb"));
 	if (!ParentPath.IsEmpty())
 	{
-		UObject* ParentObj = StaticLoadObject(UBlackboardData::StaticClass(), nullptr, *ParentPath);
+		UObject* ParentObj = FMonolithAssetUtils::LoadAssetByPath(UBlackboardData::StaticClass(), ParentPath);
 		UBlackboardData* ParentBB = Cast<UBlackboardData>(ParentObj);
 		if (!ParentBB)
 		{
@@ -586,7 +586,7 @@ FMonolithActionResult FMonolithAIBlackboardActions::HandleDeleteBlackboard(const
 	}
 
 	// Load the asset to delete
-	UObject* Asset = StaticLoadObject(UBlackboardData::StaticClass(), nullptr, *AssetPath);
+	UObject* Asset = FMonolithAssetUtils::LoadAssetByPath(UBlackboardData::StaticClass(), AssetPath);
 	if (!Asset)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
@@ -624,21 +624,38 @@ FMonolithActionResult FMonolithAIBlackboardActions::HandleDuplicateBlackboard(co
 		return ErrResult;
 	}
 
+	bool bOverwrite = false;
+	Params->TryGetBoolField(TEXT("overwrite"), bOverwrite);
+
 	// Load source
-	UBlackboardData* SourceBB = Cast<UBlackboardData>(StaticLoadObject(UBlackboardData::StaticClass(), nullptr, *SourcePath));
+	UBlackboardData* SourceBB = Cast<UBlackboardData>(FMonolithAssetUtils::LoadAssetByPath(UBlackboardData::StaticClass(), SourcePath));
 	if (!SourceBB)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Source blackboard not found: %s"), *SourcePath));
 	}
 
-	// Create dest package
+	// Refuse silent overwrite. EnsureAssetPathFree returns false when the asset already exists.
 	FString DestAssetName = FPackageName::GetShortName(DestPath);
+	FString PathError;
+	const bool bDestFree = MonolithAI::EnsureAssetPathFree(DestPath, DestAssetName, PathError);
+	if (!bDestFree && !bOverwrite)
+	{
+		const FString FullObjectPath = DestPath + TEXT(".") + DestAssetName;
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Destination already exists at '%s'. Pass overwrite=true to replace, or choose a different dest_path. (existing asset: %s)"),
+			*DestPath, *FullObjectPath));
+	}
+
+	// Create dest package
 	FString PkgError;
 	UPackage* DestPackage = MonolithAI::GetOrCreatePackage(DestPath, PkgError);
 	if (!DestPackage)
 	{
 		return FMonolithActionResult::Error(PkgError);
 	}
+
+	// Snapshot source key names for post-copy diagnostic.
+	const int32 SourceKeyCount = SourceBB->Keys.Num();
 
 	// Deep duplicate
 	UBlackboardData* NewBB = Cast<UBlackboardData>(
@@ -652,12 +669,41 @@ FMonolithActionResult FMonolithAIBlackboardActions::HandleDuplicateBlackboard(co
 	FAssetRegistryModule::AssetCreated(NewBB);
 	NewBB->MarkPackageDirty();
 
+	// Best-effort skipped_keys diagnostic: any source key not present on the destination
+	// (e.g. KeyType class unloaded or invalid). StaticDuplicateObject is atomic, so
+	// individual key drops only happen in pathological cases — we still report them.
+	TArray<TSharedPtr<FJsonValue>> SkippedKeys;
+	{
+		TSet<FName> DestNames;
+		for (const FBlackboardEntry& E : NewBB->Keys)
+		{
+			DestNames.Add(E.EntryName);
+		}
+		for (const FBlackboardEntry& E : SourceBB->Keys)
+		{
+			if (!DestNames.Contains(E.EntryName))
+			{
+				TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+				Obj->SetStringField(TEXT("key_name"), E.EntryName.ToString());
+				Obj->SetStringField(TEXT("reason"), TEXT("Key present on source but missing after duplication (KeyType class may be unloaded or invalid)"));
+				SkippedKeys.Add(MakeShared<FJsonValueObject>(Obj));
+			}
+		}
+	}
+
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("source_path"), SourcePath);
 	Result->SetStringField(TEXT("asset_path"), DestPath);
 	Result->SetStringField(TEXT("name"), NewBB->GetName());
 	Result->SetNumberField(TEXT("key_count"), NewBB->Keys.Num());
-	Result->SetStringField(TEXT("message"), TEXT("Blackboard duplicated"));
+	Result->SetNumberField(TEXT("source_key_count"), SourceKeyCount);
+	Result->SetBoolField(TEXT("overwrite"), bOverwrite);
+	Result->SetBoolField(TEXT("destination_existed"), !bDestFree);
+	Result->SetArrayField(TEXT("skipped_keys"), SkippedKeys);
+	Result->SetStringField(TEXT("message"),
+		(!bDestFree && bOverwrite)
+			? TEXT("Blackboard duplicated (overwrote existing destination)")
+			: TEXT("Blackboard duplicated"));
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -1040,7 +1086,7 @@ FMonolithActionResult FMonolithAIBlackboardActions::HandleSetBBParent(const TSha
 	}
 
 	// Load parent
-	UObject* ParentObj = StaticLoadObject(UBlackboardData::StaticClass(), nullptr, *ParentPath);
+	UObject* ParentObj = FMonolithAssetUtils::LoadAssetByPath(UBlackboardData::StaticClass(), ParentPath);
 	UBlackboardData* ParentBB = Cast<UBlackboardData>(ParentObj);
 	if (!ParentBB)
 	{
@@ -1091,8 +1137,8 @@ FMonolithActionResult FMonolithAIBlackboardActions::HandleCompareBlackboards(con
 		return ErrResult;
 	}
 
-	UBlackboardData* BBA = Cast<UBlackboardData>(StaticLoadObject(UBlackboardData::StaticClass(), nullptr, *PathA));
-	UBlackboardData* BBB = Cast<UBlackboardData>(StaticLoadObject(UBlackboardData::StaticClass(), nullptr, *PathB));
+	UBlackboardData* BBA = Cast<UBlackboardData>(FMonolithAssetUtils::LoadAssetByPath(UBlackboardData::StaticClass(), PathA));
+	UBlackboardData* BBB = Cast<UBlackboardData>(FMonolithAssetUtils::LoadAssetByPath(UBlackboardData::StaticClass(), PathB));
 
 	if (!BBA) return FMonolithActionResult::Error(FString::Printf(TEXT("Blackboard A not found: %s"), *PathA));
 	if (!BBB) return FMonolithActionResult::Error(FString::Printf(TEXT("Blackboard B not found: %s"), *PathB));

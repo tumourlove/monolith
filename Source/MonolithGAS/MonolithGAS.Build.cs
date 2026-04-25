@@ -11,7 +11,10 @@ public class MonolithGAS : ModuleRules
 		PublicDependencyModuleNames.AddRange(new string[]
 		{
 			"Core", "CoreUObject", "Engine",
-			"GameplayAbilities", "GameplayTags", "GameplayTasks"
+			"GameplayAbilities", "GameplayTags", "GameplayTasks",
+			// UMG: needed publicly because MonolithGASAttributeBindingClassExtension subclasses
+			// UWidgetBlueprintGeneratedClassExtension (UMG) and exposes USTRUCTs referenced by other modules.
+			"UMG", "Slate", "SlateCore"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
@@ -22,7 +25,10 @@ public class MonolithGAS : ModuleRules
 			"GameplayTagsEditor",
 			"EnhancedInput",
 			"EditorScriptingUtilities",
-			"Json", "JsonUtilities"
+			"Json", "JsonUtilities",
+			// UMGEditor: editor-side UWidgetBlueprintExtension + FWidgetBlueprintCompilerContext
+			// (used only by Phase H1 attribute-binding action handlers; module already gated as Type:"Editor").
+			"UMGEditor"
 		});
 
 		// --- Conditional: GBA (Blueprint Attributes) ---

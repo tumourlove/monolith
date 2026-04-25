@@ -1,4 +1,5 @@
 #include "MonolithGASInternal.h"
+#include "MonolithAssetUtils.h"
 #include "MonolithPackagePathValidator.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
@@ -23,12 +24,14 @@ UBlueprint* LoadBlueprintFromParams(const TSharedPtr<FJsonObject>& Params, FStri
 		return nullptr;
 	}
 
-	// Try loading as Blueprint first
+	// Try loading as Blueprint first.
+	// `_C`-suffix paths are skipped because they refer to a generated class, not the
+	// UBlueprint asset — those go through LoadClass elsewhere. The non-`_C` branch
+	// uses the canonical 4-tier resolver (registry-first, class-mismatch-terminal).
 	FString FullPath = OutAssetPath;
 	if (!FullPath.EndsWith(TEXT("_C")))
 	{
-		UObject* Obj = StaticLoadObject(UBlueprint::StaticClass(), nullptr, *FullPath);
-		if (UBlueprint* BP = Cast<UBlueprint>(Obj))
+		if (UBlueprint* BP = Cast<UBlueprint>(FMonolithAssetUtils::LoadAssetByPath(UBlueprint::StaticClass(), FullPath)))
 		{
 			return BP;
 		}
@@ -40,7 +43,7 @@ UBlueprint* LoadBlueprintFromParams(const TSharedPtr<FJsonObject>& Params, FStri
 
 UObject* LoadAssetFromPath(const FString& AssetPath, FString& OutError)
 {
-	UObject* Obj = StaticLoadObject(UObject::StaticClass(), nullptr, *AssetPath);
+	UObject* Obj = FMonolithAssetUtils::LoadAssetByPath(UObject::StaticClass(), AssetPath);
 	if (!Obj)
 	{
 		OutError = FString::Printf(TEXT("Asset not found: %s"), *AssetPath);
@@ -92,7 +95,8 @@ FGameplayTag StringToTag(const FString& TagString)
 	return FGameplayTag::RequestGameplayTag(FName(*TagString), false);
 }
 
-FGameplayTagContainer ParseTagContainer(const TSharedPtr<FJsonObject>& Params, const FString& FieldName)
+FGameplayTagContainer ParseTagContainer(const TSharedPtr<FJsonObject>& Params, const FString& FieldName,
+	TArray<FString>& OutSkipped)
 {
 	FGameplayTagContainer Container;
 	const TArray<TSharedPtr<FJsonValue>>* TagArray;
@@ -108,10 +112,23 @@ FGameplayTagContainer ParseTagContainer(const TSharedPtr<FJsonObject>& Params, c
 				{
 					Container.AddTag(Tag);
 				}
+				else
+				{
+					// F.7b — surface unregistered tag strings to caller via OutSkipped (was: silent drop).
+					UE_LOG(LogMonolithGAS, Warning, TEXT("Gameplay tag not found: '%s' (field=%s)"), *TagStr, *FieldName);
+					OutSkipped.Add(TagStr);
+				}
 			}
 		}
 	}
 	return Container;
+}
+
+FGameplayTagContainer ParseTagContainer(const TSharedPtr<FJsonObject>& Params, const FString& FieldName)
+{
+	// Backwards-compat one-arg overload — delegates to the skipped-aware version and discards OutSkipped.
+	TArray<FString> Discarded;
+	return ParseTagContainer(Params, FieldName, Discarded);
 }
 
 TSharedPtr<FJsonValue> TagContainerToJson(const FGameplayTagContainer& Container)

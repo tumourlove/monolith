@@ -65,6 +65,41 @@ FString FMonolithAudioQueryActions::CompressionTypeToString(uint8 Type)
 	}
 }
 
+namespace
+{
+	// Phase F #6: read SoundWave's compression-type enum value robustly.
+	// UENUM-tagged "enum class : uint8" can show up as either an FEnumProperty
+	// (when UENUM(BlueprintType)) or an FByteProperty (plain UENUM). Try both.
+	// Property name in UE 5.7 USoundWave is "SoundAssetCompressionType".
+	uint8 ReadSoundAssetCompressionType(USoundWave* Wave)
+	{
+		if (!Wave) return 255; // sentinel -> "Unknown"
+
+		FProperty* Prop = USoundWave::StaticClass()->FindPropertyByName(TEXT("SoundAssetCompressionType"));
+		if (!Prop)
+		{
+			return 255;
+		}
+
+		if (FEnumProperty* EnumProp = CastField<FEnumProperty>(Prop))
+		{
+			uint8 Val = 0;
+			if (FNumericProperty* Underlying = EnumProp->GetUnderlyingProperty())
+			{
+				const void* AddrInContainer = EnumProp->ContainerPtrToValuePtr<void>(Wave);
+				const int64 SignedVal = Underlying->GetSignedIntPropertyValue(AddrInContainer);
+				Val = static_cast<uint8>(SignedVal);
+			}
+			return Val;
+		}
+		if (FByteProperty* ByteProp = CastField<FByteProperty>(Prop))
+		{
+			return ByteProp->GetPropertyValue_InContainer(Wave);
+		}
+		return 255;
+	}
+}
+
 // ============================================================================
 // Registration
 // ============================================================================
@@ -131,6 +166,7 @@ void FMonolithAudioQueryActions::RegisterActions(FMonolithToolRegistry& Registry
 		FMonolithActionHandler::CreateStatic(&FMonolithAudioQueryActions::FindSoundsWithoutClass),
 		FParamSchemaBuilder()
 			.Optional(TEXT("path_filter"), TEXT("string"), TEXT("Only scan assets under this content path"))
+			.Optional(TEXT("limit"), TEXT("number"), TEXT("Max results to return (default: 100)"), TEXT("100"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("audio"), TEXT("find_unattenuated_sounds"),
@@ -334,9 +370,8 @@ FMonolithActionResult FMonolithAudioQueryActions::GetSoundWaveInfo(const TShared
 	// Compression
 	ResultJson->SetNumberField(TEXT("compression_quality"), SoundWave->GetCompressionQuality());
 	{
-		FEnumProperty* TypeProp = FindFProperty<FEnumProperty>(USoundWave::StaticClass(), TEXT("SoundAssetCompressionType"));
-		uint8 TypeVal = 0;
-		if (TypeProp) { TypeProp->GetUnderlyingProperty()->GetValue_InContainer(SoundWave, &TypeVal); }
+		// Phase F #6: use the byte/enum-tolerant reader so 'Unknown' only fires on real failure.
+		const uint8 TypeVal = ReadSoundAssetCompressionType(SoundWave);
 		ResultJson->SetStringField(TEXT("compression_type"), CompressionTypeToString(TypeVal));
 	}
 
@@ -746,6 +781,7 @@ FMonolithActionResult FMonolithAudioQueryActions::FindUnusedAudio(const TSharedP
 FMonolithActionResult FMonolithAudioQueryActions::FindSoundsWithoutClass(const TSharedPtr<FJsonObject>& Params)
 {
 	const FString PathFilter = Params->HasField(TEXT("path_filter")) ? Params->GetStringField(TEXT("path_filter")) : TEXT("");
+	const int32 Limit = Params->HasField(TEXT("limit")) ? static_cast<int32>(Params->GetNumberField(TEXT("limit"))) : 100;
 
 	IAssetRegistry& AR = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
 
@@ -757,19 +793,31 @@ FMonolithActionResult FMonolithAudioQueryActions::FindSoundsWithoutClass(const T
 	}
 
 	TArray<TSharedPtr<FJsonValue>> ResultsArray;
+	int32 ScannedCount = 0;
+	bool bLimitReached = false;
 
 	for (UClass* AssetClass : ClassesToScan)
 	{
+		if (bLimitReached) break;
+
 		TArray<FAssetData> AssetDataList;
 		AR.GetAssetsByClass(AssetClass->GetClassPathName(), AssetDataList, true);
 
 		for (const FAssetData& AssetData : AssetDataList)
 		{
+			if (ResultsArray.Num() >= Limit)
+			{
+				bLimitReached = true;
+				break;
+			}
+
 			const FString AssetPathStr = AssetData.GetObjectPathString();
 			if (!PathFilter.IsEmpty() && !AssetPathStr.StartsWith(PathFilter))
 			{
 				continue;
 			}
+
+			++ScannedCount;
 
 			// Load asset to check SoundClassObject
 			USoundBase* SoundBase = Cast<USoundBase>(AssetData.GetAsset());
@@ -785,7 +833,9 @@ FMonolithActionResult FMonolithAudioQueryActions::FindSoundsWithoutClass(const T
 	}
 
 	auto ResultJson = MakeShared<FJsonObject>();
+	ResultJson->SetNumberField(TEXT("scanned"), ScannedCount);
 	ResultJson->SetNumberField(TEXT("count"), ResultsArray.Num());
+	ResultJson->SetBoolField(TEXT("limit_reached"), bLimitReached);
 	ResultJson->SetArrayField(TEXT("sounds_without_class"), ResultsArray);
 	return FMonolithActionResult::Success(ResultJson);
 }
@@ -897,9 +947,9 @@ FMonolithActionResult FMonolithAudioQueryActions::GetAudioStats(const TSharedPtr
 		USoundWave* SW = Cast<USoundWave>(AssetData.GetAsset());
 		if (!SW) continue;
 
-		uint8 CompTypeVal = 0;
-		FEnumProperty* CTProp = FindFProperty<FEnumProperty>(USoundWave::StaticClass(), TEXT("SoundAssetCompressionType"));
-		if (CTProp) { CTProp->GetUnderlyingProperty()->GetValue_InContainer(SW, &CompTypeVal); }
+		// Phase F #6: byte/enum-tolerant compression read. Previously always reported "Unknown"
+		// because the property is FByteProperty in UE 5.7 (UENUM, not UENUM(BlueprintType)).
+		const uint8 CompTypeVal = ReadSoundAssetCompressionType(SW);
 		const FString CompType = CompressionTypeToString(CompTypeVal);
 		CompressionCounts.FindOrAdd(CompType)++;
 

@@ -79,6 +79,22 @@ void FMonolithGASScaffoldActions::RegisterActions(FMonolithToolRegistry& Registr
 			.Required(TEXT("weapon_type"), TEXT("string"), TEXT("Weapon type: 'pistol', 'rifle', 'shotgun', 'smg', 'melee'"))
 			.Optional(TEXT("fire_mode"), TEXT("string"), TEXT("Fire mode: 'single', 'burst', 'auto' (default: single)"), TEXT("single"))
 			.Build());
+
+	// Phase F8 (J-phase) — author-time ability grant for test scaffolds.
+	// Locates the pawn BP's ASC SCS node, finds a TArray<TSubclassOf<UGameplayAbility>>
+	// UPROPERTY on the ASC subclass (project-agnostic — any subclass that follows
+	// the conventional StartupAbilities pattern works), appends the ability class,
+	// marks the BP dirty + compiles. Stock UAbilitySystemComponent has NO such
+	// property, so the action errors with a clear hint when no array is found.
+	Registry.RegisterAction(TEXT("gas"), TEXT("grant_ability_to_pawn"),
+		TEXT("Author-time: append a GameplayAbility class to a pawn BP's ASC startup-abilities array. Requires the ASC subclass to expose a TArray<TSubclassOf<UGameplayAbility>> UPROPERTY whose name contains 'Ability' (StartupAbilities, DefaultAbilities, etc.)."),
+		FMonolithActionHandler::CreateStatic(&HandleGrantAbilityToPawn),
+		FParamSchemaBuilder()
+			.Required(TEXT("pawn_bp_path"), TEXT("string"), TEXT("Pawn Blueprint asset path (e.g. /Game/Tests/BP_TestPawn) — must contain a UAbilitySystemComponent"))
+			.Required(TEXT("ability_class_path"), TEXT("string"), TEXT("GameplayAbility class path — Blueprint asset path or class name"))
+			.Optional(TEXT("level"), TEXT("integer"), TEXT("Ability level (default 1, stored alongside class — only used if ASC array is FGameplayAbilitySpec-shaped, otherwise ignored)"), TEXT("1"))
+			.Optional(TEXT("input_id"), TEXT("integer"), TEXT("Input ID (default -1, only used if ASC array is FGameplayAbilitySpec-shaped, otherwise ignored)"), TEXT("-1"))
+			.Build());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1558,4 +1574,250 @@ FMonolithActionResult FMonolithGASScaffoldActions::HandleScaffoldWeaponAbility(c
 			*WeaponType, *AssetName, *FireMode));
 
 	return FMonolithActionResult::Success(WeaponResult);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase F8 (J-phase): grant_ability_to_pawn
+//
+//  Author-time mutation of a pawn BP. Steps:
+//   1. Load the BP, find its UAbilitySystemComponent SCS node.
+//   2. Get the ASC component template (per-instance defaults — what runs on PIE).
+//   3. Reflect over the ASC class for any TArray<TSubclassOf<UGameplayAbility>>
+//      UPROPERTY whose name contains "Ability" (matches the conventional
+//      StartupAbilities / DefaultAbilities pattern across most projects). Stock
+//      UAbilitySystemComponent has NO such property — the action returns a
+//      clear error if no array is found.
+//   4. Append the resolved ability class (skip if duplicate) and mark BP
+//      structurally modified, then compile.
+//
+//  We deliberately stop short of writing to UPROPERTY shapes other than
+//  TArray<TSubclassOf<UGameplayAbility>> — projects that store starts as
+//  TArray<FGameplayAbilitySpec> need a per-project handler, and v1 documents
+//  this as a known limitation.
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace
+{
+	/** Mirror of the resolver in MonolithGASASCActions.cpp. Asset-path-first, falls back to native class lookup + asset-registry scan for bare BP names. */
+	TSubclassOf<UGameplayAbility> ResolveAbilityClassForGrant(const FString& ClassId, FString& OutError)
+	{
+		// Try asset path form first (e.g. /Game/.../GA_Test).
+		if (ClassId.StartsWith(TEXT("/")))
+		{
+			FString BPPath = ClassId;
+			if (!BPPath.EndsWith(TEXT("_C")))
+			{
+				FString BaseName = FPaths::GetBaseFilename(ClassId);
+				BPPath = ClassId + TEXT(".") + BaseName + TEXT("_C");
+			}
+			if (UClass* LoadedClass = LoadClass<UGameplayAbility>(nullptr, *BPPath))
+			{
+				return LoadedClass;
+			}
+		}
+
+		// Native class lookup (handles "MyAbility" and "UMyAbility").
+		UClass* FoundClass = FindFirstObject<UClass>(*ClassId, EFindFirstObjectOptions::NativeFirst);
+		if (!FoundClass)
+		{
+			FoundClass = FindFirstObject<UClass>(*(TEXT("U") + ClassId), EFindFirstObjectOptions::NativeFirst);
+		}
+		if (!FoundClass && !ClassId.EndsWith(TEXT("_C")))
+		{
+			FoundClass = FindFirstObject<UClass>(*(ClassId + TEXT("_C")), EFindFirstObjectOptions::NativeFirst);
+		}
+		if (FoundClass && FoundClass->IsChildOf(UGameplayAbility::StaticClass()))
+		{
+			return FoundClass;
+		}
+
+		// Asset-registry fallback for bare BP name with no path.
+		IAssetRegistry& AR = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+		FString SearchName = ClassId;
+		if (SearchName.EndsWith(TEXT("_C"))) SearchName = SearchName.LeftChop(2);
+		TArray<FAssetData> Assets;
+		AR.GetAssetsByClass(UBlueprint::StaticClass()->GetClassPathName(), Assets);
+		for (const FAssetData& Asset : Assets)
+		{
+			if (Asset.AssetName.ToString() == SearchName)
+			{
+				const FString BPPath = Asset.GetObjectPathString() + TEXT("_C");
+				if (UClass* Loaded = LoadClass<UGameplayAbility>(nullptr, *BPPath))
+				{
+					return Loaded;
+				}
+			}
+		}
+
+		OutError = FString::Printf(TEXT("GameplayAbility class not found: '%s'"), *ClassId);
+		return nullptr;
+	}
+
+	/**
+	 * Find an SCS node on `BP` whose component class derives from UAbilitySystemComponent.
+	 * Returns nullptr if BP has no SCS or no ASC component.
+	 */
+	USCS_Node* FindASCSCSNode(UBlueprint* BP)
+	{
+		if (!BP || !BP->SimpleConstructionScript) return nullptr;
+		for (USCS_Node* Node : BP->SimpleConstructionScript->GetAllNodes())
+		{
+			if (Node && Node->ComponentClass &&
+				Node->ComponentClass->IsChildOf(UAbilitySystemComponent::StaticClass()))
+			{
+				return Node;
+			}
+		}
+		return nullptr;
+	}
+}
+
+FMonolithActionResult FMonolithGASScaffoldActions::HandleGrantAbilityToPawn(const TSharedPtr<FJsonObject>& Params)
+{
+	FString PawnPath, AbilityClassId;
+	FMonolithActionResult Err;
+	if (!MonolithGAS::RequireStringParam(Params, TEXT("pawn_bp_path"), PawnPath, Err)) return Err;
+	if (!MonolithGAS::RequireStringParam(Params, TEXT("ability_class_path"), AbilityClassId, Err)) return Err;
+
+	double LevelD = 1.0;
+	double InputIDD = -1.0;
+	Params->TryGetNumberField(TEXT("level"), LevelD);
+	Params->TryGetNumberField(TEXT("input_id"), InputIDD);
+	const int32 Level = static_cast<int32>(LevelD);
+	const int32 InputID = static_cast<int32>(InputIDD);
+
+	// Load BP via the centralized 4-tier resolver. We skip
+	// MonolithGAS::LoadBlueprintFromParams because it expects the legacy
+	// "asset_path" key — this F8 action uses "pawn_bp_path" to match the spec.
+	FString LoadError;
+	UObject* Obj = MonolithGAS::LoadAssetFromPath(PawnPath, LoadError);
+	UBlueprint* BP = Cast<UBlueprint>(Obj);
+	if (!BP)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Pawn Blueprint not found at '%s' (%s)"), *PawnPath, *LoadError));
+	}
+
+	if (!BP->GeneratedClass || !BP->GeneratedClass->IsChildOf(AActor::StaticClass()))
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Asset at '%s' is not an Actor Blueprint"), *PawnPath));
+	}
+
+	// Resolve ability class.
+	FString ResolveError;
+	TSubclassOf<UGameplayAbility> AbilityClass = ResolveAbilityClassForGrant(AbilityClassId, ResolveError);
+	if (!AbilityClass)
+	{
+		return FMonolithActionResult::Error(ResolveError);
+	}
+
+	// Find ASC SCS node.
+	USCS_Node* ASCNode = FindASCSCSNode(BP);
+	UAbilitySystemComponent* ASCTemplate = nullptr;
+	UClass* ASCClass = nullptr;
+
+	if (ASCNode)
+	{
+		ASCTemplate = Cast<UAbilitySystemComponent>(ASCNode->GetActualComponentTemplate(
+			Cast<UBlueprintGeneratedClass>(BP->GeneratedClass)));
+		ASCClass = ASCNode->ComponentClass;
+	}
+	else
+	{
+		// Fall back to a native ASC on the parent CDO (e.g. parent C++ Pawn class
+		// with ASC declared as a UPROPERTY).
+		if (AActor* CDO = Cast<AActor>(BP->GeneratedClass->GetDefaultObject()))
+		{
+			ASCTemplate = CDO->FindComponentByClass<UAbilitySystemComponent>();
+			if (ASCTemplate) ASCClass = ASCTemplate->GetClass();
+		}
+	}
+
+	if (!ASCTemplate || !ASCClass)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Pawn '%s' has no UAbilitySystemComponent. Add one via gas::add_asc_to_actor first."), *PawnPath));
+	}
+
+	// Reflect for a TArray<TSubclassOf<UGameplayAbility>> UPROPERTY whose name contains "Ability".
+	FArrayProperty* TargetArrayProp = nullptr;
+	for (TFieldIterator<FProperty> PropIt(ASCClass); PropIt; ++PropIt)
+	{
+		FArrayProperty* ArrayProp = CastField<FArrayProperty>(*PropIt);
+		if (!ArrayProp) continue;
+
+		const FString PropName = ArrayProp->GetName();
+		if (!PropName.Contains(TEXT("Ability"), ESearchCase::IgnoreCase)) continue;
+
+		// Inner must be a class-property (TSubclassOf<T>). The MetaClass narrows
+		// what concrete classes the array slot accepts. We accept the array iff
+		// our resolved AbilityClass would be storable in it — i.e. AbilityClass
+		// is a child of MetaClass (covers MetaClass=UGameplayAbility AND
+		// MetaClass=UObject AND project-specific GA subclass bases).
+		FClassProperty* InnerClassProp = CastField<FClassProperty>(ArrayProp->Inner);
+		if (!InnerClassProp || !InnerClassProp->MetaClass) continue;
+		if (!AbilityClass->IsChildOf(InnerClassProp->MetaClass)) continue;
+
+		TargetArrayProp = ArrayProp;
+		break;
+	}
+
+	if (!TargetArrayProp)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("ASC class '%s' has no TArray<TSubclassOf<UGameplayAbility>> UPROPERTY whose name contains 'Ability' (e.g. StartupAbilities, DefaultAbilities). Stock UAbilitySystemComponent does NOT ship one — subclass it and add a TArray<TSubclassOf<UGameplayAbility>> UPROPERTY to use this action."),
+			*ASCClass->GetName()));
+	}
+
+	// Append the ability class (skip if duplicate).
+	bool bAlreadyGranted = false;
+	{
+		FScriptArrayHelper Helper(TargetArrayProp, TargetArrayProp->ContainerPtrToValuePtr<void>(ASCTemplate));
+		for (int32 i = 0; i < Helper.Num(); ++i)
+		{
+			if (FClassProperty* InnerClassProp = CastField<FClassProperty>(TargetArrayProp->Inner))
+			{
+				UObject* Existing = InnerClassProp->GetObjectPropertyValue(Helper.GetRawPtr(i));
+				if (Existing == AbilityClass)
+				{
+					bAlreadyGranted = true;
+					break;
+				}
+			}
+		}
+
+		if (!bAlreadyGranted)
+		{
+			const int32 NewIdx = Helper.AddValue();
+			if (FClassProperty* InnerClassProp = CastField<FClassProperty>(TargetArrayProp->Inner))
+			{
+				InnerClassProp->SetObjectPropertyValue(Helper.GetRawPtr(NewIdx), AbilityClass);
+			}
+		}
+	}
+
+	// Mark + compile.
+	if (!bAlreadyGranted)
+	{
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
+		FKismetEditorUtilities::CompileBlueprint(BP);
+	}
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("ok"), true);
+	Result->SetStringField(TEXT("pawn_bp_path"), PawnPath);
+	Result->SetStringField(TEXT("ability_class_path"), AbilityClassId);
+	Result->SetNumberField(TEXT("level"), Level);
+	Result->SetNumberField(TEXT("input_id"), InputID);
+	Result->SetStringField(TEXT("asc_class"), ASCClass->GetName());
+	Result->SetStringField(TEXT("startup_array_property"), TargetArrayProp->GetName());
+	Result->SetBoolField(TEXT("already_granted"), bAlreadyGranted);
+	Result->SetStringField(TEXT("message"),
+		bAlreadyGranted
+			? FString::Printf(TEXT("Ability '%s' was already in '%s.%s' on '%s' — no change."),
+				*AbilityClass->GetName(), *ASCClass->GetName(), *TargetArrayProp->GetName(), *PawnPath)
+			: FString::Printf(TEXT("Appended '%s' to '%s.%s' on '%s' and recompiled BP."),
+				*AbilityClass->GetName(), *ASCClass->GetName(), *TargetArrayProp->GetName(), *PawnPath));
+	return FMonolithActionResult::Success(Result);
 }

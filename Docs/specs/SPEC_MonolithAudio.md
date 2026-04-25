@@ -9,7 +9,7 @@
 ## MonolithAudio
 
 **Dependencies:** Core, CoreUObject, Engine, MonolithCore, AudioMixer, AudioEditor, AssetTools, Json, JsonUtilities, Slate, SlateCore, UnrealEd
-**Namespace:** `audio` | **Tool:** `audio_query(action, params)` | **Actions:** 81
+**Namespace:** `audio` | **Tool:** `audio_query(action, params)` | **Actions:** 82
 **Conditional:** MetaSound features wrapped in `#if WITH_METASOUND`. When MetaSound is absent, MetaSound graph actions return `METASOUND_NOT_AVAILABLE` but all other actions (Sound Cue, CRUD, batch, query) function normally. Build.cs auto-detects MetaSound at `Engine/Plugins/Runtime/Metasound`.
 **Settings toggle:** `bEnableAudio` (default: True)
 
@@ -26,6 +26,7 @@ MonolithAudio provides MCP coverage of audio asset creation, inspection, batch m
 | Batch Operations | 10 | Batch assign sound class/attenuation/submix/concurrency/compression/looping/virtualization, batch rename, batch set properties, apply audio template |
 | Sound Cue Graph | 21 | Sound Cue CRUD, node add/remove/connect, graph read, node property editing, `build_sound_cue_from_spec` (power action), 5 template cues (random, layered, looping, crossfade, switch), validate, preview, delete |
 | MetaSound Graph | 25 | MetaSound Source/Patch creation, node add/remove/connect/disconnect, graph inputs/outputs, interface management, graph read, node discovery, `build_metasound_from_spec` (power action), 4 template MetaSounds (oneshot, ambient, synth, interactive), preset, variables, layout |
+| Test Fixtures | 1 | `create_test_wave` — procedurally synthesizes a 16-bit mono sine-tone USoundWave (no asset deps) for J3 perception bind tests and any future test needing a disposable wave |
 
 ### Key Actions
 

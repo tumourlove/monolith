@@ -32,6 +32,12 @@ namespace MonolithGAS
 	// Parse a JSON array of strings into a FGameplayTagContainer
 	FGameplayTagContainer ParseTagContainer(const TSharedPtr<FJsonObject>& Params, const FString& FieldName);
 
+	// F.7b — Same as ParseTagContainer, but appends any string that fails FGameplayTag::RequestGameplayTag
+	// to OutSkipped so callers can surface a "warnings" array on the response (model: LogicDriver set_node_tags).
+	// Out-param contract: OutSkipped is append-only — caller is responsible for clearing if reused across fields.
+	FGameplayTagContainer ParseTagContainer(const TSharedPtr<FJsonObject>& Params, const FString& FieldName,
+		TArray<FString>& OutSkipped);
+
 	// Convert a FGameplayTagContainer to a JSON array of strings
 	TSharedPtr<FJsonValue> TagContainerToJson(const FGameplayTagContainer& Container);
 

@@ -11,6 +11,7 @@
 #include "MonolithGASInputActions.h"
 #include "MonolithGASInspectActions.h"
 #include "MonolithGASScaffoldActions.h"
+#include "MonolithGASUIBindingActions.h"
 
 DEFINE_LOG_CATEGORY(LogMonolithGAS);
 
@@ -35,6 +36,7 @@ void FMonolithGASModule::StartupModule()
 	FMonolithGASInputActions::RegisterActions(Registry);
 	FMonolithGASInspectActions::RegisterActions(Registry);
 	FMonolithGASScaffoldActions::RegisterActions(Registry);
+	FMonolithGASUIBindingActions::RegisterActions(Registry);
 
 	int32 ActionCount = Registry.GetActions(TEXT("gas")).Num();
 	const TCHAR* GbaStatus =

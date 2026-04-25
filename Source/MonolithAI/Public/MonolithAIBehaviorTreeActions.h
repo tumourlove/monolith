@@ -34,12 +34,20 @@ private:
 	// Convenience tasks (Task 6)
 	static FMonolithActionResult HandleAddBTRunEQSTask(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleAddBTSmartObjectTask(const TSharedPtr<FJsonObject>& Params);
+	// Phase I2: BT-to-GAS direct ability activation
+	static FMonolithActionResult HandleAddBTUseAbilityTask(const TSharedPtr<FJsonObject>& Params);
 
 	// Spec-driven actions (Task 6)
 	static FMonolithActionResult HandleBuildBTFromSpec(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleExportBTSpec(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleImportBTSpec(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleValidateBehaviorTree(const TSharedPtr<FJsonObject>& Params);
+
+	// Phase F8 (J-phase): flat graph topology (parent_id + children GUIDs).
+	// Differs from get_behavior_tree (recursive nested tree) — emits a flat
+	// node array suitable for tools that need to look up a single node by GUID
+	// without walking the full tree.
+	static FMonolithActionResult HandleGetBTGraph(const TSharedPtr<FJsonObject>& Params);
 
 	// Polish actions (Task 7)
 	static FMonolithActionResult HandleCloneBTSubtree(const TSharedPtr<FJsonObject>& Params);

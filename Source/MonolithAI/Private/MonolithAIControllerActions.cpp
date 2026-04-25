@@ -185,7 +185,7 @@ FMonolithActionResult FMonolithAIControllerActions::HandleCreateAIController(con
 
 	if (!BTPath.IsEmpty())
 	{
-		UBehaviorTree* BT = Cast<UBehaviorTree>(StaticLoadObject(UBehaviorTree::StaticClass(), nullptr, *BTPath));
+		UBehaviorTree* BT = Cast<UBehaviorTree>(FMonolithAssetUtils::LoadAssetByPath(UBehaviorTree::StaticClass(), BTPath));
 		if (BT)
 		{
 			bBTValid = true;
@@ -370,7 +370,7 @@ FMonolithActionResult FMonolithAIControllerActions::HandleSetAIControllerBT(cons
 		return ErrResult;
 	}
 
-	UBehaviorTree* BT = Cast<UBehaviorTree>(StaticLoadObject(UBehaviorTree::StaticClass(), nullptr, *BTPath));
+	UBehaviorTree* BT = Cast<UBehaviorTree>(FMonolithAssetUtils::LoadAssetByPath(UBehaviorTree::StaticClass(), BTPath));
 	if (!BT)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Behavior Tree not found: %s"), *BTPath));
@@ -381,7 +381,7 @@ FMonolithActionResult FMonolithAIControllerActions::HandleSetAIControllerBT(cons
 	UBlackboardData* BB = nullptr;
 	if (!BBPath.IsEmpty())
 	{
-		BB = Cast<UBlackboardData>(StaticLoadObject(UBlackboardData::StaticClass(), nullptr, *BBPath));
+		BB = Cast<UBlackboardData>(FMonolithAssetUtils::LoadAssetByPath(UBlackboardData::StaticClass(), BBPath));
 		if (!BB)
 		{
 			return FMonolithActionResult::Error(FString::Printf(TEXT("Blackboard not found: %s"), *BBPath));
@@ -448,7 +448,7 @@ FMonolithActionResult FMonolithAIControllerActions::HandleSetPawnAIControllerCla
 	}
 
 	// Load the Pawn/Character Blueprint
-	UBlueprint* PawnBP = Cast<UBlueprint>(StaticLoadObject(UBlueprint::StaticClass(), nullptr, *BlueprintPath));
+	UBlueprint* PawnBP = Cast<UBlueprint>(FMonolithAssetUtils::LoadAssetByPath(UBlueprint::StaticClass(), BlueprintPath));
 	if (!PawnBP)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
@@ -463,7 +463,7 @@ FMonolithActionResult FMonolithAIControllerActions::HandleSetPawnAIControllerCla
 	UClass* ControllerClass = nullptr;
 
 	// Try loading as a Blueprint first
-	UBlueprint* ControllerBP = Cast<UBlueprint>(StaticLoadObject(UBlueprint::StaticClass(), nullptr, *ControllerClassStr));
+	UBlueprint* ControllerBP = Cast<UBlueprint>(FMonolithAssetUtils::LoadAssetByPath(UBlueprint::StaticClass(), ControllerClassStr));
 	if (ControllerBP && ControllerBP->GeneratedClass)
 	{
 		ControllerClass = ControllerBP->GeneratedClass;
@@ -711,14 +711,11 @@ FMonolithActionResult FMonolithAIControllerActions::HandleSpawnAIActor(const TSh
 		Rotation.Roll = (*RotObj)->GetNumberField(TEXT("roll"));
 	}
 
-	// Load the Blueprint
-	UBlueprint* BP = Cast<UBlueprint>(StaticLoadObject(UBlueprint::StaticClass(), nullptr, *ClassPath));
-	if (!BP)
-	{
-		// Try appending .ClassName
-		FString ShortName = FPackageName::GetShortName(ClassPath);
-		BP = Cast<UBlueprint>(StaticLoadObject(UBlueprint::StaticClass(), nullptr, *ClassPath));
-	}
+	// Load the Blueprint. Resolver's tier-1 normalization handles the
+	// /Game/Foo/Bar -> /Game/Foo/Bar.Bar form, so the previous redundant
+	// fallback (which re-loaded the same path with no transformation — a
+	// silent no-op typo) has been removed.
+	UBlueprint* BP = Cast<UBlueprint>(FMonolithAssetUtils::LoadAssetByPath(UBlueprint::StaticClass(), ClassPath));
 	if (!BP || !BP->GeneratedClass)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found or not compiled: %s"), *ClassPath));

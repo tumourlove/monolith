@@ -1,14 +1,34 @@
 #include "MonolithAIInternal.h"
+#include "MonolithAssetUtils.h"
 #include "MonolithPackagePathValidator.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/Engine.h"
 #include "EngineUtils.h"
 #include "UObject/Package.h"
+#include "UObject/SoftObjectPath.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
+#include "AssetRegistry/AssetData.h"
 
 namespace MonolithAI
 {
+
+// =============================================================================
+//  ResolveAsset — backwards-compat shim. Forwards to canonical 4-tier resolver
+//  in MonolithCore (FMonolithAssetUtils::LoadAssetByPath).
+//
+//  History: K1 introduced this function in MonolithAI as a 4-tier resolver
+//  (registry-first, class-mismatch-terminal). The full implementation has been
+//  centralized into FMonolithAssetUtils so MonolithGAS / MonolithBlueprint /
+//  future modules share a single source of truth. This shim preserves the
+//  MonolithAI::ResolveAsset(UClass*, const FString&) call surface byte-identically.
+// =============================================================================
+
+UObject* ResolveAsset(UClass* ExpectedClass, const FString& Path)
+{
+	return FMonolithAssetUtils::LoadAssetByPath(ExpectedClass, Path);
+}
 
 UBlackboardData* LoadBlackboardFromParams(const TSharedPtr<FJsonObject>& Params, FString& OutAssetPath, FString& OutError)
 {
@@ -19,8 +39,7 @@ UBlackboardData* LoadBlackboardFromParams(const TSharedPtr<FJsonObject>& Params,
 		return nullptr;
 	}
 
-	UObject* Obj = StaticLoadObject(UBlackboardData::StaticClass(), nullptr, *OutAssetPath);
-	if (UBlackboardData* BB = Cast<UBlackboardData>(Obj))
+	if (UBlackboardData* BB = Cast<UBlackboardData>(ResolveAsset(UBlackboardData::StaticClass(), OutAssetPath)))
 	{
 		return BB;
 	}
@@ -38,8 +57,7 @@ UBehaviorTree* LoadBehaviorTreeFromParams(const TSharedPtr<FJsonObject>& Params,
 		return nullptr;
 	}
 
-	UObject* Obj = StaticLoadObject(UBehaviorTree::StaticClass(), nullptr, *OutAssetPath);
-	if (UBehaviorTree* BT = Cast<UBehaviorTree>(Obj))
+	if (UBehaviorTree* BT = Cast<UBehaviorTree>(ResolveAsset(UBehaviorTree::StaticClass(), OutAssetPath)))
 	{
 		return BT;
 	}
@@ -57,8 +75,7 @@ UBlueprint* LoadAIControllerFromParams(const TSharedPtr<FJsonObject>& Params, FS
 		return nullptr;
 	}
 
-	UObject* Obj = StaticLoadObject(UBlueprint::StaticClass(), nullptr, *OutAssetPath);
-	UBlueprint* BP = Cast<UBlueprint>(Obj);
+	UBlueprint* BP = Cast<UBlueprint>(ResolveAsset(UBlueprint::StaticClass(), OutAssetPath));
 	if (!BP)
 	{
 		OutError = FString::Printf(TEXT("AIController Blueprint not found: %s"), *OutAssetPath);
@@ -76,7 +93,7 @@ UBlueprint* LoadAIControllerFromParams(const TSharedPtr<FJsonObject>& Params, FS
 
 UObject* LoadAssetFromPath(const FString& AssetPath, FString& OutError)
 {
-	UObject* Obj = StaticLoadObject(UObject::StaticClass(), nullptr, *AssetPath);
+	UObject* Obj = ResolveAsset(UObject::StaticClass(), AssetPath);
 	if (!Obj)
 	{
 		OutError = FString::Printf(TEXT("Asset not found: %s"), *AssetPath);

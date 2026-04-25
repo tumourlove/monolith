@@ -32,7 +32,7 @@ namespace
 			return nullptr;
 		}
 
-		UObject* Obj = StaticLoadObject(UEnvQuery::StaticClass(), nullptr, *OutAssetPath);
+		UObject* Obj = FMonolithAssetUtils::LoadAssetByPath(UEnvQuery::StaticClass(), OutAssetPath);
 		UEnvQuery* Query = Cast<UEnvQuery>(Obj);
 		if (!Query)
 		{
@@ -175,7 +175,7 @@ namespace
 				ObjProp->SetPropertyValue(PropAddr, nullptr);
 				return true;
 			}
-			UObject* RefObj = StaticLoadObject(ObjProp->PropertyClass, nullptr, *ObjPath);
+			UObject* RefObj = FMonolithAssetUtils::LoadAssetByPath(ObjProp->PropertyClass, ObjPath);
 			if (!RefObj)
 			{
 				OutError = FString::Printf(TEXT("Object not found: %s"), *ObjPath);
@@ -648,7 +648,7 @@ void FMonolithAIEQSActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Required(TEXT("test_index"), TEXT("number"), TEXT("Index of the test"))
 			.Optional(TEXT("purpose"), TEXT("string"), TEXT("EEnvTestPurpose: Filter, Score, FilterAndScore"))
 			.Optional(TEXT("equation"), TEXT("string"), TEXT("EEnvTestScoreEquation: Linear, InverseLinear, Square, Constant"))
-			.Optional(TEXT("factor"), TEXT("number"), TEXT("Scoring factor (FAIDataProviderFloatValue.DefaultValue)"))
+			.Optional(TEXT("factor"), TEXT("number"), TEXT("Scoring factor (FAIDataProviderFloatValue.DefaultValue)"), { TEXT("scoring_factor") })
 			.Optional(TEXT("clamp_min_type"), TEXT("string"), TEXT("EEnvQueryTestClamping::Type for min clamp"))
 			.Optional(TEXT("clamp_max_type"), TEXT("string"), TEXT("EEnvQueryTestClamping::Type for max clamp"))
 			.Optional(TEXT("score_clamp_min"), TEXT("number"), TEXT("Minimum score clamp value"))
@@ -667,8 +667,8 @@ void FMonolithAIEQSActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Required(TEXT("option_index"), TEXT("number"), TEXT("Index of the option"))
 			.Required(TEXT("test_index"), TEXT("number"), TEXT("Index of the test"))
 			.Optional(TEXT("filter_type"), TEXT("string"), TEXT("EEnvTestFilterType: Minimum, Maximum, Range, Match"))
-			.Optional(TEXT("min"), TEXT("number"), TEXT("Float filter min value"))
-			.Optional(TEXT("max"), TEXT("number"), TEXT("Float filter max value"))
+			.Optional(TEXT("min"), TEXT("number"), TEXT("Float filter min value"), { TEXT("float_value_min"), TEXT("filter_min") })
+			.Optional(TEXT("max"), TEXT("number"), TEXT("Float filter max value"), { TEXT("float_value_max"), TEXT("filter_max") })
 			.Optional(TEXT("bool_value"), TEXT("boolean"), TEXT("Bool match value for Match filter type"))
 			.Build());
 
@@ -853,7 +853,7 @@ FMonolithActionResult FMonolithAIEQSActions::HandleDeleteEQSQuery(const TSharedP
 		return ErrResult;
 	}
 
-	UObject* Asset = StaticLoadObject(UEnvQuery::StaticClass(), nullptr, *AssetPath);
+	UObject* Asset = FMonolithAssetUtils::LoadAssetByPath(UEnvQuery::StaticClass(), AssetPath);
 	if (!Asset)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("EQS query not found: %s"), *AssetPath));
@@ -891,7 +891,7 @@ FMonolithActionResult FMonolithAIEQSActions::HandleDuplicateEQSQuery(const TShar
 		return ErrResult;
 	}
 
-	UEnvQuery* SourceQuery = Cast<UEnvQuery>(StaticLoadObject(UEnvQuery::StaticClass(), nullptr, *SourcePath));
+	UEnvQuery* SourceQuery = Cast<UEnvQuery>(FMonolithAssetUtils::LoadAssetByPath(UEnvQuery::StaticClass(), SourcePath));
 	if (!SourceQuery)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Source EQS query not found: %s"), *SourcePath));
@@ -1313,9 +1313,13 @@ FMonolithActionResult FMonolithAIEQSActions::HandleConfigureEQSScoring(const TSh
 	}
 
 	// ScoringFactor
+	bool bRequestedFactor = false;
+	float RequestedFactor = 0.0f;
 	if (Params->HasField(TEXT("factor")))
 	{
-		Test->ScoringFactor.DefaultValue = (float)Params->GetNumberField(TEXT("factor"));
+		RequestedFactor = (float)Params->GetNumberField(TEXT("factor"));
+		Test->ScoringFactor.DefaultValue = RequestedFactor;
+		bRequestedFactor = true;
 	}
 
 	// Clamp
@@ -1379,7 +1383,20 @@ FMonolithActionResult FMonolithAIEQSActions::HandleConfigureEQSScoring(const TSh
 	// Echo back current state
 	Result->SetStringField(TEXT("test_purpose"), StaticEnum<EEnvTestPurpose::Type>()->GetNameStringByValue((int64)Test->TestPurpose));
 	Result->SetStringField(TEXT("scoring_equation"), StaticEnum<EEnvTestScoreEquation::Type>()->GetNameStringByValue((int64)Test->ScoringEquation));
-	Result->SetNumberField(TEXT("scoring_factor"), Test->ScoringFactor.DefaultValue);
+	const float ActualFactor = Test->ScoringFactor.DefaultValue;
+	Result->SetNumberField(TEXT("scoring_factor"), ActualFactor);
+
+	// verified_value smoking gun — readback after write so callers can confirm.
+	if (bRequestedFactor)
+	{
+		TSharedPtr<FJsonObject> Verified = MakeShared<FJsonObject>();
+		TSharedPtr<FJsonObject> FactorEntry = MakeShared<FJsonObject>();
+		FactorEntry->SetNumberField(TEXT("requested"), RequestedFactor);
+		FactorEntry->SetNumberField(TEXT("actual"), ActualFactor);
+		FactorEntry->SetBoolField(TEXT("match"), FMath::IsNearlyEqual(RequestedFactor, ActualFactor));
+		Verified->SetObjectField(TEXT("scoring_factor"), FactorEntry);
+		Result->SetObjectField(TEXT("verified_value"), Verified);
+	}
 
 	return FMonolithActionResult::Success(Result);
 }
@@ -1426,19 +1443,31 @@ FMonolithActionResult FMonolithAIEQSActions::HandleConfigureEQSFilter(const TSha
 	}
 
 	// Float filter values
+	bool bRequestedMin = false;
+	float RequestedMin = 0.0f;
 	if (Params->HasField(TEXT("min")))
 	{
-		Test->FloatValueMin.DefaultValue = (float)Params->GetNumberField(TEXT("min"));
+		RequestedMin = (float)Params->GetNumberField(TEXT("min"));
+		Test->FloatValueMin.DefaultValue = RequestedMin;
+		bRequestedMin = true;
 	}
+	bool bRequestedMax = false;
+	float RequestedMax = 0.0f;
 	if (Params->HasField(TEXT("max")))
 	{
-		Test->FloatValueMax.DefaultValue = (float)Params->GetNumberField(TEXT("max"));
+		RequestedMax = (float)Params->GetNumberField(TEXT("max"));
+		Test->FloatValueMax.DefaultValue = RequestedMax;
+		bRequestedMax = true;
 	}
 
 	// Bool match
+	bool bRequestedBool = false;
+	bool RequestedBool = false;
 	if (Params->HasField(TEXT("bool_value")))
 	{
-		Test->BoolValue.DefaultValue = Params->GetBoolField(TEXT("bool_value"));
+		RequestedBool = Params->GetBoolField(TEXT("bool_value"));
+		Test->BoolValue.DefaultValue = RequestedBool;
+		bRequestedBool = true;
 	}
 
 	Query->MarkPackageDirty();
@@ -1451,9 +1480,45 @@ FMonolithActionResult FMonolithAIEQSActions::HandleConfigureEQSFilter(const TSha
 
 	// Echo back current state
 	Result->SetStringField(TEXT("filter_type"), StaticEnum<EEnvTestFilterType::Type>()->GetNameStringByValue((int64)Test->FilterType));
-	Result->SetNumberField(TEXT("float_value_min"), Test->FloatValueMin.DefaultValue);
-	Result->SetNumberField(TEXT("float_value_max"), Test->FloatValueMax.DefaultValue);
-	Result->SetBoolField(TEXT("bool_value"), Test->BoolValue.DefaultValue);
+	const float ActualMin = Test->FloatValueMin.DefaultValue;
+	const float ActualMax = Test->FloatValueMax.DefaultValue;
+	const bool ActualBool = Test->BoolValue.DefaultValue;
+	Result->SetNumberField(TEXT("float_value_min"), ActualMin);
+	Result->SetNumberField(TEXT("float_value_max"), ActualMax);
+	Result->SetBoolField(TEXT("bool_value"), ActualBool);
+
+	// verified_value smoking gun — readback after write.
+	if (bRequestedMin || bRequestedMax || bRequestedBool)
+	{
+		TSharedPtr<FJsonObject> Verified = MakeShared<FJsonObject>();
+
+		if (bRequestedMin)
+		{
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetNumberField(TEXT("requested"), RequestedMin);
+			Entry->SetNumberField(TEXT("actual"), ActualMin);
+			Entry->SetBoolField(TEXT("match"), FMath::IsNearlyEqual(RequestedMin, ActualMin));
+			Verified->SetObjectField(TEXT("float_value_min"), Entry);
+		}
+		if (bRequestedMax)
+		{
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetNumberField(TEXT("requested"), RequestedMax);
+			Entry->SetNumberField(TEXT("actual"), ActualMax);
+			Entry->SetBoolField(TEXT("match"), FMath::IsNearlyEqual(RequestedMax, ActualMax));
+			Verified->SetObjectField(TEXT("float_value_max"), Entry);
+		}
+		if (bRequestedBool)
+		{
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetBoolField(TEXT("requested"), RequestedBool);
+			Entry->SetBoolField(TEXT("actual"), ActualBool);
+			Entry->SetBoolField(TEXT("match"), RequestedBool == ActualBool);
+			Verified->SetObjectField(TEXT("bool_value"), Entry);
+		}
+
+		Result->SetObjectField(TEXT("verified_value"), Verified);
+	}
 
 	return FMonolithActionResult::Success(Result);
 }

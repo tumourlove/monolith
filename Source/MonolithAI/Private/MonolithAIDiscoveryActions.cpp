@@ -24,6 +24,10 @@
 #include "Perception/AIPerceptionComponent.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
+#include "K2Node_CallFunction.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "UObject/UObjectIterator.h"
@@ -595,8 +599,7 @@ FMonolithActionResult FMonolithAIDiscoveryActions::HandleValidateAIDataFlow(cons
 		return FMonolithActionResult::Error(TEXT("Missing required param: controller_path"));
 	}
 
-	UObject* Obj = StaticLoadObject(UBlueprint::StaticClass(), nullptr, *ControllerPath);
-	UBlueprint* BP = Cast<UBlueprint>(Obj);
+	UBlueprint* BP = Cast<UBlueprint>(MonolithAI::ResolveAsset(UBlueprint::StaticClass(), ControllerPath));
 	if (!BP)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found at '%s'"), *ControllerPath));
@@ -611,10 +614,19 @@ FMonolithActionResult FMonolithAIDiscoveryActions::HandleValidateAIDataFlow(cons
 	TArray<FString> Issues;
 	TArray<FString> DataFlowItems;
 
-	// 1. Find BehaviorTree reference on CDO
+	// 1. Find BehaviorTree — three-tier detector.
+	//    Vanilla AAIController has NO UBehaviorTree* UPROPERTY on the CDO; BTs are
+	//    started via RunBehaviorTree() at runtime. The original validator only ran tier 1
+	//    and produced a false-negative on every stock controller (#52).
+	//    Tier 1: standard UPROPERTY check (custom subclasses that own a BT* member).
+	//    Tier 2: scan event-graph K2Node_CallFunction nodes for RunBehaviorTree, read the
+	//            BT pin's default-value literal.
+	//    Tier 3: soft-info fallback — emit bt_assigned=false (informational, not an issue).
 	UBehaviorTree* BT = nullptr;
+	FString BTSource = TEXT("none");
 	if (AIC)
 	{
+		// --- Tier 1: UPROPERTY scan on the BPGC ---
 		for (TFieldIterator<FObjectProperty> It(BPGC); It; ++It)
 		{
 			if (It->PropertyClass && It->PropertyClass->IsChildOf(UBehaviorTree::StaticClass()))
@@ -623,11 +635,104 @@ FMonolithActionResult FMonolithAIDiscoveryActions::HandleValidateAIDataFlow(cons
 				BT = Cast<UBehaviorTree>(It->GetPropertyValue(PropAddr));
 				if (BT)
 				{
-					DataFlowItems.Add(FString::Printf(TEXT("Controller -> BT: %s"), *BT->GetPathName()));
+					BTSource = TEXT("uproperty");
+					DataFlowItems.Add(FString::Printf(TEXT("Controller -> BT (UPROPERTY): %s"), *BT->GetPathName()));
 					break;
 				}
 			}
 		}
+
+		// --- Tier 2: Event-graph scan for RunBehaviorTree call nodes ---
+		if (!BT)
+		{
+			static const FName RunBehaviorTreeName(TEXT("RunBehaviorTree"));
+
+			auto ScanGraphForRunBT = [&BT](UEdGraph* Graph) -> UEdGraph*
+			{
+				if (!Graph)
+				{
+					return nullptr;
+				}
+				for (UEdGraphNode* Node : Graph->Nodes)
+				{
+					UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(Node);
+					if (!CallNode)
+					{
+						continue;
+					}
+					if (CallNode->FunctionReference.GetMemberName() != RunBehaviorTreeName)
+					{
+						continue;
+					}
+					// Read the BT input pin literal. RunBehaviorTree(BehaviorTreeAsset) — the
+					// BT pin is the only UBehaviorTree* input on the call node.
+					for (UEdGraphPin* Pin : CallNode->Pins)
+					{
+						if (!Pin || Pin->Direction != EGPD_Input)
+						{
+							continue;
+						}
+						// Skip the implicit 'self' input pin (target object) — never carries a BT literal.
+						if (Pin->PinName == TEXT("self"))
+						{
+							continue;
+						}
+						UObject* Obj = Pin->DefaultObject;
+						if (UBehaviorTree* PinBT = Cast<UBehaviorTree>(Obj))
+						{
+							BT = PinBT;
+							return Graph;
+						}
+					}
+					// Pin literal not set (likely a variable wired into the BT pin); we still
+					// know SOMETHING calls RunBehaviorTree even if we can't resolve the asset.
+					return Graph;
+				}
+				return nullptr;
+			};
+
+			UEdGraph* FoundGraph = nullptr;
+			for (UEdGraph* UberGraph : BP->UbergraphPages)
+			{
+				FoundGraph = ScanGraphForRunBT(UberGraph);
+				if (FoundGraph)
+				{
+					break;
+				}
+			}
+			if (!FoundGraph)
+			{
+				for (UEdGraph* FuncGraph : BP->FunctionGraphs)
+				{
+					FoundGraph = ScanGraphForRunBT(FuncGraph);
+					if (FoundGraph)
+					{
+						break;
+					}
+				}
+			}
+
+			if (FoundGraph)
+			{
+				BTSource = TEXT("event_graph");
+				if (BT)
+				{
+					DataFlowItems.Add(FString::Printf(
+						TEXT("Controller -> BT (RunBehaviorTree node in '%s'): %s"),
+						*FoundGraph->GetName(), *BT->GetPathName()));
+				}
+				else
+				{
+					DataFlowItems.Add(FString::Printf(
+						TEXT("Controller -> BT (RunBehaviorTree call in '%s'): asset wired via variable, not a literal"),
+						*FoundGraph->GetName()));
+				}
+			}
+		}
+
+		// --- Tier 3 reporting: surface assignment status as soft info, not an error. ---
+		Result->SetBoolField(TEXT("bt_assigned"), BT != nullptr || BTSource == TEXT("event_graph"));
+		Result->SetStringField(TEXT("bt_source"), BTSource);
 
 		// Check perception
 		bool bHasPerception = (AIC->PerceptionComponent != nullptr);
@@ -719,7 +824,10 @@ FMonolithActionResult FMonolithAIDiscoveryActions::HandleValidateAIDataFlow(cons
 	}
 	else
 	{
-		Issues.Add(TEXT("No BehaviorTree found on AI Controller CDO — may be assigned at runtime"));
+		// Tier 3 fallback: no BT discoverable on the CDO and no RunBehaviorTree call in any
+		// graph. Per #52 design, this is soft info — the controller may assign a BT at
+		// runtime via external code. bt_assigned was already set above.
+		DataFlowItems.Add(TEXT("No BehaviorTree assignment detected (UPROPERTY or RunBehaviorTree node) — assigned at runtime by external code"));
 	}
 
 	TArray<TSharedPtr<FJsonValue>> IssueArr;

@@ -1,6 +1,7 @@
 #include "MonolithGASAbilityActions.h"
 #include "MonolithParamSchema.h"
 #include "MonolithGASInternal.h"
+#include "MonolithAssetUtils.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Abilities/GameplayAbility.h"
@@ -565,7 +566,7 @@ FMonolithActionResult FMonolithGASAbilityActions::HandleCreateAbility(const TSha
 	if (ParentClassName.StartsWith(TEXT("/")))
 	{
 		// It's an asset path — load the Blueprint and use its generated class
-		UObject* Obj = StaticLoadObject(UBlueprint::StaticClass(), nullptr, *ParentClassName);
+		UObject* Obj = FMonolithAssetUtils::LoadAssetByPath(UBlueprint::StaticClass(), ParentClassName);
 		UBlueprint* ParentBP = Cast<UBlueprint>(Obj);
 		if (ParentBP && ParentBP->GeneratedClass)
 		{
@@ -967,8 +968,9 @@ FMonolithActionResult FMonolithGASAbilityActions::HandleSetAbilityTags(const TSh
 				*ContainerName, *FString::Join(AllContainerNames, TEXT(", "))));
 	}
 
-	// Parse tags from the array param
-	FGameplayTagContainer InputTags = MonolithGAS::ParseTagContainer(Params, TEXT("tags"));
+	// Parse tags from the array param. F.7b — collect dropped tag strings to surface as warnings on the response.
+	TArray<FString> SkippedTags;
+	FGameplayTagContainer InputTags = MonolithGAS::ParseTagContainer(Params, TEXT("tags"), SkippedTags);
 
 	// Determine mode
 	FString Mode = Params->GetStringField(TEXT("mode"));
@@ -1002,6 +1004,18 @@ FMonolithActionResult FMonolithGASAbilityActions::HandleSetAbilityTags(const TSh
 			Mode == TEXT("set") ? TEXT("set") : (Mode == TEXT("add") ? TEXT("added") : TEXT("removed")),
 			*ContainerName));
 	Result->SetField(TEXT("current_tags"), ContainerToJson(*Container));
+
+	// F.7b — surface dropped tag strings as a "warnings" array on the response.
+	if (SkippedTags.Num() > 0)
+	{
+		TArray<TSharedPtr<FJsonValue>> Warnings;
+		for (const FString& T : SkippedTags)
+		{
+			Warnings.Add(MakeShared<FJsonValueString>(FString::Printf(
+				TEXT("tags '%s' is not a registered GameplayTag — dropped"), *T)));
+		}
+		Result->SetArrayField(TEXT("warnings"), Warnings);
+	}
 
 	return FMonolithActionResult::Success(Result);
 }
@@ -1163,7 +1177,7 @@ FMonolithActionResult FMonolithGASAbilityActions::HandleSetAbilityCost(const TSh
 	// Try as Blueprint asset path first
 	if (CostClassPath.StartsWith(TEXT("/")))
 	{
-		UObject* Obj = StaticLoadObject(UBlueprint::StaticClass(), nullptr, *CostClassPath);
+		UObject* Obj = FMonolithAssetUtils::LoadAssetByPath(UBlueprint::StaticClass(), CostClassPath);
 		UBlueprint* GEBP = Cast<UBlueprint>(Obj);
 		if (GEBP && GEBP->GeneratedClass)
 		{
@@ -1243,7 +1257,7 @@ FMonolithActionResult FMonolithGASAbilityActions::HandleSetAbilityCooldown(const
 
 	if (CooldownClassPath.StartsWith(TEXT("/")))
 	{
-		UObject* Obj = StaticLoadObject(UBlueprint::StaticClass(), nullptr, *CooldownClassPath);
+		UObject* Obj = FMonolithAssetUtils::LoadAssetByPath(UBlueprint::StaticClass(), CooldownClassPath);
 		UBlueprint* GEBP = Cast<UBlueprint>(Obj);
 		if (GEBP && GEBP->GeneratedClass)
 		{

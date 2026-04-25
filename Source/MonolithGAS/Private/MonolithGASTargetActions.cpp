@@ -1,6 +1,7 @@
 #include "MonolithGASTargetActions.h"
 #include "MonolithParamSchema.h"
 #include "MonolithGASInternal.h"
+#include "MonolithAssetUtils.h"
 
 #include "Abilities/GameplayAbility.h"
 #include "Abilities/GameplayAbilityTargetTypes.h"
@@ -477,12 +478,12 @@ FMonolithActionResult FMonolithGASTargetActions::HandleAddTargetingToAbility(con
 	UClass* TargetActorClass = nullptr;
 	if (!TargetActorClassPath.IsEmpty())
 	{
-		UObject* ClassObj = StaticLoadObject(UClass::StaticClass(), nullptr, *TargetActorClassPath);
+		UObject* ClassObj = FMonolithAssetUtils::LoadAssetByPath(UClass::StaticClass(), TargetActorClassPath);
 		TargetActorClass = Cast<UClass>(ClassObj);
 		if (!TargetActorClass)
 		{
 			// Try loading as Blueprint
-			UBlueprint* TABP = Cast<UBlueprint>(StaticLoadObject(UBlueprint::StaticClass(), nullptr, *TargetActorClassPath));
+			UBlueprint* TABP = Cast<UBlueprint>(FMonolithAssetUtils::LoadAssetByPath(UBlueprint::StaticClass(), TargetActorClassPath));
 			if (TABP && TABP->GeneratedClass)
 			{
 				TargetActorClass = TABP->GeneratedClass;

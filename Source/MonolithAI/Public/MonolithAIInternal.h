@@ -14,6 +14,19 @@ DECLARE_LOG_CATEGORY_EXTERN(LogMonolithAI, Log, All);
 
 namespace MonolithAI
 {
+	/**
+	 * Backwards-compat shim — delegates to FMonolithAssetUtils::LoadAssetByPath.
+	 *
+	 * The canonical 4-tier resolver now lives in MonolithCore (see
+	 * FMonolithAssetUtils::LoadAssetByPath in MonolithAssetUtils.h) so all
+	 * Monolith modules share a single source of truth. New code should call
+	 * FMonolithAssetUtils::LoadAssetByPath directly. This function is retained
+	 * for byte-identical behaviour at existing MonolithAI callsites.
+	 *
+	 * Returns nullptr on failure (no class match anywhere).
+	 */
+	UObject* ResolveAsset(UClass* ExpectedClass, const FString& Path);
+
 	// Load a Blackboard asset from the "asset_path" param. Returns nullptr + sets ErrorMsg on failure.
 	UBlackboardData* LoadBlackboardFromParams(const TSharedPtr<FJsonObject>& Params, FString& OutAssetPath, FString& OutError);
 

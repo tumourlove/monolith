@@ -9,7 +9,7 @@
 ## MonolithAI
 
 **Dependencies:** Core, CoreUObject, Engine, MonolithCore, UnrealEd, AIModule, GameplayTasks, NavigationSystem, Json, JsonUtilities
-**Namespace:** `ai` | **Tool:** `ai_query(action, params)` | **Actions:** 229
+**Namespace:** `ai` | **Tool:** `ai_query(action, params)` | **Actions:** 231 (Phase J F8: +`add_perception_to_actor`, +`get_bt_graph`)
 **Conditional:** State Trees (`#if WITH_STATETREE`) and Smart Objects (`#if WITH_SMARTOBJECTS`) are required dependencies. Mass Entity (`#if WITH_MASSENTITY`) and Zone Graph (`#if WITH_ZONEGRAPH`) are optional extensions. When required deps are absent, the module compiles to an empty stub (0 actions registered).
 **Settings toggle:** `bEnableAI` (default: True)
 

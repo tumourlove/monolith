@@ -14,13 +14,15 @@ public class MonolithAudio : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-			"MonolithCore",       // Registry, FMonolithActionResult
-			"AudioMixer",         // SoundSubmix, submix effects
-			"AudioEditor",        // All UFactory classes, graph schemas
-			"AssetTools",         // FAssetToolsModule for rename operations
+			"MonolithCore",            // Registry, FMonolithActionResult
+			"MonolithAudioRuntime",    // UMonolithSoundPerceptionUserData (Phase I3)
+			"AIModule",                // UAISense_Hearing for sense-class resolution (Phase I3)
+			"AudioMixer",              // SoundSubmix, submix effects
+			"AudioEditor",             // All UFactory classes, graph schemas
+			"AssetTools",              // FAssetToolsModule for rename operations
 			"Json", "JsonUtilities",
-			"Slate", "SlateCore", // Editor module transitive deps
-			"UnrealEd"            // GEditor for preview, asset tools
+			"Slate", "SlateCore",      // Editor module transitive deps
+			"UnrealEd"                 // GEditor for preview, asset tools
 		});
 
 		// --- Conditional: MetaSound support ---

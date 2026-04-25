@@ -1,6 +1,7 @@
 #include "MonolithGASCueActions.h"
 #include "MonolithParamSchema.h"
 #include "MonolithGASInternal.h"
+#include "MonolithAssetUtils.h"
 
 #include "GameplayCueNotify_Static.h"
 #include "GameplayCueNotify_Actor.h"
@@ -730,7 +731,11 @@ FMonolithActionResult FMonolithGASCueActions::HandleSetCueParameters(const TShar
 				// Try hard object property
 				else if (FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(Prop))
 				{
-					UObject* RefObj = StaticLoadObject(UObject::StaticClass(), nullptr, *ParamValue);
+					// Use the property's expected class so registry-class-mismatch is terminal
+					// (won't silently load a wrong-class object at the same path).
+					UClass* PropClass = ObjProp->PropertyClass.Get();
+					UClass* ExpectedClass = PropClass ? PropClass : UObject::StaticClass();
+					UObject* RefObj = FMonolithAssetUtils::LoadAssetByPath(ExpectedClass, ParamValue);
 					if (RefObj)
 					{
 						ObjProp->SetObjectPropertyValue(ObjProp->ContainerPtrToValuePtr<void>(CDO), RefObj);
@@ -742,7 +747,7 @@ FMonolithActionResult FMonolithGASCueActions::HandleSetCueParameters(const TShar
 				// Try class property (for camera shakes)
 				else if (FClassProperty* ClassProp = CastField<FClassProperty>(Prop))
 				{
-					UObject* RefObj = StaticLoadObject(UClass::StaticClass(), nullptr, *ParamValue);
+					UObject* RefObj = FMonolithAssetUtils::LoadAssetByPath(UClass::StaticClass(), ParamValue);
 					if (RefObj)
 					{
 						ClassProp->SetObjectPropertyValue(ClassProp->ContainerPtrToValuePtr<void>(CDO), RefObj);

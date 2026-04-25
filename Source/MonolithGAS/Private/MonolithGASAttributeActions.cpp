@@ -1,6 +1,7 @@
 #include "MonolithGASAttributeActions.h"
 #include "MonolithParamSchema.h"
 #include "MonolithJsonUtils.h"
+#include "MonolithAssetUtils.h"
 #include "AttributeSet.h"
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemInterface.h"
@@ -36,7 +37,7 @@ void FMonolithGASAttributeActions::RegisterActions(FMonolithToolRegistry& Regist
 		FMonolithActionHandler::CreateStatic(&HandleCreateAttributeSet),
 		FParamSchemaBuilder()
 			.Required(TEXT("save_path"), TEXT("string"), TEXT("For blueprint mode: asset path (e.g. /Game/GAS/Attributes/AS_Health). For cpp mode: class name (e.g. ULeviathanHealthAttributeSet)"))
-			.Required(TEXT("mode"), TEXT("string"), TEXT("Creation mode: 'cpp' or 'blueprint'"))
+			.Optional(TEXT("mode"), TEXT("string"), TEXT("Creation mode: 'cpp' or 'blueprint' (default: 'blueprint')"), TEXT("blueprint"))
 			.Optional(TEXT("parent_class"), TEXT("string"), TEXT("Parent class name (default: UAttributeSet for cpp, UGBAAttributeSetBlueprintBase for blueprint)"))
 			.Optional(TEXT("attributes"), TEXT("array"), TEXT("Array of attribute definitions: [{name, default_value?, replicated?}]"))
 			.Build());
@@ -486,7 +487,17 @@ FMonolithActionResult FMonolithGASAttributeActions::HandleCreateAttributeSet(con
 	FString SavePath, Mode;
 	FMonolithActionResult Err;
 	if (!MonolithGAS::RequireStringParam(Params, TEXT("save_path"), SavePath, Err)) return Err;
-	if (!MonolithGAS::RequireStringParam(Params, TEXT("mode"), Mode, Err)) return Err;
+
+	// mode is optional with default 'blueprint' (Phase F #69).
+	// Most callers want a Blueprint AttributeSet asset; cpp mode requires a C++ build.
+	if (Params->HasField(TEXT("mode")))
+	{
+		Mode = Params->GetStringField(TEXT("mode"));
+	}
+	if (Mode.IsEmpty())
+	{
+		Mode = TEXT("blueprint");
+	}
 
 	Mode = Mode.ToLower();
 	if (Mode != TEXT("cpp") && Mode != TEXT("blueprint"))
@@ -812,7 +823,46 @@ FMonolithActionResult FMonolithGASAttributeActions::HandleAddAttribute(const TSh
 			}
 		}
 
+		// Full CDO rewrite path (mirror HandleCreateAttributeSet recipe to guarantee persistence).
+		// MarkBlueprintAsStructurallyModified alone leaves the BPGC CDO un-recompiled and
+		// does not flush to disk; a previous regression saw add_attribute report success
+		// while the property was absent on the loaded class. The fix is the full chain:
+		//   structural-mark -> CompileBlueprint -> CDO write -> SavePackage.
 		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
+		FKismetEditorUtilities::CompileBlueprint(BP, EBlueprintCompileOptions::SkipGarbageCollection);
+
+		// Apply default_value to the freshly compiled CDO so the property survives the round-trip.
+		if (BP->GeneratedClass && DefaultValue != 0.0)
+		{
+			UObject* CDO = BP->GeneratedClass->GetDefaultObject(true);
+			if (CDO)
+			{
+				FProperty* Prop = BP->GeneratedClass->FindPropertyByName(VarName);
+				if (Prop)
+				{
+					void* DataPtr = Prop->ContainerPtrToValuePtr<void>(CDO);
+					if (DataPtr)
+					{
+						FGameplayAttributeData* AttrData = static_cast<FGameplayAttributeData*>(DataPtr);
+						AttrData->SetBaseValue(static_cast<float>(DefaultValue));
+						AttrData->SetCurrentValue(static_cast<float>(DefaultValue));
+					}
+				}
+			}
+		}
+
+		// Save the package to disk (UPackage::SavePackage, not just MarkPackageDirty).
+		// MarkPackageDirty by itself does not survive editor restart and was the root cause
+		// of the 2026-04-25 GAS smoke-test regression.
+		UPackage* OuterPackage = BP->GetOutermost();
+		if (OuterPackage)
+		{
+			FString PackageFilename = FPackageName::LongPackageNameToFilename(
+				OuterPackage->GetName(), FPackageName::GetAssetPackageExtension());
+			FSavePackageArgs SaveArgs;
+			SaveArgs.TopLevelFlags = RF_Standalone;
+			UPackage::SavePackage(OuterPackage, BP, *PackageFilename, SaveArgs);
+		}
 
 		TSharedPtr<FJsonObject> Result = MonolithGAS::MakeAssetResult(AttrSet,
 			FString::Printf(TEXT("Added attribute '%s' to %s"), *AttrName, *AttrSet));
@@ -2728,7 +2778,7 @@ FMonolithActionResult FMonolithGASAttributeActions::HandleLinkDataTableToASC(con
 		}
 
 		// Validate DataTable
-		UDataTable* DT = Cast<UDataTable>(StaticLoadObject(UDataTable::StaticClass(), nullptr, *DTPath));
+		UDataTable* DT = Cast<UDataTable>(FMonolithAssetUtils::LoadAssetByPath(UDataTable::StaticClass(), DTPath));
 		if (!DT)
 		{
 			Warnings.Add(MakeShared<FJsonValueString>(

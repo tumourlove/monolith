@@ -1,5 +1,133 @@
 #include "MonolithToolRegistry.h"
 #include "MonolithJsonUtils.h"
+#include "MonolithParamSchema.h"
+#include "HAL/PlatformMisc.h"
+
+// =============================================================================
+//  FMonolithParamSchema — K2 alias rewriting + K3 unknown-key detection
+// =============================================================================
+
+bool FMonolithParamSchema::ApplyAliases(
+	const TSharedPtr<FJsonObject>& Schema,
+	const TSharedPtr<FJsonObject>& Params,
+	FString& OutCollision)
+{
+	if (!Schema.IsValid() || !Params.IsValid())
+	{
+		return true;
+	}
+
+	for (const auto& Pair : Schema->Values)
+	{
+		const FString& Canonical = Pair.Key;
+
+		const TSharedPtr<FJsonObject>* ParamDef = nullptr;
+		if (!Pair.Value->TryGetObject(ParamDef) || !ParamDef)
+		{
+			continue;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* AliasArr = nullptr;
+		if (!(*ParamDef)->TryGetArrayField(TEXT("aliases"), AliasArr) || !AliasArr)
+		{
+			continue;
+		}
+
+		const bool bCanonicalPresent = Params->HasField(Canonical);
+
+		for (const TSharedPtr<FJsonValue>& AliasVal : *AliasArr)
+		{
+			FString Alias;
+			if (!AliasVal.IsValid() || !AliasVal->TryGetString(Alias))
+			{
+				continue;
+			}
+
+			if (!Params->HasField(Alias))
+			{
+				continue;
+			}
+
+			if (bCanonicalPresent)
+			{
+				OutCollision = FString::Printf(
+					TEXT("Param collision: both canonical '%s' and alias '%s' supplied. Use only one."),
+					*Canonical, *Alias);
+				return false;
+			}
+
+			// Rewrite alias -> canonical (preserve value).
+			TSharedPtr<FJsonValue> Val = Params->TryGetField(Alias);
+			if (Val.IsValid())
+			{
+				Params->SetField(Canonical, Val);
+			}
+			Params->RemoveField(Alias);
+			break; // Only one alias rewrite per canonical.
+		}
+	}
+
+	return true;
+}
+
+TArray<FString> FMonolithParamSchema::FindUnknownKeys(
+	const TSharedPtr<FJsonObject>& Schema,
+	const TSharedPtr<FJsonObject>& Params)
+{
+	TArray<FString> Unknown;
+	if (!Schema.IsValid() || !Params.IsValid())
+	{
+		return Unknown;
+	}
+
+	// Build the set of allowed keys: canonical names + their declared aliases.
+	TSet<FString> Allowed;
+	for (const auto& Pair : Schema->Values)
+	{
+		Allowed.Add(Pair.Key);
+
+		const TSharedPtr<FJsonObject>* ParamDef = nullptr;
+		if (!Pair.Value->TryGetObject(ParamDef) || !ParamDef)
+		{
+			continue;
+		}
+		const TArray<TSharedPtr<FJsonValue>>* AliasArr = nullptr;
+		if ((*ParamDef)->TryGetArrayField(TEXT("aliases"), AliasArr) && AliasArr)
+		{
+			for (const TSharedPtr<FJsonValue>& AV : *AliasArr)
+			{
+				FString A;
+				if (AV.IsValid() && AV->TryGetString(A))
+				{
+					Allowed.Add(A);
+				}
+			}
+		}
+	}
+
+	// Legacy wbp_path/asset_path back-compat: allow asset_path everywhere.
+	Allowed.Add(TEXT("asset_path"));
+
+	for (const auto& Pair : Params->Values)
+	{
+		if (!Allowed.Contains(Pair.Key))
+		{
+			Unknown.Add(Pair.Key);
+		}
+	}
+
+	return Unknown;
+}
+
+bool FMonolithParamSchema::IsStrictParamsEnabled()
+{
+	const FString Val = FPlatformMisc::GetEnvironmentVariable(TEXT("STRICT_PARAMS"));
+	return Val == TEXT("1");
+}
+
+// =============================================================================
+//  FMonolithToolRegistry
+// =============================================================================
 
 FMonolithToolRegistry& FMonolithToolRegistry::Get()
 {
@@ -79,11 +207,23 @@ FMonolithActionResult FMonolithToolRegistry::ExecuteAction(
 		);
 	}
 
+	const FMonolithActionInfo& ActionInfo = RegAction->Info;
+	TSharedPtr<FJsonObject> EffectiveParams = Params.IsValid() ? Params : MakeShared<FJsonObject>();
+
+	// K2 — alias rewriting BEFORE the required-param check.
+	if (ActionInfo.ParamSchema.IsValid())
+	{
+		FString Collision;
+		if (!FMonolithParamSchema::ApplyAliases(ActionInfo.ParamSchema, EffectiveParams, Collision))
+		{
+			return FMonolithActionResult::Error(Collision, FMonolithJsonUtils::ErrInvalidParams);
+		}
+	}
+
 	// Validate required params from schema before dispatching.
 	// Skip asset_path — GetAssetPath() accepts both asset_path and system_path aliases
 	// and produces a clear error message itself.
-	const FMonolithActionInfo& ActionInfo = RegAction->Info;
-	if (ActionInfo.ParamSchema.IsValid() && Params.IsValid())
+	if (ActionInfo.ParamSchema.IsValid())
 	{
 		TArray<FString> Missing;
 		for (const auto& Pair : ActionInfo.ParamSchema->Values)
@@ -95,10 +235,11 @@ FMonolithActionResult FMonolithToolRegistry::ExecuteAction(
 			{
 				bool bRequired = false;
 				(*ParamDef)->TryGetBoolField(TEXT("required"), bRequired);
-				if (bRequired && !Params->HasField(Pair.Key))
+				if (bRequired && !EffectiveParams->HasField(Pair.Key))
 				{
-					// wbp_path / asset_path aliasing: accept asset_path as substitute for wbp_path
-					if (Pair.Key == TEXT("wbp_path") && Params->HasField(TEXT("asset_path")))
+					// Legacy wbp_path / asset_path aliasing: accept asset_path as substitute for wbp_path
+					// (only fires for schemas not migrated to K2 aliases).
+					if (Pair.Key == TEXT("wbp_path") && EffectiveParams->HasField(TEXT("asset_path")))
 						continue;
 					Missing.Add(Pair.Key);
 				}
@@ -107,7 +248,7 @@ FMonolithActionResult FMonolithToolRegistry::ExecuteAction(
 		if (Missing.Num() > 0)
 		{
 			TArray<FString> Provided;
-			for (const auto& P : Params->Values) Provided.Add(P.Key);
+			for (const auto& P : EffectiveParams->Values) Provided.Add(P.Key);
 			return FMonolithActionResult::Error(
 				FString::Printf(TEXT("Missing required param(s): [%s]. Provided keys: [%s]"),
 					*FString::Join(Missing, TEXT(", ")),
@@ -115,11 +256,55 @@ FMonolithActionResult FMonolithToolRegistry::ExecuteAction(
 		}
 	}
 
+	// K3 — unknown-key detection (after required-check, before dispatch).
+	TArray<FString> Unknown;
+	if (ActionInfo.ParamSchema.IsValid())
+	{
+		Unknown = FMonolithParamSchema::FindUnknownKeys(ActionInfo.ParamSchema, EffectiveParams);
+
+		if (Unknown.Num() > 0)
+		{
+			for (const FString& K : Unknown)
+			{
+				UE_LOG(LogMonolith, Warning,
+					TEXT("Unknown param '%s' for action '%s:%s' (typo? not in schema)"),
+					*K, *Namespace, *Action);
+			}
+
+			if (FMonolithParamSchema::IsStrictParamsEnabled())
+			{
+				return FMonolithActionResult::Error(
+					FString::Printf(TEXT("STRICT_PARAMS=1: rejected action '%s:%s' due to unknown params: [%s]"),
+						*Namespace, *Action, *FString::Join(Unknown, TEXT(", "))),
+					FMonolithJsonUtils::ErrInvalidParams);
+			}
+		}
+	}
+
 	// Release lock before executing handler (handlers may take time)
 	FMonolithActionHandler HandlerCopy = RegAction->Handler;
 	Lock.Unlock();
 
-	return HandlerCopy.Execute(Params.IsValid() ? Params : MakeShared<FJsonObject>());
+	FMonolithActionResult ActionResult = HandlerCopy.Execute(EffectiveParams);
+
+	// On success, append `warnings` array for unknown params (K3 soft-warn mode).
+	if (ActionResult.bSuccess && Unknown.Num() > 0 && ActionResult.Result.IsValid())
+	{
+		TArray<TSharedPtr<FJsonValue>> Existing;
+		const TArray<TSharedPtr<FJsonValue>>* Found = nullptr;
+		if (ActionResult.Result->TryGetArrayField(TEXT("warnings"), Found) && Found)
+		{
+			Existing = *Found;
+		}
+		for (const FString& K : Unknown)
+		{
+			Existing.Add(MakeShared<FJsonValueString>(
+				FString::Printf(TEXT("Unknown param '%s' for action '%s:%s'"), *K, *Namespace, *Action)));
+		}
+		ActionResult.Result->SetArrayField(TEXT("warnings"), Existing);
+	}
+
+	return ActionResult;
 }
 
 TArray<FString> FMonolithToolRegistry::GetNamespaces() const

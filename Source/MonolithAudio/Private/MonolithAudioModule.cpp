@@ -6,6 +6,7 @@
 #include "MonolithAudioQueryActions.h"
 #include "MonolithAudioBatchActions.h"
 #include "MonolithAudioSoundCueActions.h"
+#include "MonolithAudioPerceptionActions.h"
 #if WITH_METASOUND
 #include "MonolithAudioMetaSoundActions.h"
 #endif
@@ -25,6 +26,7 @@ void FMonolithAudioModule::StartupModule()
 	FMonolithAudioQueryActions::RegisterActions(Registry);
 	FMonolithAudioBatchActions::RegisterActions(Registry);
 	FMonolithAudioSoundCueActions::RegisterActions(Registry);
+	FMonolithAudioPerceptionActions::RegisterActions(Registry);
 #if WITH_METASOUND
 	FMonolithAudioMetaSoundActions::RegisterActions(Registry);
 #endif

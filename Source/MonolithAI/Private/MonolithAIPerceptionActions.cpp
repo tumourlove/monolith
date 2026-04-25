@@ -52,7 +52,7 @@ void FMonolithAIPerceptionActions::RegisterActions(FMonolithToolRegistry& Regist
 
 	// 111. configure_sight_sense
 	Registry.RegisterAction(TEXT("ai"), TEXT("configure_sight_sense"),
-		TEXT("Configure sight sense on a perception component (creates if absent)"),
+		TEXT("Configure sight sense on a perception component (creates if absent). Reflection-writes to UAISenseConfig_Sight + base UAISenseConfig (MaxAge, bStartsEnabled)."),
 		FMonolithActionHandler::CreateStatic(&HandleConfigureSightSense),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AIController Blueprint asset path"))
@@ -62,34 +62,44 @@ void FMonolithAIPerceptionActions::RegisterActions(FMonolithToolRegistry& Regist
 			.Optional(TEXT("affiliation"), TEXT("object"), TEXT("Detection affiliation: {enemies: bool, neutrals: bool, friendlies: bool}"))
 			.Optional(TEXT("auto_success_range"), TEXT("number"), TEXT("Auto-success range from last seen location (-1 to disable)"))
 			.Optional(TEXT("pov_offset"), TEXT("number"), TEXT("Point-of-view backward offset"))
+			.Optional(TEXT("near_clipping_radius"), TEXT("number"), TEXT("Distance below which sight detection is disabled (cm). Reflection-write to UAISenseConfig_Sight::NearClippingRadius."))
+			.Optional(TEXT("auto_register_all_pawns"), TEXT("boolean"), TEXT("Auto-register every pawn as a sight stimulus source (writes class default UAISense_Sight::bAutoRegisterAllPawnsAsSources — affects all sight senses globally)."))
+			.Optional(TEXT("max_age"), TEXT("number"), TEXT("Stimulus max age in seconds (0 = never expires). Reflection-write to UAISenseConfig::MaxAge."))
+			.Optional(TEXT("starts_enabled"), TEXT("boolean"), TEXT("Whether sense fires immediately on creation (default: true). Reflection-write to UAISenseConfig::bStartsEnabled bitfield."))
 			.Build());
 
 	// 112. configure_hearing_sense
 	Registry.RegisterAction(TEXT("ai"), TEXT("configure_hearing_sense"),
-		TEXT("Configure hearing sense on a perception component (creates if absent)"),
+		TEXT("Configure hearing sense on a perception component (creates if absent). Reflection-writes to UAISenseConfig_Hearing + base UAISenseConfig (MaxAge, bStartsEnabled)."),
 		FMonolithActionHandler::CreateStatic(&HandleConfigureHearingSense),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AIController Blueprint asset path"))
 			.Required(TEXT("range"), TEXT("number"), TEXT("Hearing range (cm)"))
 			.Optional(TEXT("affiliation"), TEXT("object"), TEXT("Detection affiliation: {enemies: bool, neutrals: bool, friendlies: bool}"))
+			.Optional(TEXT("max_age"), TEXT("number"), TEXT("Stimulus max age in seconds (0 = never expires). Reflection-write to UAISenseConfig::MaxAge."))
+			.Optional(TEXT("starts_enabled"), TEXT("boolean"), TEXT("Whether sense fires immediately on creation (default: true). Reflection-write to UAISenseConfig::bStartsEnabled bitfield."))
 			.Build());
 
 	// 113. configure_damage_sense
 	Registry.RegisterAction(TEXT("ai"), TEXT("configure_damage_sense"),
-		TEXT("Configure damage sense on a perception component (creates if absent)"),
+		TEXT("Configure damage sense on a perception component (creates if absent). Reflection-writes to UAISenseConfig_Damage + base UAISenseConfig (MaxAge, bStartsEnabled)."),
 		FMonolithActionHandler::CreateStatic(&HandleConfigureDamageSense),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AIController Blueprint asset path"))
 			.Optional(TEXT("implementation"), TEXT("string"), TEXT("Custom damage sense implementation class"))
+			.Optional(TEXT("max_age"), TEXT("number"), TEXT("Stimulus max age in seconds (0 = never expires). Reflection-write to UAISenseConfig::MaxAge."))
+			.Optional(TEXT("starts_enabled"), TEXT("boolean"), TEXT("Whether sense fires immediately on creation (default: true). Reflection-write to UAISenseConfig::bStartsEnabled bitfield."))
 			.Build());
 
 	// 114. configure_touch_sense
 	Registry.RegisterAction(TEXT("ai"), TEXT("configure_touch_sense"),
-		TEXT("Configure touch sense on a perception component (creates if absent)"),
+		TEXT("Configure touch sense on a perception component (creates if absent). Reflection-writes to UAISenseConfig_Touch + base UAISenseConfig (MaxAge, bStartsEnabled). Note: UAISenseConfig_Touch has no Implementation UPROPERTY in UE 5.7 — class is hardcoded."),
 		FMonolithActionHandler::CreateStatic(&HandleConfigureTouchSense),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AIController Blueprint asset path"))
 			.Optional(TEXT("affiliation"), TEXT("object"), TEXT("Detection affiliation: {enemies: bool, neutrals: bool, friendlies: bool}"))
+			.Optional(TEXT("max_age"), TEXT("number"), TEXT("Stimulus max age in seconds (0 = never expires). Reflection-write to UAISenseConfig::MaxAge."))
+			.Optional(TEXT("starts_enabled"), TEXT("boolean"), TEXT("Whether sense fires immediately on creation (default: true). Reflection-write to UAISenseConfig::bStartsEnabled bitfield."))
 			.Build());
 
 	// 117. remove_sense
@@ -310,13 +320,31 @@ TSharedPtr<FJsonObject> FMonolithAIPerceptionActions::SenseConfigToJson(UAISense
 		Obj->SetNumberField(TEXT("peripheral_vision_angle"), Sight->PeripheralVisionAngleDegrees);
 		Obj->SetNumberField(TEXT("auto_success_range"), Sight->AutoSuccessRangeFromLastSeenLocation);
 		Obj->SetNumberField(TEXT("pov_backward_offset"), Sight->PointOfViewBackwardOffset);
+		Obj->SetNumberField(TEXT("near_clipping_radius"), Sight->NearClippingRadius);
 		Obj->SetObjectField(TEXT("affiliation"), AffiliationToJson(Sight->DetectionByAffiliation));
+		if (Sight->Implementation)
+		{
+			Obj->SetStringField(TEXT("implementation"), Sight->Implementation->GetName());
+		}
+		// CDO-level UAISense_Sight::bAutoRegisterAllPawnsAsSources (global, not per-config — surfaced so callers can see it)
+		if (const UAISense_Sight* SenseCDO = GetDefault<UAISense_Sight>())
+		{
+			if (FBoolProperty* Prop = CastField<FBoolProperty>(
+					UAISense::StaticClass()->FindPropertyByName(TEXT("bAutoRegisterAllPawnsAsSources"))))
+			{
+				Obj->SetBoolField(TEXT("auto_register_all_pawns"), Prop->GetPropertyValue_InContainer(SenseCDO));
+			}
+		}
 	}
 	else if (UAISenseConfig_Hearing* Hearing = Cast<UAISenseConfig_Hearing>(SenseConfig))
 	{
 		Obj->SetStringField(TEXT("type"), TEXT("Hearing"));
 		Obj->SetNumberField(TEXT("hearing_range"), Hearing->HearingRange);
 		Obj->SetObjectField(TEXT("affiliation"), AffiliationToJson(Hearing->DetectionByAffiliation));
+		if (Hearing->Implementation)
+		{
+			Obj->SetStringField(TEXT("implementation"), Hearing->Implementation->GetName());
+		}
 	}
 	else if (UAISenseConfig_Damage* Damage = Cast<UAISenseConfig_Damage>(SenseConfig))
 	{
@@ -330,22 +358,31 @@ TSharedPtr<FJsonObject> FMonolithAIPerceptionActions::SenseConfigToJson(UAISense
 	{
 		Obj->SetStringField(TEXT("type"), TEXT("Touch"));
 		Obj->SetObjectField(TEXT("affiliation"), AffiliationToJson(Touch->DetectionByAffiliation));
+		// UAISenseConfig_Touch has no Implementation UPROPERTY in UE 5.7 — class is hardcoded.
 	}
 	else if (UAISenseConfig_Team* Team = Cast<UAISenseConfig_Team>(SenseConfig))
 	{
 		Obj->SetStringField(TEXT("type"), TEXT("Team"));
+		// UAISenseConfig_Team has no Implementation UPROPERTY in UE 5.7 — class is hardcoded.
 	}
 	else if (UAISenseConfig_Prediction* Prediction = Cast<UAISenseConfig_Prediction>(SenseConfig))
 	{
 		Obj->SetStringField(TEXT("type"), TEXT("Prediction"));
+		// UAISenseConfig_Prediction has no Implementation UPROPERTY in UE 5.7 — class is hardcoded.
 	}
 	else
 	{
 		Obj->SetStringField(TEXT("type"), SenseConfig->GetClass()->GetName());
 	}
 
-	// Common fields
+	// Common fields (UAISenseConfig base class)
 	Obj->SetNumberField(TEXT("max_age"), SenseConfig->GetMaxAge());
+	// bStartsEnabled — protected uint32:1, read via reflection so we don't bind to the deprecated IsEnabled() accessor
+	if (FBoolProperty* StartsProp = CastField<FBoolProperty>(
+			UAISenseConfig::StaticClass()->FindPropertyByName(TEXT("bStartsEnabled"))))
+	{
+		Obj->SetBoolField(TEXT("starts_enabled"), StartsProp->GetPropertyValue_InContainer(SenseConfig));
+	}
 
 	return Obj;
 }
@@ -520,6 +557,84 @@ namespace
 
 		return true;
 	}
+
+	/**
+	 * Apply UAISenseConfig base-class params (MaxAge, bStartsEnabled) to the given sense config via reflection,
+	 * and emit verified_value entries into OutVerified for each one the caller passed.
+	 *
+	 * Both fields live on the protected base class — reflection lookup uses UAISenseConfig::StaticClass() so it
+	 * works for any subclass instance. Mirrors the pre-existing Phase B max_age block on configure_damage_sense.
+	 *
+	 * @param SenseConfig  The concrete sense config instance (Sight/Hearing/Damage/Touch — must derive UAISenseConfig).
+	 * @param Params       JSON params from the action invocation. Looks for "max_age" (number) and "starts_enabled" (bool).
+	 * @param OutVerified  Verified-value JSON object the caller emits under top-level "verified_value".
+	 * @param OutWarnings  Append-only warnings array; gets entries when reflection lookup fails (silent reverts).
+	 */
+	void ApplyBaseSenseConfigParams(
+		UAISenseConfig* SenseConfig,
+		const TSharedPtr<FJsonObject>& Params,
+		const TSharedPtr<FJsonObject>& OutVerified,
+		TArray<TSharedPtr<FJsonValue>>& OutWarnings)
+	{
+		if (!SenseConfig || !Params.IsValid() || !OutVerified.IsValid())
+		{
+			return;
+		}
+
+		// max_age — protected float on UAISenseConfig
+		if (Params->HasField(TEXT("max_age")))
+		{
+			const float Requested = (float)Params->GetNumberField(TEXT("max_age"));
+			float Actual = 0.0f;
+			bool bWrote = false;
+			if (FFloatProperty* MaxAgeProp = CastField<FFloatProperty>(
+					UAISenseConfig::StaticClass()->FindPropertyByName(TEXT("MaxAge"))))
+			{
+				MaxAgeProp->SetPropertyValue_InContainer(SenseConfig, Requested);
+				Actual = MaxAgeProp->GetPropertyValue_InContainer(SenseConfig);
+				bWrote = true;
+			}
+
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetNumberField(TEXT("requested"), Requested);
+			Entry->SetNumberField(TEXT("actual"), Actual);
+			Entry->SetBoolField(TEXT("match"), bWrote && FMath::IsNearlyEqual(Requested, Actual));
+			OutVerified->SetObjectField(TEXT("max_age"), Entry);
+
+			if (!bWrote)
+			{
+				OutWarnings.Add(MakeShared<FJsonValueString>(
+					TEXT("UAISenseConfig::MaxAge property not found via reflection — write skipped.")));
+			}
+		}
+
+		// bStartsEnabled — uint32:1 bitfield UPROPERTY (UHT exposes as FBoolProperty)
+		if (Params->HasField(TEXT("starts_enabled")))
+		{
+			const bool Requested = Params->GetBoolField(TEXT("starts_enabled"));
+			bool Actual = false;
+			bool bWrote = false;
+			if (FBoolProperty* StartsProp = CastField<FBoolProperty>(
+					UAISenseConfig::StaticClass()->FindPropertyByName(TEXT("bStartsEnabled"))))
+			{
+				StartsProp->SetPropertyValue_InContainer(SenseConfig, Requested);
+				Actual = StartsProp->GetPropertyValue_InContainer(SenseConfig);
+				bWrote = true;
+			}
+
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetBoolField(TEXT("requested"), Requested);
+			Entry->SetBoolField(TEXT("actual"), Actual);
+			Entry->SetBoolField(TEXT("match"), bWrote && Requested == Actual);
+			OutVerified->SetObjectField(TEXT("starts_enabled"), Entry);
+
+			if (!bWrote)
+			{
+				OutWarnings.Add(MakeShared<FJsonValueString>(
+					TEXT("UAISenseConfig::bStartsEnabled property not found via reflection — write skipped.")));
+			}
+		}
+	}
 }
 
 // ============================================================
@@ -589,10 +704,84 @@ FMonolithActionResult FMonolithAIPerceptionActions::HandleConfigureSightSense(co
 		Sight->DetectionByAffiliation.bDetectFriendlies = bFriendlies;
 	}
 
+	// Per-sense additions: collect verified_value entries for sight-specific reflection writes
+	TSharedPtr<FJsonObject> Verified = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> Warnings;
+
+	// near_clipping_radius — UAISenseConfig_Sight::NearClippingRadius (float)
+	if (Params->HasField(TEXT("near_clipping_radius")))
+	{
+		const float Requested = (float)Params->GetNumberField(TEXT("near_clipping_radius"));
+		float Actual = 0.0f;
+		bool bWrote = false;
+		if (FFloatProperty* Prop = CastField<FFloatProperty>(
+				UAISenseConfig_Sight::StaticClass()->FindPropertyByName(TEXT("NearClippingRadius"))))
+		{
+			Prop->SetPropertyValue_InContainer(Sight, Requested);
+			Actual = Prop->GetPropertyValue_InContainer(Sight);
+			bWrote = true;
+		}
+
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetNumberField(TEXT("requested"), Requested);
+		Entry->SetNumberField(TEXT("actual"), Actual);
+		Entry->SetBoolField(TEXT("match"), bWrote && FMath::IsNearlyEqual(Requested, Actual));
+		Verified->SetObjectField(TEXT("near_clipping_radius"), Entry);
+
+		if (!bWrote)
+		{
+			Warnings.Add(MakeShared<FJsonValueString>(
+				TEXT("UAISenseConfig_Sight::NearClippingRadius property not found via reflection — write skipped.")));
+		}
+	}
+
+	// auto_register_all_pawns — UAISense::bAutoRegisterAllPawnsAsSources lives on the runtime sense class default
+	// object (EditDefaultsOnly). Writing here mutates the CDO so all sight-sense instances inherit the new value.
+	if (Params->HasField(TEXT("auto_register_all_pawns")))
+	{
+		const bool Requested = Params->GetBoolField(TEXT("auto_register_all_pawns"));
+		bool Actual = false;
+		bool bWrote = false;
+		if (UAISense_Sight* SenseCDO = GetMutableDefault<UAISense_Sight>())
+		{
+			if (FBoolProperty* Prop = CastField<FBoolProperty>(
+					UAISense::StaticClass()->FindPropertyByName(TEXT("bAutoRegisterAllPawnsAsSources"))))
+			{
+				Prop->SetPropertyValue_InContainer(SenseCDO, Requested);
+				Actual = Prop->GetPropertyValue_InContainer(SenseCDO);
+				bWrote = true;
+			}
+		}
+
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetBoolField(TEXT("requested"), Requested);
+		Entry->SetBoolField(TEXT("actual"), Actual);
+		Entry->SetBoolField(TEXT("match"), bWrote && Requested == Actual);
+		Entry->SetStringField(TEXT("note"), TEXT("CDO-level write — affects all UAISense_Sight instances globally"));
+		Verified->SetObjectField(TEXT("auto_register_all_pawns"), Entry);
+
+		if (!bWrote)
+		{
+			Warnings.Add(MakeShared<FJsonValueString>(
+				TEXT("UAISense::bAutoRegisterAllPawnsAsSources property not found via reflection — write skipped.")));
+		}
+	}
+
+	// Base-class params (max_age, bStartsEnabled) lifted via shared helper
+	ApplyBaseSenseConfigParams(Sight, Params, Verified, Warnings);
+
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Ctx.BP);
 
 	TSharedPtr<FJsonObject> Result = MonolithAI::MakeAssetResult(Ctx.AssetPath, TEXT("Sight sense configured"));
 	Result->SetObjectField(TEXT("config"), SenseConfigToJson(Sight));
+	if (Verified->Values.Num() > 0)
+	{
+		Result->SetObjectField(TEXT("verified_value"), Verified);
+	}
+	if (Warnings.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("warnings"), Warnings);
+	}
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -635,10 +824,23 @@ FMonolithActionResult FMonolithAIPerceptionActions::HandleConfigureHearingSense(
 		Hearing->DetectionByAffiliation.bDetectFriendlies = bFriendlies;
 	}
 
+	// Base-class params (max_age, bStartsEnabled) via shared helper
+	TSharedPtr<FJsonObject> Verified = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> Warnings;
+	ApplyBaseSenseConfigParams(Hearing, Params, Verified, Warnings);
+
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Ctx.BP);
 
 	TSharedPtr<FJsonObject> Result = MonolithAI::MakeAssetResult(Ctx.AssetPath, TEXT("Hearing sense configured"));
 	Result->SetObjectField(TEXT("config"), SenseConfigToJson(Hearing));
+	if (Verified->Values.Num() > 0)
+	{
+		Result->SetObjectField(TEXT("verified_value"), Verified);
+	}
+	if (Warnings.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("warnings"), Warnings);
+	}
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -683,10 +885,26 @@ FMonolithActionResult FMonolithAIPerceptionActions::HandleConfigureDamageSense(c
 		}
 	}
 
+	// Base-class params (max_age, bStartsEnabled) via shared helper. Replaces the prior Phase B inline
+	// max_age block — same semantics, now extended with bStartsEnabled and reused across all sense actions.
+	TSharedPtr<FJsonObject> Verified = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> Warnings;
+	ApplyBaseSenseConfigParams(Damage, Params, Verified, Warnings);
+
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Ctx.BP);
 
 	TSharedPtr<FJsonObject> Result = MonolithAI::MakeAssetResult(Ctx.AssetPath, TEXT("Damage sense configured"));
 	Result->SetObjectField(TEXT("config"), SenseConfigToJson(Damage));
+
+	if (Verified->Values.Num() > 0)
+	{
+		Result->SetObjectField(TEXT("verified_value"), Verified);
+	}
+	if (Warnings.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("warnings"), Warnings);
+	}
+
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -721,10 +939,25 @@ FMonolithActionResult FMonolithAIPerceptionActions::HandleConfigureTouchSense(co
 		Touch->DetectionByAffiliation.bDetectFriendlies = bFriendlies;
 	}
 
+	// Base-class params (max_age, bStartsEnabled) via shared helper.
+	// NOTE: UAISenseConfig_Touch has no Implementation UPROPERTY in UE 5.7 (verified via source_query) —
+	// the runtime sense class is hardcoded by GetSenseImplementation(). No "implementation" param is wired.
+	TSharedPtr<FJsonObject> Verified = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> Warnings;
+	ApplyBaseSenseConfigParams(Touch, Params, Verified, Warnings);
+
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Ctx.BP);
 
 	TSharedPtr<FJsonObject> Result = MonolithAI::MakeAssetResult(Ctx.AssetPath, TEXT("Touch sense configured"));
 	Result->SetObjectField(TEXT("config"), SenseConfigToJson(Touch));
+	if (Verified->Values.Num() > 0)
+	{
+		Result->SetObjectField(TEXT("verified_value"), Verified);
+	}
+	if (Warnings.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("warnings"), Warnings);
+	}
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -816,7 +1049,7 @@ FMonolithActionResult FMonolithAIPerceptionActions::HandleAddStimuliSourceCompon
 	}
 
 	// Load any Actor Blueprint (not just AI controllers)
-	UBlueprint* BP = Cast<UBlueprint>(StaticLoadObject(UBlueprint::StaticClass(), nullptr, *AssetPath));
+	UBlueprint* BP = Cast<UBlueprint>(FMonolithAssetUtils::LoadAssetByPath(UBlueprint::StaticClass(), AssetPath));
 	if (!BP)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
@@ -933,7 +1166,7 @@ FMonolithActionResult FMonolithAIPerceptionActions::HandleConfigureStimuliSource
 		return ErrResult;
 	}
 
-	UBlueprint* BP = Cast<UBlueprint>(StaticLoadObject(UBlueprint::StaticClass(), nullptr, *AssetPath));
+	UBlueprint* BP = Cast<UBlueprint>(FMonolithAssetUtils::LoadAssetByPath(UBlueprint::StaticClass(), AssetPath));
 	if (!BP)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));

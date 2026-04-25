@@ -87,13 +87,38 @@ int32 GetGEComponentCount(UGameplayEffect* GE)
 	return GetGEComponents(GE).Num();
 }
 
-/** Mark BP as modified after CDO changes. */
+/**
+ * Mark BP as modified after CDO changes AND persist to disk.
+ *
+ * Prior implementation used MarkBlueprintAsModified only — that flips dirty flags but does
+ * not recompile the BPGC nor flush to .uasset. After editor restart the CDO mutations were
+ * silently lost (same class of bug that hit add_attribute on GBA AttributeSets, 2026-04-25).
+ *
+ * Recipe matches HandleCreateAttributeSet's persistence tail:
+ *   Modify -> MarkBlueprintAsStructurallyModified -> CompileBlueprint -> SavePackage.
+ *
+ * GE component edits qualify as structural (subobject collection changes), so the structural
+ * variant is required; the non-structural call would skip dependent compile passes.
+ */
 void MarkModified(UBlueprint* BP)
 {
-	if (BP)
+	if (!BP)
 	{
-		BP->Modify();
-		FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
+		return;
+	}
+
+	BP->Modify();
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
+	FKismetEditorUtilities::CompileBlueprint(BP, EBlueprintCompileOptions::SkipGarbageCollection);
+
+	UPackage* OuterPackage = BP->GetOutermost();
+	if (OuterPackage)
+	{
+		const FString PackageFilename = FPackageName::LongPackageNameToFilename(
+			OuterPackage->GetName(), FPackageName::GetAssetPackageExtension());
+		FSavePackageArgs SaveArgs;
+		SaveArgs.TopLevelFlags = RF_Standalone;
+		UPackage::SavePackage(OuterPackage, BP, *PackageFilename, SaveArgs);
 	}
 }
 
@@ -1497,6 +1522,12 @@ FMonolithActionResult FMonolithGASEffectActions::HandleAddGEComponent(const TSha
 		return FMonolithActionResult::Error(ClassError);
 	}
 
+	// F.7b — accumulate per-field skipped tag strings across the if/else chain so we can surface
+	// "warnings" on the response below. Declared up here so all component-type branches can use them.
+	TArray<FString> SkippedAppRequire, SkippedAppIgnore;
+	TArray<FString> SkippedOngoingRequire, SkippedOngoingIgnore;
+	TArray<FString> SkippedRemovalRequire, SkippedRemovalIgnore;
+
 	// Create the component as a subobject of the GE CDO using the same pattern as UGameplayEffect::AddComponent<T>()
 	UGameplayEffectComponent* NewComp = NewObject<UGameplayEffectComponent>(GE, CompClass, NAME_None,
 		GE->GetMaskedFlags(RF_PropagateToSubObjects) | RF_Transactional);
@@ -1558,17 +1589,18 @@ FMonolithActionResult FMonolithGASEffectActions::HandleAddGEComponent(const TSha
 	{
 		UTargetTagRequirementsGameplayEffectComponent* Comp = CastChecked<UTargetTagRequirementsGameplayEffectComponent>(NewComp);
 
+		// F.7b — collect dropped tags per field, surface as warnings on the response.
 		// Application requirements
-		Comp->ApplicationTagRequirements.RequireTags = MonolithGAS::ParseTagContainer(Config, TEXT("application_require_tags"));
-		Comp->ApplicationTagRequirements.IgnoreTags = MonolithGAS::ParseTagContainer(Config, TEXT("application_ignore_tags"));
+		Comp->ApplicationTagRequirements.RequireTags = MonolithGAS::ParseTagContainer(Config, TEXT("application_require_tags"), SkippedAppRequire);
+		Comp->ApplicationTagRequirements.IgnoreTags  = MonolithGAS::ParseTagContainer(Config, TEXT("application_ignore_tags"),  SkippedAppIgnore);
 
 		// Ongoing requirements
-		Comp->OngoingTagRequirements.RequireTags = MonolithGAS::ParseTagContainer(Config, TEXT("ongoing_require_tags"));
-		Comp->OngoingTagRequirements.IgnoreTags = MonolithGAS::ParseTagContainer(Config, TEXT("ongoing_ignore_tags"));
+		Comp->OngoingTagRequirements.RequireTags     = MonolithGAS::ParseTagContainer(Config, TEXT("ongoing_require_tags"),     SkippedOngoingRequire);
+		Comp->OngoingTagRequirements.IgnoreTags      = MonolithGAS::ParseTagContainer(Config, TEXT("ongoing_ignore_tags"),      SkippedOngoingIgnore);
 
 		// Removal requirements
-		Comp->RemovalTagRequirements.RequireTags = MonolithGAS::ParseTagContainer(Config, TEXT("removal_require_tags"));
-		Comp->RemovalTagRequirements.IgnoreTags = MonolithGAS::ParseTagContainer(Config, TEXT("removal_ignore_tags"));
+		Comp->RemovalTagRequirements.RequireTags     = MonolithGAS::ParseTagContainer(Config, TEXT("removal_require_tags"),     SkippedRemovalRequire);
+		Comp->RemovalTagRequirements.IgnoreTags      = MonolithGAS::ParseTagContainer(Config, TEXT("removal_ignore_tags"),      SkippedRemovalIgnore);
 	}
 	else if (ComponentType == TEXT("chance_to_apply"))
 	{
@@ -1604,6 +1636,30 @@ FMonolithActionResult FMonolithGASEffectActions::HandleAddGEComponent(const TSha
 		FString::Printf(TEXT("Added %s component"), *ComponentType));
 	Result->SetStringField(TEXT("component_type"), ComponentType);
 	Result->SetNumberField(TEXT("component_count"), GetGEComponentCount(GE));
+
+	// F.7b — surface dropped tag strings as a "warnings" array on the response.
+	{
+		TArray<TSharedPtr<FJsonValue>> Warnings;
+		auto AppendSkipped = [&](const TCHAR* FieldName, const TArray<FString>& Skipped)
+		{
+			for (const FString& T : Skipped)
+			{
+				Warnings.Add(MakeShared<FJsonValueString>(FString::Printf(
+					TEXT("%s '%s' is not a registered GameplayTag — dropped"), FieldName, *T)));
+			}
+		};
+		AppendSkipped(TEXT("application_require_tags"), SkippedAppRequire);
+		AppendSkipped(TEXT("application_ignore_tags"),  SkippedAppIgnore);
+		AppendSkipped(TEXT("ongoing_require_tags"),     SkippedOngoingRequire);
+		AppendSkipped(TEXT("ongoing_ignore_tags"),      SkippedOngoingIgnore);
+		AppendSkipped(TEXT("removal_require_tags"),     SkippedRemovalRequire);
+		AppendSkipped(TEXT("removal_ignore_tags"),      SkippedRemovalIgnore);
+		if (Warnings.Num() > 0)
+		{
+			Result->SetArrayField(TEXT("warnings"), Warnings);
+		}
+	}
+
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -1635,6 +1691,11 @@ FMonolithActionResult FMonolithGASEffectActions::HandleSetGEComponent(const TSha
 	{
 		return FMonolithActionResult::Error(ClassError);
 	}
+
+	// F.7b — accumulate per-field skipped tag strings across the target_tag_requirements branch.
+	TArray<FString> SkippedAppRequire, SkippedAppIgnore;
+	TArray<FString> SkippedOngoingRequire, SkippedOngoingIgnore;
+	TArray<FString> SkippedRemovalRequire, SkippedRemovalIgnore;
 
 	// Find existing component of this type
 	int32 TargetIndex = 0;
@@ -1702,18 +1763,19 @@ FMonolithActionResult FMonolithGASEffectActions::HandleSetGEComponent(const TSha
 	else if (ComponentType == TEXT("target_tag_requirements"))
 	{
 		UTargetTagRequirementsGameplayEffectComponent* Comp = CastChecked<UTargetTagRequirementsGameplayEffectComponent>(FoundComp);
+		// F.7b — collect dropped tags per field, surface as warnings on the response.
 		if (Config->HasField(TEXT("application_require_tags")))
-			Comp->ApplicationTagRequirements.RequireTags = MonolithGAS::ParseTagContainer(Config, TEXT("application_require_tags"));
+			Comp->ApplicationTagRequirements.RequireTags = MonolithGAS::ParseTagContainer(Config, TEXT("application_require_tags"), SkippedAppRequire);
 		if (Config->HasField(TEXT("application_ignore_tags")))
-			Comp->ApplicationTagRequirements.IgnoreTags = MonolithGAS::ParseTagContainer(Config, TEXT("application_ignore_tags"));
+			Comp->ApplicationTagRequirements.IgnoreTags  = MonolithGAS::ParseTagContainer(Config, TEXT("application_ignore_tags"),  SkippedAppIgnore);
 		if (Config->HasField(TEXT("ongoing_require_tags")))
-			Comp->OngoingTagRequirements.RequireTags = MonolithGAS::ParseTagContainer(Config, TEXT("ongoing_require_tags"));
+			Comp->OngoingTagRequirements.RequireTags     = MonolithGAS::ParseTagContainer(Config, TEXT("ongoing_require_tags"),     SkippedOngoingRequire);
 		if (Config->HasField(TEXT("ongoing_ignore_tags")))
-			Comp->OngoingTagRequirements.IgnoreTags = MonolithGAS::ParseTagContainer(Config, TEXT("ongoing_ignore_tags"));
+			Comp->OngoingTagRequirements.IgnoreTags      = MonolithGAS::ParseTagContainer(Config, TEXT("ongoing_ignore_tags"),      SkippedOngoingIgnore);
 		if (Config->HasField(TEXT("removal_require_tags")))
-			Comp->RemovalTagRequirements.RequireTags = MonolithGAS::ParseTagContainer(Config, TEXT("removal_require_tags"));
+			Comp->RemovalTagRequirements.RequireTags     = MonolithGAS::ParseTagContainer(Config, TEXT("removal_require_tags"),     SkippedRemovalRequire);
 		if (Config->HasField(TEXT("removal_ignore_tags")))
-			Comp->RemovalTagRequirements.IgnoreTags = MonolithGAS::ParseTagContainer(Config, TEXT("removal_ignore_tags"));
+			Comp->RemovalTagRequirements.IgnoreTags      = MonolithGAS::ParseTagContainer(Config, TEXT("removal_ignore_tags"),      SkippedRemovalIgnore);
 	}
 	else if (ComponentType == TEXT("chance_to_apply"))
 	{
@@ -1736,6 +1798,30 @@ FMonolithActionResult FMonolithGASEffectActions::HandleSetGEComponent(const TSha
 
 	TSharedPtr<FJsonObject> Result = MonolithGAS::MakeAssetResult(AssetPath,
 		FString::Printf(TEXT("Updated %s component at index %d"), *ComponentType, TargetIndex));
+
+	// F.7b — surface dropped tag strings as a "warnings" array on the response.
+	{
+		TArray<TSharedPtr<FJsonValue>> Warnings;
+		auto AppendSkipped = [&](const TCHAR* FieldName, const TArray<FString>& Skipped)
+		{
+			for (const FString& T : Skipped)
+			{
+				Warnings.Add(MakeShared<FJsonValueString>(FString::Printf(
+					TEXT("%s '%s' is not a registered GameplayTag — dropped"), FieldName, *T)));
+			}
+		};
+		AppendSkipped(TEXT("application_require_tags"), SkippedAppRequire);
+		AppendSkipped(TEXT("application_ignore_tags"),  SkippedAppIgnore);
+		AppendSkipped(TEXT("ongoing_require_tags"),     SkippedOngoingRequire);
+		AppendSkipped(TEXT("ongoing_ignore_tags"),      SkippedOngoingIgnore);
+		AppendSkipped(TEXT("removal_require_tags"),     SkippedRemovalRequire);
+		AppendSkipped(TEXT("removal_ignore_tags"),      SkippedRemovalIgnore);
+		if (Warnings.Num() > 0)
+		{
+			Result->SetArrayField(TEXT("warnings"), Warnings);
+		}
+	}
+
 	return FMonolithActionResult::Success(Result);
 }
 

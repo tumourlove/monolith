@@ -34,6 +34,10 @@ private:
 	static FMonolithActionResult GetSubmixProperties(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult SetSubmixProperties(const TSharedPtr<FJsonObject>& Params);
 
+	// --- Test fixtures (F18) ---
+	/** Procedurally synthesizes a 16-bit mono sine-tone USoundWave. Zero asset dependencies. */
+	static FMonolithActionResult CreateTestWave(const TSharedPtr<FJsonObject>& Params);
+
 	// --- Helpers ---
 
 	/** Split "/Game/Foo/Bar" into PackagePath="/Game/Foo" and AssetName="Bar" */

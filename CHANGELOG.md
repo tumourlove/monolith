@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.14.7] - 2026-04-26
+
+Phase J fix sprint — closes 5 silent-accept input-validation FAILs in audio perception, distinguishes invalid-GUID from unknown-GUID across 16 BT action sites, hardens Behavior Tree crash surface, ships canonical AttributeSet for the Leviathan project pattern, adds 6 new MCP scaffolding actions, plus assorted spec/observability/agent-tooling cleanup. Action count 1277 → 1283 (+6 across editor / gas / ai / audio).
+
+### Added
+
+- **`audio::create_test_wave` action** (F18) — procedurally generates a sine-tone `USoundWave` for test fixtures with no asset dependencies. Validates `frequency_hz` (20–20000), `duration_seconds` (0.05–5.0), `sample_rate` ({22050,44100,48000}), `amplitude` ((0,1]). UE 5.7 `FEditorAudioBulkData::UpdatePayload(FSharedBuffer, Owner)` payload write (legacy `Lock`/`Realloc`/`Unlock` removed in UE 5.4+). Unblocks J3 TC3.19 (USoundWave direct binding) and any future test needing a disposable wave.
+- **5 helper MCP actions** (F8) — `editor::create_empty_map` (UWorldFactory + IAssetTools), `editor::get_module_status` (IPluginManager + FModuleManager reflection), `gas::grant_ability_to_pawn` (CDO mutation via reflection on convention-named `TArray<TSubclassOf<UGameplayAbility>>` UPROPERTY), `ai::add_perception_to_actor` (any actor BP, `senses` array), `ai::get_bt_graph` (flat node_id/parent_id/children GUID dump). Resolves J2/J3 spec prerequisites that previously blocked agent-driven test setup.
+- **`ULeviathanVitalsSet` AttributeSet** (F4) — six `FGameplayAttributeData` (Health/MaxHealth/Sanity/MaxSanity/Stamina/MaxSamina), `PreAttributeChange` clamps, `PostGameplayEffectExecute` re-clamps, REPNOTIFY_Always replication. Eldritch resistance attributes deferred to horror-system spec.
+- **`MonolithSource` auto-reindex on hot-reload** (F17) — `UMonolithSourceSubsystem` binds `FCoreUObjectDelegates::ReloadCompleteDelegate` and kicks `TriggerProjectReindex()` (project-only — engine source DB stays frozen at bootstrap) on every Live Coding patch and post-UBT hot-reload. Three guards: 5-second cooldown, `bIsIndexing` re-entrancy, bootstrap-DB-missing skip. Eliminates manual `source.trigger_project_reindex` calls in the dev loop.
+- **GAS UI binding observability** (F9) — 8 new `UE_LOG` sites: 4 handler-success (bind/unbind/list-Verbose/clear) plus per-fire `ApplyValue` trace at Verbose plus owner-resolution Warning escalation gated by 1-second grace window (`FActiveSub::FirstSubscribeAttemptTime` + `bGraceEscalated`). All 7 pre-existing UE_LOG sites unified under parent `LogMonolithGAS` (file-static `LogMonolithGASUIBinding`/`LogMonolithGASUIBindingExt` retired).
+- **Frontmatter Tool-Allowlist Discipline rule** (F13) — `.claude/rules/always/agent-rules.md` adds rule preventing future F10-style drift (foreign-namespace tool named in agent prompt MUST appear in `tools:` frontmatter). New `Plugins/Monolith/Scripts/lint_agent_tools.py` automates the check (pure stdlib, exit 1 on violations, walks all 30 agents).
+
+### Fixed
+
+- **Behavior Tree crash hardening** (F1) — Five `ai::add_bt_*` actions and `build_behavior_tree_from_spec` now reject Task-under-Root parenting at the API entry point via `ValidateParentForChildTask` helper plus schema-checked `ConnectParentChild`. Root cause: `UBehaviorTreeGraphNode_Root::NodeInstance` is `nullptr` by engine design; wiring a Task there produced a malformed graph that crashed `UBehaviorTreeGraph::UpdateAsset()` at `BehaviorTreeGraph.cpp:517`.
+- **`gas::bind_widget_to_attribute` rejects unknown `owner_resolver`** (F2) — `ParseOwner` no longer silently coerces unrecognized strings (e.g. `"banana"`) to `OwningPlayerPawn`. Returns enumerated valid-list error: `[owning_player_pawn, owning_player_state, owning_player_controller, self_actor, named_socket:<tag>]`. Empty input still defaults (back-compat).
+- **`gas::bind_widget_to_attribute` rejects malformed `format_string` templates** (F3) — New `ValidateFormatStringPayload` helper enforces `{0}` slot when `format=format_string`, plus `{1}` whenever `max_attribute` is bound. Both bare and typed-slot forms accepted. Catches user-supplied `format=format_string:NoSlots` AND `format=auto` auto-promoted to FormatString without template.
+- **`audio::bind_sound_to_perception` rejects four silent-accept input seams** (F11) — pre-flight `ValidateBindingParams` rejects `loudness < 0`, `max_range < 0`, `tag.Len() > 255`. New `ParseSenseClass` strict allowlist: Hearing only (case-insensitive, accepts `"Hearing"` and `"AISense_Hearing"`); future classes (Sight/Damage/Touch/Team/Prediction) return distinct `"deferred to v2"` error; everything else returns `"Unsupported sense_class '<X>'"`. Replaces buggy `TObjectIterator` walk where `"AISense_Sight".Equals("Sight", IgnoreCase)` was FALSE causing silent fallback to Hearing.
+- **Invalid-GUID vs unknown-GUID error messages now distinct** (F15) — 16 sibling sites in `MonolithAIBehaviorTreeActions.cpp` hoisted into new `RequireBtNodeByGuid` helper. Parse failure → `"<param> 'X' is not a valid GUID"`. Lookup failure → `"No node with GUID 'X' in BT 'Y'"`. Bonus: 4 empty-or-resolve sites also emit `"Root node not found in BT graph"` distinct from GUID-resolve failures.
+- **GAS UI binding response-shape & error-text drift** (F5) — `index` → `binding_index`, composite `attribute`/`max_attribute` strings added alongside split fields, `widget_class` field added to list response, `removed_binding_index` added to unbind response, "Available widgets: [...]" enrichment via `BuildAvailableWidgetsClause` (sorted, capped at 20), `BuildValidPropertiesClause` enrichment for invalid-property errors, `LoadWBP` split into not-found vs wrong-class branches.
+- **CDO save pipeline cradle/walker fixes** (F9 — PR #39 by **@danielandric**) — Four-mechanism fix: transient-outer reparent (`MonolithEditCradle::ReparentTransientInstancedSubobjects`), walker unification (`WalkObjectRefLeaves`), `FMapProperty::ValueProp` double-offset fix, sparse-iteration fix (`Helper.GetMaxIndex()` + `IsValidIndex`). Closes inline-subobject sub-case left after #29 (v0.14.3's recursive cradle).
+
+### Changed
+
+- **J1/J2/J3 spec corrections** (F6 + F7 + F14 + F16) — 17 prereq corrections across J specs (9 missing fixtures promoted to create-as-disposable, 5 wrong-facts corrected including Mana → Sanity drift, 3 non-existent actions TODO'd then resolved by F8). J1 `warnings` field documented as omit-when-empty. Levenshtein "did you mean" replaced with full valid-property list. J2 TC2.16/TC2.17 sample responses rewritten to document `event_tag`/`node_name` as omit-when-empty. J2 swept of `Ability.Combat.Punch`/`Kick` references — replaced with existing `Ability.Combat.Melee.Light`/`Heavy` registry tags (verified at `Config/DefaultGameplayTags.ini:26-27`); fixture abilities renamed.
+- **Action count 1277 → 1283** — `editor` 20 → 22 (+2 from F8), `gas` 130 → 131 (+1 from F8), `ai` 229 → 231 (+2 from F8), `audio` 81 → 82 (+1 from F18).
+
+### Internal
+
+- **Agent frontmatter cross-namespace dispatcher additions** (F12) — 5 agents had cross-namespace `mcp__monolith__*` tools added to their `tools:` frontmatter line so `ToolSearch select:` could load them: `unreal-ai-expert`, `unreal-audio-expert`, `gas-expert`, `interface-architect`, `unreal-blueprint-expert`. Fixes the F10 prose-only patch where agents were told to use cross-namespace dispatchers but the dispatcher tool names were missing from their allowlists.
+- **Domain Agents Are Editor Specialists rule** (new) — `.claude/rules/always/agent-rules.md` codifies that all domain agents (gas-expert, unreal-audio-expert, unreal-ai-expert, etc.) are editor specialists, not C++ implementation agents. Runtime C++ writing/refactoring belongs to `cpp-performance-expert` or `refactoring-expert`. Generalizes the prior anim-only rule. Cross-ref in `Docs/references/AgentRegistry.md`.
+
+Full diff: [v0.14.6...v0.14.7](https://github.com/tumourlove/monolith/compare/v0.14.6...v0.14.7)
+
 ## [0.14.4] - 2026-04-24
 
 ### Fixed

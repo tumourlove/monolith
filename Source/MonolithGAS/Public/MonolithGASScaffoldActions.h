@@ -17,4 +17,7 @@ private:
 	static FMonolithActionResult HandleScaffoldDamagePipeline(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleScaffoldStatusEffect(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleScaffoldWeaponAbility(const TSharedPtr<FJsonObject>& Params);
+
+	// Phase F8 (J-phase): author-time ability grant via ASC-CDO startup-array reflection
+	static FMonolithActionResult HandleGrantAbilityToPawn(const TSharedPtr<FJsonObject>& Params);
 };

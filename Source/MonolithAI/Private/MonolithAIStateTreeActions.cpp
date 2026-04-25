@@ -260,7 +260,7 @@ namespace
 		return EStateTreeStateSelectionBehavior::TrySelectChildrenInOrder;
 	}
 
-	/** Parse EStateTreeTransitionTrigger from string. */
+	/** Parse EStateTreeTransitionTrigger from string. Silent fallback to OnStateCompleted for legacy callers. */
 	EStateTreeTransitionTrigger ParseTransitionTrigger(const FString& Str)
 	{
 		if (Str.Equals(TEXT("OnStateCompleted"), ESearchCase::IgnoreCase)) return EStateTreeTransitionTrigger::OnStateCompleted;
@@ -269,6 +269,19 @@ namespace
 		if (Str.Equals(TEXT("OnTick"), ESearchCase::IgnoreCase)) return EStateTreeTransitionTrigger::OnTick;
 		if (Str.Equals(TEXT("OnEvent"), ESearchCase::IgnoreCase)) return EStateTreeTransitionTrigger::OnEvent;
 		return EStateTreeTransitionTrigger::OnStateCompleted;
+	}
+
+	/** Phase F #25: validating variant. Returns false on unknown trigger so callers can
+	 *  reject instead of silently accepting OnStateCompleted. */
+	bool TryParseTransitionTrigger(const FString& Str, EStateTreeTransitionTrigger& OutTrigger, FString& OutValidValues)
+	{
+		if (Str.Equals(TEXT("OnStateCompleted"), ESearchCase::IgnoreCase)) { OutTrigger = EStateTreeTransitionTrigger::OnStateCompleted; return true; }
+		if (Str.Equals(TEXT("OnStateSucceeded"), ESearchCase::IgnoreCase)) { OutTrigger = EStateTreeTransitionTrigger::OnStateSucceeded; return true; }
+		if (Str.Equals(TEXT("OnStateFailed"), ESearchCase::IgnoreCase)) { OutTrigger = EStateTreeTransitionTrigger::OnStateFailed; return true; }
+		if (Str.Equals(TEXT("OnTick"), ESearchCase::IgnoreCase)) { OutTrigger = EStateTreeTransitionTrigger::OnTick; return true; }
+		if (Str.Equals(TEXT("OnEvent"), ESearchCase::IgnoreCase)) { OutTrigger = EStateTreeTransitionTrigger::OnEvent; return true; }
+		OutValidValues = TEXT("OnStateCompleted, OnStateSucceeded, OnStateFailed, OnTick, OnEvent");
+		return false;
 	}
 
 	/** Parse EStateTreeTransitionPriority from string. */
@@ -462,12 +475,13 @@ void FMonolithAIStateTreeActions::RegisterActions(FMonolithToolRegistry& Registr
 
 	// 50. add_st_state
 	Registry.RegisterAction(TEXT("ai"), TEXT("add_st_state"),
-		TEXT("Add a state to the StateTree. parent_state_id=null adds at root level (SubTree)."),
+		TEXT("Add a state to the StateTree. Omit parent_state_id (or pass null) to add at root level (SubTree). "
+		     "If parent_state_id is supplied but doesn't match a state, returns an error."),
 		FMonolithActionHandler::CreateStatic(&HandleAddSTState),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("StateTree asset path"))
 			.Required(TEXT("name"), TEXT("string"), TEXT("Name for the new state"))
-			.Optional(TEXT("parent_state_id"), TEXT("string"), TEXT("GUID of parent state (null = add as SubTree root)"))
+			.Optional(TEXT("parent_state_id"), TEXT("string"), TEXT("GUID of parent state (omit/null = add as SubTree root)"), { TEXT("parent_id") })
 			.Optional(TEXT("type"), TEXT("string"), TEXT("State/Group/Linked/LinkedAsset/Subtree (default: State)"))
 			.Optional(TEXT("selection_behavior"), TEXT("string"), TEXT("Selection behavior (default: TrySelectChildrenInOrder)"))
 			.Optional(TEXT("linked_asset_path"), TEXT("string"), TEXT("For LinkedAsset type: path to linked StateTree"))
@@ -708,6 +722,7 @@ void FMonolithAIStateTreeActions::RegisterActions(FMonolithToolRegistry& Registr
 		FParamSchemaBuilder()
 			.Required(TEXT("save_path"), TEXT("string"), TEXT("Asset save path (e.g. /Game/AI/ST_Enemy)"))
 			.Required(TEXT("spec"), TEXT("object"), TEXT("JSON spec: {schema_class?, root: {name, type?, children: [{name, tasks, transitions}]}}"))
+			.Optional(TEXT("strict_mode"), TEXT("boolean"), TEXT("If true, abort with error (no save) when any task/condition struct fails to resolve"), TEXT("false"))
 			.Build());
 
 	// 72. export_st_spec
@@ -1091,7 +1106,27 @@ FMonolithActionResult FMonolithAIStateTreeActions::HandleAddSTState(const TShare
 		return FMonolithActionResult::Error(TEXT("Missing required param 'name'"));
 	}
 
-	FString ParentStateId = Params->GetStringField(TEXT("parent_state_id"));
+	// Phase F #24: distinguish "key absent / null / empty" (intent: add at root)
+	// from "key supplied with non-empty garbage" (intent: child of given parent — must validate).
+	const bool bParentSupplied = Params->HasField(TEXT("parent_state_id"));
+	FString ParentStateId;
+	bool bParentExplicitlyNull = false;
+	if (bParentSupplied)
+	{
+		const TSharedPtr<FJsonValue> ParentField = Params->TryGetField(TEXT("parent_state_id"));
+		if (ParentField.IsValid())
+		{
+			if (ParentField->Type == EJson::Null)
+			{
+				bParentExplicitlyNull = true;
+			}
+			else
+			{
+				ParentField->TryGetString(ParentStateId);
+			}
+		}
+	}
+
 	FString TypeStr = Params->GetStringField(TEXT("type"));
 	FString SelectionStr = Params->GetStringField(TEXT("selection_behavior"));
 	FString LinkedAssetPath = Params->GetStringField(TEXT("linked_asset_path"));
@@ -1102,7 +1137,9 @@ FMonolithActionResult FMonolithAIStateTreeActions::HandleAddSTState(const TShare
 
 	UStateTreeState* NewState = nullptr;
 
-	if (ParentStateId.IsEmpty())
+	const bool bAddAtRoot = !bParentSupplied || bParentExplicitlyNull || ParentStateId.IsEmpty();
+
+	if (bAddAtRoot)
 	{
 		// Add as root subtree
 		NewState = &EditorData->AddSubTree(FName(*StateName));
@@ -1113,7 +1150,12 @@ FMonolithActionResult FMonolithAIStateTreeActions::HandleAddSTState(const TShare
 		UStateTreeState* Parent = FindStateByGuid(EditorData, ParentStateId);
 		if (!Parent)
 		{
-			return FMonolithActionResult::Error(FString::Printf(TEXT("Parent state '%s' not found"), *ParentStateId));
+			// Phase F #24: was previously silent-fallback to root when GUID didn't resolve in some
+			// schema variants. Now hard error so callers don't get a tree they didn't ask for.
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("parent_state_id '%s' does not match any existing state. ")
+				TEXT("Use a valid state GUID, omit the field, or pass null to add at root."),
+				*ParentStateId));
 		}
 		NewState = &Parent->AddChildState(FName(*StateName), StateType);
 	}
@@ -1675,7 +1717,16 @@ FMonolithActionResult FMonolithAIStateTreeActions::HandleAddSTTransition(const T
 		return FMonolithActionResult::Error(FString::Printf(TEXT("State '%s' not found"), *StateId));
 	}
 
-	EStateTreeTransitionTrigger Trigger = ParseTransitionTrigger(TriggerStr);
+	// Phase F #25: validate trigger string up-front instead of silently defaulting to OnStateCompleted.
+	EStateTreeTransitionTrigger Trigger = EStateTreeTransitionTrigger::OnStateCompleted;
+	{
+		FString ValidValues;
+		if (!TryParseTransitionTrigger(TriggerStr, Trigger, ValidValues))
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Invalid trigger '%s'. Valid values: %s."), *TriggerStr, *ValidValues));
+		}
+	}
 
 	// Determine transition type and target
 	EStateTreeTransitionType TransType = EStateTreeTransitionType::None;
@@ -2844,6 +2895,100 @@ FMonolithActionResult FMonolithAIStateTreeActions::HandleBuildStateTreeFromSpec(
 	}
 	const TSharedPtr<FJsonObject>& Spec = *SpecPtr;
 
+	bool bStrictMode = false;
+	Params->TryGetBoolField(TEXT("strict_mode"), bStrictMode);
+
+	// =====================================================================
+	// PRE-VALIDATION — walk the spec and resolve every task/condition struct
+	// BEFORE creating any package. Collect skipped states (= states whose
+	// tasks/conditions reference unresolvable structs). In strict_mode, any
+	// failure aborts before package creation.
+	// =====================================================================
+	TArray<TSharedPtr<FJsonValue>> SkippedStates;
+	TArray<FString> StrictErrors;
+
+	auto MakeStateSkipObj = [](const FString& StatePath, const FString& BadClass, const FString& Slot) -> TSharedPtr<FJsonValue>
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("state"), StatePath);
+		Obj->SetStringField(TEXT("slot"), Slot);
+		Obj->SetStringField(TEXT("bad_class"), BadClass);
+		Obj->SetStringField(TEXT("reason"), FString::Printf(TEXT("UScriptStruct '%s' not found"), *BadClass));
+		return MakeShared<FJsonValueObject>(Obj);
+	};
+
+	{
+		const TSharedPtr<FJsonObject>* PreRootPtr = nullptr;
+		if (Spec->TryGetObjectField(TEXT("root"), PreRootPtr) && PreRootPtr && PreRootPtr->IsValid())
+		{
+			TFunction<void(const TSharedPtr<FJsonObject>&, const FString&)> WalkSpec;
+			WalkSpec = [&](const TSharedPtr<FJsonObject>& StateSpec, const FString& Path)
+			{
+				if (!StateSpec.IsValid()) return;
+				const FString StateName = StateSpec->GetStringField(TEXT("name"));
+				const FString DisplayPath = StateName.IsEmpty() ? Path : Path + TEXT("/") + StateName;
+
+				const TArray<TSharedPtr<FJsonValue>>* TasksArr = nullptr;
+				if (StateSpec->TryGetArrayField(TEXT("tasks"), TasksArr) && TasksArr)
+				{
+					for (const auto& TaskVal : *TasksArr)
+					{
+						TSharedPtr<FJsonObject> TaskSpec = TaskVal->AsObject();
+						if (!TaskSpec.IsValid()) continue;
+						const FString TaskClassName = TaskSpec->GetStringField(TEXT("class"));
+						if (TaskClassName.IsEmpty()) continue;
+						if (!FindStructByName(TaskClassName))
+						{
+							SkippedStates.Add(MakeStateSkipObj(DisplayPath, TaskClassName, TEXT("task")));
+							StrictErrors.Add(FString::Printf(TEXT("%s: task class '%s' does not resolve"), *DisplayPath, *TaskClassName));
+						}
+					}
+				}
+
+				const TArray<TSharedPtr<FJsonValue>>* CondsArr = nullptr;
+				if (StateSpec->TryGetArrayField(TEXT("enter_conditions"), CondsArr) && CondsArr)
+				{
+					for (const auto& CondVal : *CondsArr)
+					{
+						TSharedPtr<FJsonObject> CondSpec = CondVal->AsObject();
+						if (!CondSpec.IsValid()) continue;
+						const FString CondClassName = CondSpec->GetStringField(TEXT("class"));
+						if (CondClassName.IsEmpty()) continue;
+						if (!FindStructByName(CondClassName))
+						{
+							SkippedStates.Add(MakeStateSkipObj(DisplayPath, CondClassName, TEXT("enter_condition")));
+							StrictErrors.Add(FString::Printf(TEXT("%s: enter_condition class '%s' does not resolve"), *DisplayPath, *CondClassName));
+						}
+					}
+				}
+
+				const TArray<TSharedPtr<FJsonValue>>* ChildrenArr = nullptr;
+				if (StateSpec->TryGetArrayField(TEXT("children"), ChildrenArr) && ChildrenArr)
+				{
+					for (const auto& ChildVal : *ChildrenArr)
+					{
+						TSharedPtr<FJsonObject> ChildSpec = ChildVal->AsObject();
+						if (ChildSpec.IsValid())
+						{
+							WalkSpec(ChildSpec, DisplayPath);
+						}
+					}
+				}
+			};
+			WalkSpec(*PreRootPtr, FString());
+		}
+	}
+
+	if (bStrictMode && StrictErrors.Num() > 0)
+	{
+		FString Msg = TEXT("strict_mode: spec pre-validation failed (asset NOT saved):");
+		for (const FString& E : StrictErrors)
+		{
+			Msg += TEXT("\n  - ") + E;
+		}
+		return FMonolithActionResult::Error(Msg);
+	}
+
 	FString AssetName = FPackageName::GetShortName(SavePath);
 
 	FString PathErr;
@@ -2921,6 +3066,14 @@ FMonolithActionResult FMonolithAIStateTreeActions::HandleBuildStateTreeFromSpec(
 		Result->SetArrayField(TEXT("warnings"), WarnArr);
 	}
 
+	// Always emit skipped_states (populated during pre-validation walk above).
+	Result->SetArrayField(TEXT("skipped_states"), SkippedStates);
+	if (SkippedStates.Num() > 0)
+	{
+		Result->SetStringField(TEXT("warning"), FString::Printf(
+			TEXT("%d state slots referenced unresolvable task/condition structs — see skipped_states. Use strict_mode=true to abort instead."), SkippedStates.Num()));
+	}
+
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -2948,6 +3101,47 @@ namespace
 			default: TypeStr = TEXT("State"); break;
 		}
 		Obj->SetStringField(TEXT("type"), TypeStr);
+
+		// Phase F #28: per-state fields so round-trip into build_state_tree_from_spec
+		// preserves selection/weight/tag/enabled and the linked-asset reference.
+		Obj->SetStringField(TEXT("state_id"), State->ID.ToString());
+		{
+			FString SelStr = UEnum::GetValueAsString(State->SelectionBehavior);
+			SelStr.RemoveFromStart(TEXT("EStateTreeStateSelectionBehavior::"));
+			Obj->SetStringField(TEXT("selection_behavior"), SelStr);
+		}
+		Obj->SetBoolField(TEXT("enabled"), State->bEnabled);
+		Obj->SetNumberField(TEXT("weight"), State->Weight);
+		if (State->Tag.IsValid())
+		{
+			Obj->SetStringField(TEXT("tag"), State->Tag.ToString());
+		}
+#if WITH_EDITORONLY_DATA
+		if (State->Type == EStateTreeStateType::LinkedAsset)
+		{
+			// Resolve linked-asset path via reflection (field is named "LinkedAsset" in UE 5.7
+			// as TSoftObjectPtr<UStateTree>; reflection avoids header dep).
+			if (FProperty* LinkedProp = State->GetClass()->FindPropertyByName(TEXT("LinkedAsset")))
+			{
+				if (FSoftObjectProperty* SoftProp = CastField<FSoftObjectProperty>(LinkedProp))
+				{
+					const void* Addr = SoftProp->ContainerPtrToValuePtr<void>(State);
+					const FSoftObjectPtr& SoftPtr = SoftProp->GetPropertyValue(Addr);
+					if (!SoftPtr.IsNull())
+					{
+						Obj->SetStringField(TEXT("linked_asset_path"), SoftPtr.ToSoftObjectPath().ToString());
+					}
+				}
+				else if (FObjectProperty* ObjProp = CastField<FObjectProperty>(LinkedProp))
+				{
+					if (UObject* LinkedObj = ObjProp->GetObjectPropertyValue_InContainer(State))
+					{
+						Obj->SetStringField(TEXT("linked_asset_path"), LinkedObj->GetPathName());
+					}
+				}
+			}
+		}
+#endif
 
 		// Tasks
 		TArray<TSharedPtr<FJsonValue>> TaskArr;

@@ -92,6 +92,7 @@ void FMonolithAISmartObjectActions::RegisterActions(FMonolithToolRegistry& Regis
 			.Optional(TEXT("activity_tags"), TEXT("array"), TEXT("Activity gameplay tags"))
 			.Optional(TEXT("user_tags"), TEXT("array"), TEXT("User tag filter tags"))
 			.Optional(TEXT("enabled"), TEXT("boolean"), TEXT("Whether slot is enabled"))
+			.Optional(TEXT("slot_name"), TEXT("string"), TEXT("Editor-only slot display name (FName)"), { TEXT("name") })
 			.Build());
 
 	// 134. add_so_behavior_definition
@@ -204,7 +205,7 @@ USmartObjectDefinition* FMonolithAISmartObjectActions::LoadSODefinition(
 		return nullptr;
 	}
 
-	UObject* Asset = StaticLoadObject(USmartObjectDefinition::StaticClass(), nullptr, *OutAssetPath);
+	UObject* Asset = FMonolithAssetUtils::LoadAssetByPath(USmartObjectDefinition::StaticClass(), OutAssetPath);
 	USmartObjectDefinition* Def = Cast<USmartObjectDefinition>(Asset);
 	if (!Def)
 	{
@@ -215,23 +216,64 @@ USmartObjectDefinition* FMonolithAISmartObjectActions::LoadSODefinition(
 	return Def;
 }
 
+namespace
+{
+	/**
+	 * F.7a — Parse a JSON tag-string array into a FGameplayTagContainer, surfacing dropped (unregistered) tag strings.
+	 *
+	 * Drop-silently was the prior behavior; testers never saw typos. New callers should consume OutSkipped and
+	 * emit a "warnings" array on the response (model: MonolithLogicDriverNodeActions::set_node_tags / Phase B B5).
+	 *
+	 * The header-declared FMonolithAISmartObjectActions::ParseTagContainer one-arg overload is preserved
+	 * (delegates here, discards OutSkipped) so any external caller stays source-compatible.
+	 */
+	void ParseTagContainerWithSkipped(
+		const TSharedPtr<FJsonObject>& Params,
+		const FString& FieldName,
+		FGameplayTagContainer& OutTags,
+		TArray<FString>& OutSkipped)
+	{
+		OutTags.Reset();
+		// OutSkipped is append-only; do NOT Reset() so chained callers can accumulate across multiple fields.
+		TArray<FString> TagStrings = MonolithAI::ParseStringArray(Params, FieldName);
+		for (const FString& TagStr : TagStrings)
+		{
+			FGameplayTag Tag = FGameplayTag::RequestGameplayTag(FName(*TagStr), /*bErrorIfNotFound=*/false);
+			if (Tag.IsValid())
+			{
+				OutTags.AddTag(Tag);
+			}
+			else
+			{
+				UE_LOG(LogMonolithAI, Warning, TEXT("Gameplay tag not found: '%s' (field=%s)"), *TagStr, *FieldName);
+				OutSkipped.Add(TagStr);
+			}
+		}
+	}
+
+	/**
+	 * F.7a — Append warning entries to an in-progress array for one (field_name, skipped-list) pair.
+	 * Caller invokes once per parsed tag-container field, then attaches the array via SetArrayField if non-empty.
+	 */
+	void AppendTagWarnings(
+		TArray<TSharedPtr<FJsonValue>>& InOutWarnings,
+		const TCHAR* FieldName,
+		const TArray<FString>& Skipped)
+	{
+		for (const FString& T : Skipped)
+		{
+			InOutWarnings.Add(MakeShared<FJsonValueString>(FString::Printf(
+				TEXT("%s '%s' is not a registered GameplayTag — dropped"), FieldName, *T)));
+		}
+	}
+}
+
 void FMonolithAISmartObjectActions::ParseTagContainer(
 	const TSharedPtr<FJsonObject>& Params, const FString& FieldName, FGameplayTagContainer& OutTags)
 {
-	OutTags.Reset();
-	TArray<FString> TagStrings = MonolithAI::ParseStringArray(Params, FieldName);
-	for (const FString& TagStr : TagStrings)
-	{
-		FGameplayTag Tag = FGameplayTag::RequestGameplayTag(FName(*TagStr), /*bErrorIfNotFound=*/false);
-		if (Tag.IsValid())
-		{
-			OutTags.AddTag(Tag);
-		}
-		else
-		{
-			UE_LOG(LogMonolithAI, Warning, TEXT("Gameplay tag not found: '%s'"), *TagStr);
-		}
-	}
+	// Backwards-compat one-arg overload — delegates to the skipped-aware free helper and discards OutSkipped.
+	TArray<FString> Discarded;
+	ParseTagContainerWithSkipped(Params, FieldName, OutTags, Discarded);
 }
 
 TSharedPtr<FJsonObject> FMonolithAISmartObjectActions::SlotToJson(
@@ -459,7 +501,7 @@ FMonolithActionResult FMonolithAISmartObjectActions::HandleDeleteSmartObjectDefi
 		return ErrResult;
 	}
 
-	UObject* Asset = StaticLoadObject(USmartObjectDefinition::StaticClass(), nullptr, *AssetPath);
+	UObject* Asset = FMonolithAssetUtils::LoadAssetByPath(USmartObjectDefinition::StaticClass(), AssetPath);
 	if (!Asset)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
@@ -516,17 +558,17 @@ FMonolithActionResult FMonolithAISmartObjectActions::HandleAddSOSlot(const TShar
 		NewSlot.Rotation.Roll = static_cast<float>((*RotObj)->GetNumberField(TEXT("roll")));
 	}
 
-	// Activity tags
+	// Activity tags + user tags — F.7a: surface dropped tags as warnings on the response
+	TArray<FString> SkippedActivity, SkippedUser;
 	if (Params->HasField(TEXT("activity_tags")))
 	{
-		ParseTagContainer(Params, TEXT("activity_tags"), NewSlot.ActivityTags);
+		ParseTagContainerWithSkipped(Params, TEXT("activity_tags"), NewSlot.ActivityTags, SkippedActivity);
 	}
 
-	// User tags — stored as activity tag query
 	if (Params->HasField(TEXT("user_tags")))
 	{
 		FGameplayTagContainer UserTags;
-		ParseTagContainer(Params, TEXT("user_tags"), UserTags);
+		ParseTagContainerWithSkipped(Params, TEXT("user_tags"), UserTags, SkippedUser);
 		if (!UserTags.IsEmpty())
 		{
 			NewSlot.UserTagFilter = FGameplayTagQuery::MakeQuery_MatchAllTags(UserTags);
@@ -549,6 +591,15 @@ FMonolithActionResult FMonolithAISmartObjectActions::HandleAddSOSlot(const TShar
 	TSharedPtr<FJsonObject> Result = MonolithAI::MakeAssetResult(AssetPath, TEXT("Slot added"));
 	Result->SetNumberField(TEXT("slot_index"), SlotIndex);
 	Result->SetNumberField(TEXT("total_slots"), Def->GetSlots().Num());
+
+	TArray<TSharedPtr<FJsonValue>> Warnings;
+	AppendTagWarnings(Warnings, TEXT("activity_tag"), SkippedActivity);
+	AppendTagWarnings(Warnings, TEXT("user_tag"), SkippedUser);
+	if (Warnings.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("warnings"), Warnings);
+	}
+
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -644,17 +695,17 @@ FMonolithActionResult FMonolithAISmartObjectActions::HandleConfigureSOSlot(const
 		Slot.Rotation.Roll = static_cast<float>((*RotObj)->GetNumberField(TEXT("roll")));
 	}
 
-	// Activity tags
+	// Activity tags + user tags — F.7a: surface dropped tags as warnings on the response
+	TArray<FString> SkippedActivity, SkippedUser;
 	if (Params->HasField(TEXT("activity_tags")))
 	{
-		ParseTagContainer(Params, TEXT("activity_tags"), Slot.ActivityTags);
+		ParseTagContainerWithSkipped(Params, TEXT("activity_tags"), Slot.ActivityTags, SkippedActivity);
 	}
 
-	// User tags
 	if (Params->HasField(TEXT("user_tags")))
 	{
 		FGameplayTagContainer UserTags;
-		ParseTagContainer(Params, TEXT("user_tags"), UserTags);
+		ParseTagContainerWithSkipped(Params, TEXT("user_tags"), UserTags, SkippedUser);
 		if (!UserTags.IsEmpty())
 		{
 			Slot.UserTagFilter = FGameplayTagQuery::MakeQuery_MatchAllTags(UserTags);
@@ -671,11 +722,60 @@ FMonolithActionResult FMonolithAISmartObjectActions::HandleConfigureSOSlot(const
 		Slot.bEnabled = Params->GetBoolField(TEXT("enabled"));
 	}
 
+	// Slot name (editor-only data — FSmartObjectSlotDefinition::Name is gated on WITH_EDITORONLY_DATA).
+	bool bRequestedSlotName = false;
+	FString RequestedSlotName;
+	bool bSlotNameAppliedAtRuntime = false;
+	if (Params->HasField(TEXT("slot_name")))
+	{
+		RequestedSlotName = Params->GetStringField(TEXT("slot_name"));
+		bRequestedSlotName = true;
+#if WITH_EDITORONLY_DATA
+		Slot.Name = FName(*RequestedSlotName);
+		bSlotNameAppliedAtRuntime = true;
+#endif
+	}
+
 	Def->MarkPackageDirty();
 
 	TSharedPtr<FJsonObject> Result = MonolithAI::MakeAssetResult(AssetPath, TEXT("Slot configured"));
 	Result->SetNumberField(TEXT("slot_index"), SlotIndex);
 	Result->SetObjectField(TEXT("slot"), SlotToJson(Slot, SlotIndex));
+
+	// Build a single warnings array combining slot_name + dropped-tag warnings (F.7a).
+	TArray<TSharedPtr<FJsonValue>> Warnings;
+
+	// verified_value smoking gun
+	if (bRequestedSlotName)
+	{
+		TSharedPtr<FJsonObject> Verified = MakeShared<FJsonObject>();
+		TSharedPtr<FJsonObject> NameEntry = MakeShared<FJsonObject>();
+		NameEntry->SetStringField(TEXT("requested"), RequestedSlotName);
+#if WITH_EDITORONLY_DATA
+		const FString ActualName = Slot.Name.ToString();
+		NameEntry->SetStringField(TEXT("actual"), ActualName);
+		NameEntry->SetBoolField(TEXT("match"), ActualName == RequestedSlotName);
+#else
+		NameEntry->SetStringField(TEXT("actual"), TEXT(""));
+		NameEntry->SetBoolField(TEXT("match"), false);
+#endif
+		Verified->SetObjectField(TEXT("slot_name"), NameEntry);
+		Result->SetObjectField(TEXT("verified_value"), Verified);
+
+		if (!bSlotNameAppliedAtRuntime)
+		{
+			Warnings.Add(MakeShared<FJsonValueString>(
+				TEXT("slot_name was ignored: FSmartObjectSlotDefinition::Name is editor-only (WITH_EDITORONLY_DATA).")));
+		}
+	}
+
+	AppendTagWarnings(Warnings, TEXT("activity_tag"), SkippedActivity);
+	AppendTagWarnings(Warnings, TEXT("user_tag"), SkippedUser);
+	if (Warnings.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("warnings"), Warnings);
+	}
+
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -810,17 +910,19 @@ FMonolithActionResult FMonolithAISmartObjectActions::HandleSetSOTags(const TShar
 	FScopedTransaction Transaction(FText::FromString(TEXT("Monolith: Set SO Tags")));
 	Def->Modify();
 
+	// F.7a: surface dropped tags as warnings on the response
+	TArray<FString> SkippedActivity, SkippedUser;
 	if (Params->HasField(TEXT("activity_tags")))
 	{
 		FGameplayTagContainer Tags;
-		ParseTagContainer(Params, TEXT("activity_tags"), Tags);
+		ParseTagContainerWithSkipped(Params, TEXT("activity_tags"), Tags, SkippedActivity);
 		Def->SetActivityTags(Tags);
 	}
 
 	if (Params->HasField(TEXT("user_tags")))
 	{
 		FGameplayTagContainer UserTags;
-		ParseTagContainer(Params, TEXT("user_tags"), UserTags);
+		ParseTagContainerWithSkipped(Params, TEXT("user_tags"), UserTags, SkippedUser);
 		if (!UserTags.IsEmpty())
 		{
 			Def->SetUserTagFilter(FGameplayTagQuery::MakeQuery_MatchAllTags(UserTags));
@@ -850,6 +952,14 @@ FMonolithActionResult FMonolithAISmartObjectActions::HandleSetSOTags(const TShar
 	if (!UserFilterDesc.IsEmpty())
 	{
 		Result->SetStringField(TEXT("user_tag_filter"), UserFilterDesc);
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Warnings;
+	AppendTagWarnings(Warnings, TEXT("activity_tag"), SkippedActivity);
+	AppendTagWarnings(Warnings, TEXT("user_tag"), SkippedUser);
+	if (Warnings.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("warnings"), Warnings);
 	}
 
 	return FMonolithActionResult::Success(Result);
@@ -895,7 +1005,7 @@ FMonolithActionResult FMonolithAISmartObjectActions::HandleAddSmartObjectCompone
 
 	// Load the SO definition
 	USmartObjectDefinition* SODef = Cast<USmartObjectDefinition>(
-		StaticLoadObject(USmartObjectDefinition::StaticClass(), nullptr, *DefinitionPath));
+		FMonolithAssetUtils::LoadAssetByPath(USmartObjectDefinition::StaticClass(), DefinitionPath));
 	if (!SODef)
 	{
 		return FMonolithActionResult::Error(FString::Printf(
@@ -959,7 +1069,7 @@ FMonolithActionResult FMonolithAISmartObjectActions::HandlePlaceSmartObjectActor
 
 	// Load the definition
 	USmartObjectDefinition* SODef = Cast<USmartObjectDefinition>(
-		StaticLoadObject(USmartObjectDefinition::StaticClass(), nullptr, *DefinitionPath));
+		FMonolithAssetUtils::LoadAssetByPath(USmartObjectDefinition::StaticClass(), DefinitionPath));
 	if (!SODef)
 	{
 		return FMonolithActionResult::Error(FString::Printf(
@@ -1068,9 +1178,10 @@ FMonolithActionResult FMonolithAISmartObjectActions::HandleFindSmartObjectsInLev
 	FString DefinitionFilter = Params->GetStringField(TEXT("definition_filter"));
 
 	FGameplayTagContainer TagFilter;
+	TArray<FString> SkippedTagFilter;
 	if (Params->HasField(TEXT("tag_filter")))
 	{
-		ParseTagContainer(Params, TEXT("tag_filter"), TagFilter);
+		ParseTagContainerWithSkipped(Params, TEXT("tag_filter"), TagFilter, SkippedTagFilter);
 	}
 
 	TArray<TSharedPtr<FJsonValue>> Items;
@@ -1142,6 +1253,14 @@ FMonolithActionResult FMonolithAISmartObjectActions::HandleFindSmartObjectsInLev
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetArrayField(TEXT("smart_objects"), Items);
 	Result->SetNumberField(TEXT("count"), Items.Num());
+
+	TArray<TSharedPtr<FJsonValue>> Warnings;
+	AppendTagWarnings(Warnings, TEXT("tag_filter"), SkippedTagFilter);
+	if (Warnings.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("warnings"), Warnings);
+	}
+
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -1395,7 +1514,7 @@ FMonolithActionResult FMonolithAISmartObjectActions::HandleDuplicateSmartObjectD
 	}
 
 	USmartObjectDefinition* SourceDef = Cast<USmartObjectDefinition>(
-		StaticLoadObject(USmartObjectDefinition::StaticClass(), nullptr, *SourcePath));
+		FMonolithAssetUtils::LoadAssetByPath(USmartObjectDefinition::StaticClass(), SourcePath));
 	if (!SourceDef)
 	{
 		return FMonolithActionResult::Error(FString::Printf(

@@ -7,6 +7,7 @@
 #include "MonolithAIEQSActions.h"
 #include "MonolithAIControllerActions.h"
 #include "MonolithAIPerceptionActions.h"
+#include "MonolithAIPerceptionScaffoldActions.h"  // F8: add_perception_to_actor
 #include "MonolithAISmartObjectActions.h"
 #include "MonolithAINavigationActions.h"
 #include "MonolithAIRuntimeActions.h"
@@ -36,6 +37,7 @@ void FMonolithAIModule::StartupModule()
 	FMonolithAIEQSActions::RegisterActions(Registry);
 	FMonolithAIControllerActions::RegisterActions(Registry);
 	FMonolithAIPerceptionActions::RegisterActions(Registry);
+	FMonolithAIPerceptionScaffoldActions::RegisterActions(Registry);  // F8: add_perception_to_actor
 	FMonolithAISmartObjectActions::RegisterActions(Registry);
 	FMonolithAINavigationActions::RegisterActions(Registry);
 	FMonolithAIRuntimeActions::RegisterActions(Registry);

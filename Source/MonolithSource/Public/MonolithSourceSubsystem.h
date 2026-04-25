@@ -6,6 +6,8 @@
 #include "MonolithSourceSubsystem.generated.h"
 
 class FMonolithSourceIndexer;
+// UE 5.7: declared without underlying type at UObject/UObjectGlobals.h:3216 — match exactly.
+enum class EReloadCompleteReason;
 
 /**
  * Editor subsystem that owns the engine source DB and triggers C++ source indexing.
@@ -39,7 +41,23 @@ private:
 	FString GetProjectPath() const;
 	void ReopenDatabase(const FString& DbPath);
 
+	/**
+	 * F17 (2026-04-26): Auto-reindex hook. Fires when Live Coding / hot-reload completes.
+	 * Kicks an incremental project-only reindex so newly-shipped C++ symbols become
+	 * queryable via source_query without requiring a manual `source.trigger_project_reindex` call.
+	 *
+	 * Cooldown-guarded (LastReindexTimeSeconds + 5s) and idempotency-guarded
+	 * (bIsIndexing) to prevent storming when UBT fires multiple reload signals back-to-back.
+	 */
+	void OnReloadComplete(EReloadCompleteReason Reason);
+
 	TUniquePtr<FMonolithSourceDatabase> Database;
 	FMonolithSourceIndexer* Indexer = nullptr;
 	TAtomic<bool> bIsIndexing{false};
+
+	/** F17: Handle into FCoreUObjectDelegates::ReloadCompleteDelegate; cleared on Deinitialize. */
+	FDelegateHandle ReloadCompleteHandle;
+
+	/** F17: FPlatformTime::Seconds() at last successful auto-kick — used for the 5s cooldown. */
+	double LastReindexTimeSeconds = 0.0;
 };

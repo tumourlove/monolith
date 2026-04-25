@@ -9,6 +9,8 @@
 #include "Sound/SoundMix.h"
 #include "Sound/SoundConcurrency.h"
 #include "Sound/SoundSubmix.h"
+#include "Sound/SoundWave.h"  // F18: USoundWave for create_test_wave
+#include "Memory/SharedBuffer.h"  // F18: FSharedBuffer for FEditorAudioBulkData::UpdatePayload (UE 5.4+)
 
 // Factories (AudioEditor module)
 #include "Factories/SoundAttenuationFactory.h"
@@ -567,6 +569,18 @@ void FMonolithAudioAssetActions::RegisterActions(FMonolithToolRegistry& Registry
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path of the USoundSubmix"))
 			.Required(TEXT("properties"), TEXT("object"), TEXT("USoundSubmix properties to update"))
+			.Build());
+
+	// --- Test fixtures (F18) ---
+	Registry.RegisterAction(TEXT("audio"), TEXT("create_test_wave"),
+		TEXT("Procedurally synthesize a 16-bit mono sine-tone USoundWave (no asset deps). Useful for tests requiring a disposable wave."),
+		FMonolithActionHandler::CreateStatic(&FMonolithAudioAssetActions::CreateTestWave),
+		FParamSchemaBuilder()
+			.Required(TEXT("path"), TEXT("string"), TEXT("Destination asset path under /Game/ (e.g. /Game/Tests/Monolith/Audio/SW_Test_Sine_440)"))
+			.Optional(TEXT("frequency_hz"), TEXT("number"), TEXT("Sine frequency in Hz (20.0 to 20000.0, default 440.0)"))
+			.Optional(TEXT("duration_seconds"), TEXT("number"), TEXT("Clip length in seconds (0.05 to 5.0, default 0.5)"))
+			.Optional(TEXT("sample_rate"), TEXT("integer"), TEXT("Sample rate in Hz; allowlist {22050, 44100, 48000} (default 44100)"))
+			.Optional(TEXT("amplitude"), TEXT("number"), TEXT("Peak amplitude in (0.0, 1.0] (default 0.5)"))
 			.Build());
 }
 
@@ -1323,11 +1337,44 @@ FMonolithActionResult FMonolithAudioAssetActions::SetSubmixProperties(const TSha
 		}
 	}
 
-	// Output volume (modulation destination — set the Value field)
-	double DVal;
-	if ((*PropsJson)->TryGetNumberField(TEXT("output_volume"), DVal))
+	// Output volume (modulation destination — set the Value field).
+	// Accept BOTH `output_volume_db` (canonical) and `output_volume` (legacy synonym).
+	// K2 alias rewriter is top-level only and does NOT recurse into the nested
+	// `properties` object, so we accept both inline here.
+	bool bRequestedOutputVolume = false;
+	double RequestedOutputVolume = 0.0;
+	bool bUsedLegacyKey = false;
+	bool bCollision = false;
+
 	{
-		Asset->OutputVolumeModulation.Value = static_cast<float>(DVal);
+		const bool bHasCanonical = (*PropsJson)->HasField(TEXT("output_volume_db"));
+		const bool bHasLegacy = (*PropsJson)->HasField(TEXT("output_volume"));
+		if (bHasCanonical && bHasLegacy)
+		{
+			bCollision = true;
+		}
+		else if (bHasCanonical)
+		{
+			RequestedOutputVolume = (*PropsJson)->GetNumberField(TEXT("output_volume_db"));
+			bRequestedOutputVolume = true;
+		}
+		else if (bHasLegacy)
+		{
+			RequestedOutputVolume = (*PropsJson)->GetNumberField(TEXT("output_volume"));
+			bRequestedOutputVolume = true;
+			bUsedLegacyKey = true;
+		}
+	}
+
+	if (bCollision)
+	{
+		return FMonolithActionResult::Error(
+			TEXT("Param collision in properties: both 'output_volume_db' (canonical) and 'output_volume' (legacy) supplied. Use only one."));
+	}
+
+	if (bRequestedOutputVolume)
+	{
+		Asset->OutputVolumeModulation.Value = static_cast<float>(RequestedOutputVolume);
 	}
 
 	Asset->PostEditChange();
@@ -1354,7 +1401,283 @@ FMonolithActionResult FMonolithAudioAssetActions::SetSubmixProperties(const TSha
 		}
 	}
 	Result->SetArrayField(TEXT("child_submixes"), ChildrenArr);
-	Result->SetNumberField(TEXT("output_volume_db"), Asset->OutputVolumeModulation.Value);
 
+	const float ActualOutputVolume = Asset->OutputVolumeModulation.Value;
+	Result->SetNumberField(TEXT("output_volume_db"), ActualOutputVolume);
+
+	// verified_value smoking gun — readback after write so callers can confirm.
+	if (bRequestedOutputVolume)
+	{
+		TSharedPtr<FJsonObject> Verified = MakeShared<FJsonObject>();
+		TSharedPtr<FJsonObject> OutputEntry = MakeShared<FJsonObject>();
+		OutputEntry->SetNumberField(TEXT("requested"), RequestedOutputVolume);
+		OutputEntry->SetNumberField(TEXT("actual"), ActualOutputVolume);
+		OutputEntry->SetBoolField(TEXT("match"), FMath::IsNearlyEqual(static_cast<float>(RequestedOutputVolume), ActualOutputVolume));
+		Verified->SetObjectField(TEXT("output_volume_db"), OutputEntry);
+		Result->SetObjectField(TEXT("verified_value"), Verified);
+	}
+
+	if (bUsedLegacyKey)
+	{
+		TArray<TSharedPtr<FJsonValue>> WarnArr;
+		WarnArr.Add(MakeShared<FJsonValueString>(
+			TEXT("Deprecated: use 'output_volume_db' instead of 'output_volume' in the properties object.")));
+		Result->SetArrayField(TEXT("warnings"), WarnArr);
+	}
+
+	return FMonolithActionResult::Success(Result);
+}
+
+// ============================================================================
+// Test fixtures (F18) — create_test_wave
+// ============================================================================
+//
+// Procedurally synthesizes a mono 16-bit PCM sine-tone USoundWave. Zero on-disk
+// audio dependencies — entirely deterministic, reproducible across runs. Used
+// by J3 TC3.19 (USoundWave direct binding) and any future test that needs a
+// disposable wave fixture.
+//
+// Recipe (per Docs/Research/2026-04-26-j-misc-drift-findings.md §B.3):
+//   1. Validate path under /Game/ and all numeric params.
+//   2. Generate int16 PCM samples with linear fade-in/out (avoid click artifact).
+//   3. Build full RIFF/WAVE blob in memory (44-byte header + PCM payload).
+//   4. NewObject<USoundWave> in destination package.
+//   5. Set NumChannels / SetSampleRate / Duration / TotalSamples (UE 5.7 public API).
+//   6. RawData.Lock(LOCK_READ_WRITE) -> Realloc -> Memcpy -> Unlock (canonical
+//      FByteBulkData write pattern matching engine SoundFactory::FactoryCreateBinary).
+//   7. InvalidateCompressedData(true) so the cooker re-cooks if needed.
+//   8. SavePackage + AssetRegistry::AssetCreated.
+
+namespace
+{
+	/** Append a little-endian 32-bit value to a byte buffer. */
+	FORCEINLINE void AppendLE32(TArray<uint8>& Buf, uint32 Value)
+	{
+		Buf.Add(static_cast<uint8>(Value & 0xFF));
+		Buf.Add(static_cast<uint8>((Value >> 8) & 0xFF));
+		Buf.Add(static_cast<uint8>((Value >> 16) & 0xFF));
+		Buf.Add(static_cast<uint8>((Value >> 24) & 0xFF));
+	}
+
+	/** Append a little-endian 16-bit value to a byte buffer. */
+	FORCEINLINE void AppendLE16(TArray<uint8>& Buf, uint16 Value)
+	{
+		Buf.Add(static_cast<uint8>(Value & 0xFF));
+		Buf.Add(static_cast<uint8>((Value >> 8) & 0xFF));
+	}
+
+	/** Append a 4-char ASCII tag (no null terminator) to a byte buffer. */
+	FORCEINLINE void AppendTag(TArray<uint8>& Buf, const char (&Tag)[5])
+	{
+		Buf.Add(static_cast<uint8>(Tag[0]));
+		Buf.Add(static_cast<uint8>(Tag[1]));
+		Buf.Add(static_cast<uint8>(Tag[2]));
+		Buf.Add(static_cast<uint8>(Tag[3]));
+	}
+}
+
+FMonolithActionResult FMonolithAudioAssetActions::CreateTestWave(const TSharedPtr<FJsonObject>& Params)
+{
+	// ---- 1. Validate path ---------------------------------------------------
+	const FString AssetPath = Params->GetStringField(TEXT("path"));
+	if (AssetPath.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("path is required"));
+	}
+	if (!AssetPath.StartsWith(TEXT("/Game/")))
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("path must be under /Game/ (got '%s')"), *AssetPath));
+	}
+
+	FString PackagePath, AssetName;
+	if (!SplitAssetPath(AssetPath, PackagePath, AssetName))
+	{
+		return FMonolithActionResult::Error(TEXT("Invalid asset path — must contain at least one '/' (e.g. /Game/Tests/Monolith/Audio/SW_Test_Sine_440)"));
+	}
+
+	// ---- 2. Validate numeric params ----------------------------------------
+	double FrequencyHz = 440.0;
+	double DurationSeconds = 0.5;
+	int32 SampleRate = 44100;
+	double Amplitude = 0.5;
+
+	double TmpD = 0.0;
+	if (Params->TryGetNumberField(TEXT("frequency_hz"), TmpD)) FrequencyHz = TmpD;
+	if (Params->TryGetNumberField(TEXT("duration_seconds"), TmpD)) DurationSeconds = TmpD;
+	if (Params->TryGetNumberField(TEXT("amplitude"), TmpD)) Amplitude = TmpD;
+	if (Params->TryGetNumberField(TEXT("sample_rate"), TmpD)) SampleRate = static_cast<int32>(TmpD);
+
+	if (FrequencyHz < 20.0 || FrequencyHz > 20000.0)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("frequency_hz must be in [20.0, 20000.0] (got %.4f)"), FrequencyHz));
+	}
+	if (DurationSeconds < 0.05 || DurationSeconds > 5.0)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("duration_seconds must be in [0.05, 5.0] (got %.4f)"), DurationSeconds));
+	}
+	if (Amplitude <= 0.0 || Amplitude > 1.0)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("amplitude must be in (0.0, 1.0] (got %.4f)"), Amplitude));
+	}
+	if (SampleRate != 22050 && SampleRate != 44100 && SampleRate != 48000)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("sample_rate must be one of {22050, 44100, 48000} (got %d)"), SampleRate));
+	}
+
+	// ---- 3. Pre-existing-asset guard ---------------------------------------
+	UObject* Existing = StaticLoadObject(UObject::StaticClass(), nullptr, *AssetPath);
+	if (Existing)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Asset already exists at '%s' (delete first if regenerating)"), *AssetPath));
+	}
+
+	// ---- 4. Generate PCM16 sample buffer -----------------------------------
+	const int32 NumChannelsMono = 1;
+	const int32 BitsPerSample = 16;
+	const int32 BytesPerSample = BitsPerSample / 8;
+
+	const int64 TotalSampleCount = static_cast<int64>(FMath::FloorToInt(DurationSeconds * static_cast<double>(SampleRate)));
+	if (TotalSampleCount <= 0)
+	{
+		return FMonolithActionResult::Error(TEXT("Computed sample count is non-positive — sample_rate × duration_seconds collapsed to zero"));
+	}
+
+	const float ActualDurationSeconds = static_cast<float>(TotalSampleCount) / static_cast<float>(SampleRate);
+
+	TArray<int16> Pcm;
+	Pcm.SetNumUninitialized(static_cast<int32>(TotalSampleCount));
+
+	const double TwoPiF = 2.0 * PI * FrequencyHz;
+	const double InvSampleRate = 1.0 / static_cast<double>(SampleRate);
+	const double Scale = Amplitude * 32767.0;
+
+	const int64 FadeSamples = FMath::Min<int64>(256, TotalSampleCount / 2);
+	const int64 FadeOutStart = TotalSampleCount - FadeSamples;
+
+	for (int64 i = 0; i < TotalSampleCount; ++i)
+	{
+		const double t = static_cast<double>(i) * InvSampleRate;
+		double Sample = Scale * FMath::Sin(TwoPiF * t);
+
+		// Linear fade-in / fade-out (256 samples each end) to avoid click.
+		if (FadeSamples > 0)
+		{
+			if (i < FadeSamples)
+			{
+				Sample *= static_cast<double>(i) / static_cast<double>(FadeSamples);
+			}
+			else if (i >= FadeOutStart)
+			{
+				const double Fade = static_cast<double>(TotalSampleCount - 1 - i) / static_cast<double>(FadeSamples);
+				Sample *= FMath::Max(0.0, Fade);
+			}
+		}
+
+		// Clamp into int16 range with rounding.
+		const double Rounded = FMath::Clamp(Sample, -32768.0, 32767.0);
+		Pcm[static_cast<int32>(i)] = static_cast<int16>(FMath::RoundToInt(Rounded));
+	}
+
+	// ---- 5. Build full RIFF/WAVE byte blob ---------------------------------
+	// Standard 44-byte canonical header + PCM data. Layout:
+	//   "RIFF" <chunk_size:le32> "WAVE"
+	//   "fmt " <subchunk_size:le32=16> <fmt:le16=1=PCM> <channels:le16>
+	//   <sample_rate:le32> <byte_rate:le32> <block_align:le16> <bits_per_sample:le16>
+	//   "data" <pcm_size:le32> <pcm bytes...>
+
+	const uint32 PcmByteCount = static_cast<uint32>(TotalSampleCount * BytesPerSample);
+	const uint32 ByteRate = static_cast<uint32>(SampleRate * NumChannelsMono * BytesPerSample);
+	const uint16 BlockAlign = static_cast<uint16>(NumChannelsMono * BytesPerSample);
+	const uint32 ChunkSize = 36 + PcmByteCount; // 4 ("WAVE") + 24 (fmt subchunk total) + 8 (data hdr) + payload
+
+	TArray<uint8> WavBlob;
+	WavBlob.Reserve(44 + PcmByteCount);
+
+	AppendTag(WavBlob, "RIFF");
+	AppendLE32(WavBlob, ChunkSize);
+	AppendTag(WavBlob, "WAVE");
+
+	AppendTag(WavBlob, "fmt ");
+	AppendLE32(WavBlob, 16);                               // PCM subchunk size
+	AppendLE16(WavBlob, 1);                                // AudioFormat = 1 (linear PCM)
+	AppendLE16(WavBlob, static_cast<uint16>(NumChannelsMono));
+	AppendLE32(WavBlob, static_cast<uint32>(SampleRate));
+	AppendLE32(WavBlob, ByteRate);
+	AppendLE16(WavBlob, BlockAlign);
+	AppendLE16(WavBlob, static_cast<uint16>(BitsPerSample));
+
+	AppendTag(WavBlob, "data");
+	AppendLE32(WavBlob, PcmByteCount);
+
+	const int32 PayloadStart = WavBlob.Num();
+	WavBlob.AddUninitialized(static_cast<int32>(PcmByteCount));
+	FMemory::Memcpy(WavBlob.GetData() + PayloadStart, Pcm.GetData(), PcmByteCount);
+
+	// ---- 6. Create package + USoundWave ------------------------------------
+	UPackage* Pkg = CreatePackage(*AssetPath);
+	if (!Pkg)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Failed to create package at '%s'"), *AssetPath));
+	}
+
+	USoundWave* Wave = NewObject<USoundWave>(Pkg, FName(*AssetName), RF_Public | RF_Standalone);
+	if (!Wave)
+	{
+		return FMonolithActionResult::Error(TEXT("NewObject<USoundWave> returned null"));
+	}
+
+	// ---- 7. Set USoundWave properties (UE 5.7 public API) ------------------
+	Wave->NumChannels = NumChannelsMono;
+#if WITH_EDITOR
+	Wave->SetSampleRate(static_cast<uint32>(SampleRate));
+#else
+	// Headless / non-editor — fall back to direct field set (test fixtures should not run in shipping anyway).
+	Wave->SampleRate = SampleRate;
+#endif
+	Wave->Duration = ActualDurationSeconds;
+	Wave->TotalSamples = static_cast<int32>(TotalSampleCount);
+	Wave->SoundGroup = SOUNDGROUP_Default;
+
+	// ---- 8. Write WAV blob into RawData (FEditorAudioBulkData, UE 5.7) ------
+	// UE 5.4+ replaced the legacy FByteBulkData Lock/Realloc/Unlock idiom with
+	// FEditorAudioBulkData::UpdatePayload(FSharedBuffer, UObject* Owner).
+	// FSharedBuffer::Clone copies the bytes — caller-owned WavBlob can drop afterwards.
+#if WITH_EDITOR
+	FSharedBuffer WaveBuffer = FSharedBuffer::Clone(WavBlob.GetData(), WavBlob.Num());
+	Wave->RawData.UpdatePayload(WaveBuffer, Wave);
+
+	// Force the cooker to re-cook from the new RawData.
+	Wave->InvalidateCompressedData(true, false);
+#endif
+
+	// ---- 9. Asset Registry + save -----------------------------------------
+	FAssetRegistryModule::AssetCreated(Wave);
+	Pkg->MarkPackageDirty();
+
+	const FString PackageFilename = FPackageName::LongPackageNameToFilename(AssetPath, FPackageName::GetAssetPackageExtension());
+	FSavePackageArgs SaveArgs;
+	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+	const bool bSaved = UPackage::SavePackage(Pkg, Wave, *PackageFilename, SaveArgs);
+	if (!bSaved)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Failed to save package to '%s'"), *PackageFilename));
+	}
+
+	// ---- 10. Result --------------------------------------------------------
+	auto Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("asset_path"), Wave->GetPathName());
+	Result->SetNumberField(TEXT("samples_written"), static_cast<double>(TotalSampleCount));
+	Result->SetNumberField(TEXT("duration_actual_seconds"), ActualDurationSeconds);
+	Result->SetNumberField(TEXT("frequency_hz"), FrequencyHz);
+	Result->SetNumberField(TEXT("sample_rate"), SampleRate);
+	Result->SetNumberField(TEXT("amplitude"), Amplitude);
 	return FMonolithActionResult::Success(Result);
 }

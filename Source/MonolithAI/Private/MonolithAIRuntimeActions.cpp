@@ -1,5 +1,6 @@
 #include "MonolithAIRuntimeActions.h"
 #include "MonolithParamSchema.h"
+#include "MonolithAssetUtils.h"
 
 #include "AIController.h"
 #include "BehaviorTree/BehaviorTree.h"
@@ -670,7 +671,7 @@ FMonolithActionResult FMonolithAIRuntimeActions::HandleRuntimeStartBT(const TSha
 	FString BTPath = Params->GetStringField(TEXT("bt_path"));
 	if (!BTPath.IsEmpty())
 	{
-		BT = Cast<UBehaviorTree>(StaticLoadObject(UBehaviorTree::StaticClass(), nullptr, *BTPath));
+		BT = Cast<UBehaviorTree>(MonolithAI::ResolveAsset(UBehaviorTree::StaticClass(), BTPath));
 		if (!BT)
 		{
 			return FMonolithActionResult::Error(FString::Printf(TEXT("BehaviorTree not found: %s"), *BTPath));
@@ -1358,7 +1359,7 @@ FMonolithActionResult FMonolithAIRuntimeActions::HandleRuntimeRunEQSQuery(const 
 		return FMonolithActionResult::Error(TEXT("Missing required param 'query_path'"));
 	}
 
-	UEnvQuery* QueryTemplate = Cast<UEnvQuery>(StaticLoadObject(UEnvQuery::StaticClass(), nullptr, *QueryPath));
+	UEnvQuery* QueryTemplate = Cast<UEnvQuery>(FMonolithAssetUtils::LoadAssetByPath(UEnvQuery::StaticClass(), QueryPath));
 	if (!QueryTemplate)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("EQS query not found: %s"), *QueryPath));

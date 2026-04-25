@@ -283,11 +283,18 @@ void FMonolithAINavigationActions::RegisterActions(FMonolithToolRegistry& Regist
 
 	// 165. set_crowd_manager_config
 	Registry.RegisterAction(TEXT("ai"), TEXT("set_crowd_manager_config"),
-		TEXT("Modify UCrowdManager settings: max agents, max avoidance agents"),
+		TEXT("Modify UCrowdManager settings: max agents, max agent radius, avoidance counts, intervals, separation, collision resolution"),
 		FMonolithActionHandler::CreateStatic(&HandleSetCrowdManagerConfig),
 		FParamSchemaBuilder()
 			.Optional(TEXT("max_agents"), TEXT("number"), TEXT("Maximum number of crowd agents"))
-			.Optional(TEXT("max_avoidance_agents"), TEXT("number"), TEXT("Max agents doing avoidance"))
+			.Optional(TEXT("max_avoidance_agents"), TEXT("number"), TEXT("Max agents doing avoidance"), { TEXT("max_avoided_agents") })
+			.Optional(TEXT("max_agent_radius"), TEXT("number"), TEXT("Max radius (cm) of an agent that can be added to the crowd"), { TEXT("MaxAgentRadius") })
+			.Optional(TEXT("max_avoided_walls"), TEXT("number"), TEXT("Max number of wall segments considered for velocity avoidance"), { TEXT("max_avoidance_walls"), TEXT("MaxAvoidedWalls") })
+			.Optional(TEXT("navmesh_check_interval"), TEXT("number"), TEXT("Seconds between agents re-projecting onto the navmesh"), { TEXT("NavmeshCheckInterval") })
+			.Optional(TEXT("path_optimization_interval"), TEXT("number"), TEXT("Seconds between path-optimization passes"), { TEXT("PathOptimizationInterval") })
+			.Optional(TEXT("separation_dir_clamp"), TEXT("number"), TEXT("Dot threshold (-1..1) for clamping rear-neighbor separation force, -1 = disabled"), { TEXT("SeparationDirClamp") })
+			.Optional(TEXT("path_offset_radius_multiplier"), TEXT("number"), TEXT("Agent-radius multiplier used to offset paths around corners"), { TEXT("PathOffsetRadiusMultiplier") })
+			.Optional(TEXT("resolve_collisions"), TEXT("boolean"), TEXT("Whether the crowd simulation resolves agent-vs-agent collisions"), { TEXT("bResolveCollisions") })
 			.Build());
 
 	// 166. analyze_navigation_coverage
@@ -1074,7 +1081,19 @@ FMonolithActionResult FMonolithAINavigationActions::HandleConfigureNavLink(const
 	if (Params->HasField(TEXT("enabled")))
 	{
 		bool bEnabled = Params->GetBoolField(TEXT("enabled"));
+
+		// Phase F #36: SetSmartLinkEnabled toggles the runtime activity flag on
+		// INavLinkCustomInterface, but the link only registers as a smart link with
+		// the navmesh when bSmartLinkIsRelevant=true. Toggle BOTH so 'enabled' is
+		// a real on/off (not just a runtime no-op when bSmartLinkIsRelevant=false).
 		LinkActor->SetSmartLinkEnabled(bEnabled);
+
+		if (FBoolProperty* RelevantProp = CastField<FBoolProperty>(
+				LinkActor->GetClass()->FindPropertyByName(TEXT("bSmartLinkIsRelevant"))))
+		{
+			RelevantProp->SetPropertyValue_InContainer(LinkActor, bEnabled);
+		}
+
 		ChangedCount++;
 	}
 
@@ -1615,10 +1634,35 @@ FMonolithActionResult FMonolithAINavigationActions::HandleGetCrowdManagerConfig(
 			Result->SetNumberField(PropName, Prop->GetPropertyValue_InContainer(CrowdMgr));
 		}
 	};
+	// Mirrors HandleGetNavSystemConfig pattern (FFloatProperty with FDoubleProperty fallback)
+	auto ReadFloat = [&](const TCHAR* PropName)
+	{
+		if (FFloatProperty* Prop = CastField<FFloatProperty>(CrowdClass->FindPropertyByName(PropName)))
+		{
+			Result->SetNumberField(PropName, Prop->GetPropertyValue_InContainer(CrowdMgr));
+		}
+		else if (FDoubleProperty* DProp = CastField<FDoubleProperty>(CrowdClass->FindPropertyByName(PropName)))
+		{
+			Result->SetNumberField(PropName, DProp->GetPropertyValue_InContainer(CrowdMgr));
+		}
+	};
+	auto ReadBool = [&](const TCHAR* PropName)
+	{
+		if (FBoolProperty* Prop = CastField<FBoolProperty>(CrowdClass->FindPropertyByName(PropName)))
+		{
+			Result->SetBoolField(PropName, Prop->GetPropertyValue_InContainer(CrowdMgr));
+		}
+	};
 
 	ReadInt(TEXT("MaxAgents"));
-	ReadInt(TEXT("MaxAgentRadius"));
+	ReadFloat(TEXT("MaxAgentRadius"));        // bug fix: was ReadInt — silently dropped (UE 5.7 declares as float)
 	ReadInt(TEXT("MaxAvoidedAgents"));
+	ReadInt(TEXT("MaxAvoidedWalls"));
+	ReadFloat(TEXT("NavmeshCheckInterval"));
+	ReadFloat(TEXT("PathOptimizationInterval"));
+	ReadFloat(TEXT("SeparationDirClamp"));
+	ReadFloat(TEXT("PathOffsetRadiusMultiplier"));
+	ReadBool(TEXT("bResolveCollisions"));     // uint32:1 bitfield exposed as FBoolProperty by UHT
 
 	// Avoidance config array
 	FArrayProperty* AvoidProp = CastField<FArrayProperty>(CrowdClass->FindPropertyByName(TEXT("AvoidanceConfig")));
@@ -1626,6 +1670,14 @@ FMonolithActionResult FMonolithAINavigationActions::HandleGetCrowdManagerConfig(
 	{
 		FScriptArrayHelper ArrayHelper(AvoidProp, AvoidProp->ContainerPtrToValuePtr<void>(CrowdMgr));
 		Result->SetNumberField(TEXT("avoidance_config_count"), ArrayHelper.Num());
+	}
+
+	// Sampling patterns array (size only — per-element schema deferred)
+	FArrayProperty* SamplingProp = CastField<FArrayProperty>(CrowdClass->FindPropertyByName(TEXT("SamplingPatterns")));
+	if (SamplingProp)
+	{
+		FScriptArrayHelper ArrayHelper(SamplingProp, SamplingProp->ContainerPtrToValuePtr<void>(CrowdMgr));
+		Result->SetNumberField(TEXT("sampling_patterns_count"), ArrayHelper.Num());
 	}
 
 	return FMonolithActionResult::Success(Result);
@@ -1655,26 +1707,117 @@ FMonolithActionResult FMonolithAINavigationActions::HandleSetCrowdManagerConfig(
 	UClass* CrowdClass = CrowdMgr->GetClass();
 	int32 ChangedCount = 0;
 
-	auto SetIntProp = [&](const TCHAR* JsonField, const TCHAR* PropName)
+	TSharedPtr<FJsonObject> Verified = MakeShared<FJsonObject>();
+
+	auto SetIntPropVerified = [&](const TCHAR* JsonField, const TCHAR* PropName)
 	{
-		if (Params->HasField(JsonField))
+		if (!Params->HasField(JsonField))
 		{
-			if (FIntProperty* Prop = CastField<FIntProperty>(CrowdClass->FindPropertyByName(PropName)))
-			{
-				Prop->SetPropertyValue_InContainer(CrowdMgr, (int32)Params->GetNumberField(JsonField));
-				ChangedCount++;
-			}
+			return;
 		}
+		const int32 Requested = (int32)Params->GetNumberField(JsonField);
+		FIntProperty* Prop = CastField<FIntProperty>(CrowdClass->FindPropertyByName(PropName));
+		if (!Prop)
+		{
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetNumberField(TEXT("requested"), Requested);
+			Entry->SetNumberField(TEXT("actual"), 0);
+			Entry->SetBoolField(TEXT("match"), false);
+			Verified->SetObjectField(JsonField, Entry);
+			return;
+		}
+		Prop->SetPropertyValue_InContainer(CrowdMgr, Requested);
+		const int32 Actual = Prop->GetPropertyValue_InContainer(CrowdMgr);
+		ChangedCount++;
+
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetNumberField(TEXT("requested"), Requested);
+		Entry->SetNumberField(TEXT("actual"), Actual);
+		Entry->SetBoolField(TEXT("match"), Requested == Actual);
+		Verified->SetObjectField(JsonField, Entry);
 	};
 
-	SetIntProp(TEXT("max_agents"), TEXT("MaxAgents"));
-	SetIntProp(TEXT("max_avoidance_agents"), TEXT("MaxAvoidedAgents"));
+	// Float companion (mirrors get-side ReadFloat: tries FFloatProperty then FDoubleProperty)
+	auto SetFloatPropVerified = [&](const TCHAR* JsonField, const TCHAR* PropName)
+	{
+		if (!Params->HasField(JsonField))
+		{
+			return;
+		}
+		const double Requested = Params->GetNumberField(JsonField);
+		double Actual = 0.0;
+		bool bWrote = false;
+		if (FFloatProperty* FProp = CastField<FFloatProperty>(CrowdClass->FindPropertyByName(PropName)))
+		{
+			FProp->SetPropertyValue_InContainer(CrowdMgr, (float)Requested);
+			Actual = FProp->GetPropertyValue_InContainer(CrowdMgr);
+			bWrote = true;
+		}
+		else if (FDoubleProperty* DProp = CastField<FDoubleProperty>(CrowdClass->FindPropertyByName(PropName)))
+		{
+			DProp->SetPropertyValue_InContainer(CrowdMgr, Requested);
+			Actual = DProp->GetPropertyValue_InContainer(CrowdMgr);
+			bWrote = true;
+		}
+
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetNumberField(TEXT("requested"), Requested);
+		Entry->SetNumberField(TEXT("actual"), Actual);
+		// Cast to float for compare to absorb double-rounded float storage; tolerance handles UE float quantization
+		Entry->SetBoolField(TEXT("match"), bWrote && FMath::IsNearlyEqual((float)Requested, (float)Actual, 1e-3f));
+		Verified->SetObjectField(JsonField, Entry);
+		if (bWrote) { ChangedCount++; }
+	};
+
+	auto SetBoolPropVerified = [&](const TCHAR* JsonField, const TCHAR* PropName)
+	{
+		if (!Params->HasField(JsonField))
+		{
+			return;
+		}
+		const bool Requested = Params->GetBoolField(JsonField);
+		FBoolProperty* Prop = CastField<FBoolProperty>(CrowdClass->FindPropertyByName(PropName));
+		if (!Prop)
+		{
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetBoolField(TEXT("requested"), Requested);
+			Entry->SetBoolField(TEXT("actual"), false);
+			Entry->SetBoolField(TEXT("match"), false);
+			Verified->SetObjectField(JsonField, Entry);
+			return;
+		}
+		Prop->SetPropertyValue_InContainer(CrowdMgr, Requested);
+		const bool Actual = Prop->GetPropertyValue_InContainer(CrowdMgr);
+		ChangedCount++;
+
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetBoolField(TEXT("requested"), Requested);
+		Entry->SetBoolField(TEXT("actual"), Actual);
+		Entry->SetBoolField(TEXT("match"), Requested == Actual);
+		Verified->SetObjectField(JsonField, Entry);
+	};
+
+	SetIntPropVerified(TEXT("max_agents"), TEXT("MaxAgents"));
+	SetIntPropVerified(TEXT("max_avoidance_agents"), TEXT("MaxAvoidedAgents"));
+	SetIntPropVerified(TEXT("max_avoided_walls"), TEXT("MaxAvoidedWalls"));
+
+	SetFloatPropVerified(TEXT("max_agent_radius"), TEXT("MaxAgentRadius"));
+	SetFloatPropVerified(TEXT("navmesh_check_interval"), TEXT("NavmeshCheckInterval"));
+	SetFloatPropVerified(TEXT("path_optimization_interval"), TEXT("PathOptimizationInterval"));
+	SetFloatPropVerified(TEXT("separation_dir_clamp"), TEXT("SeparationDirClamp"));
+	SetFloatPropVerified(TEXT("path_offset_radius_multiplier"), TEXT("PathOffsetRadiusMultiplier"));
+
+	SetBoolPropVerified(TEXT("resolve_collisions"), TEXT("bResolveCollisions"));
 
 	CrowdMgr->MarkPackageDirty();
 
 	auto Result = MakeShared<FJsonObject>();
 	Result->SetNumberField(TEXT("properties_changed"), ChangedCount);
 	Result->SetStringField(TEXT("message"), TEXT("CrowdManager config updated"));
+	if (Verified->Values.Num() > 0)
+	{
+		Result->SetObjectField(TEXT("verified_value"), Verified);
+	}
 	return FMonolithActionResult::Success(Result);
 }
 

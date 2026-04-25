@@ -440,10 +440,13 @@ void FMonolithAIScaffoldActions::RegisterActions(FMonolithToolRegistry& Registry
 
 	// 206. batch_validate_ai_assets
 	Registry.RegisterAction(TEXT("ai"), TEXT("batch_validate_ai_assets"),
-		TEXT("Run all validators across all AI assets — BTs, STs, EQS, SOs, controllers. Consolidated report."),
+		TEXT("Run all validators across AI assets — BTs, STs, EQS, SOs, controllers. "
+		     "If 'asset_paths' is provided, validates only those exact paths. "
+		     "Otherwise scans the project (filtered by 'path_filter' if set)."),
 		FMonolithActionHandler::CreateStatic(&HandleBatchValidateAIAssets),
 		FParamSchemaBuilder()
-			.Optional(TEXT("path_filter"), TEXT("string"), TEXT("Only validate assets under this path prefix"))
+			.Optional(TEXT("path_filter"), TEXT("string"), TEXT("Only validate assets under this path prefix (full-scan mode)"))
+			.Optional(TEXT("asset_paths"), TEXT("array"), TEXT("Optional explicit list of asset paths to validate. When set, full scan is skipped and only these paths are checked."))
 			.Build());
 
 	// 107. validate_ai_controller
@@ -649,6 +652,16 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleHelloWorldAI(const TShar
 			return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create BT: %s"), *R.ErrorMessage));
 		}
 		CreatedAssets.Add(BTPath);
+
+		// Phase D1: belt-and-suspenders BB linkage (Issue #48)
+		TSharedPtr<FJsonObject> SetBBParams = MakeShared<FJsonObject>();
+		SetBBParams->SetStringField(TEXT("bt_path"), BTPath);
+		SetBBParams->SetStringField(TEXT("blackboard_path"), BBPath);
+		FMonolithActionResult LinkResult = Dispatch(TEXT("ai"), TEXT("set_bt_blackboard"), SetBBParams);
+		if (!LinkResult.bSuccess)
+		{
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to link BT to Blackboard: %s"), *LinkResult.ErrorMessage));
+		}
 	}
 
 	// 3. Create AI Controller
@@ -864,6 +877,16 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleScaffoldCompleteAICharac
 			return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create BT: %s"), *R.ErrorMessage));
 		}
 		CreatedAssets.Add(BTPath);
+
+		// Phase D1: belt-and-suspenders BB linkage (Issue #48)
+		TSharedPtr<FJsonObject> SetBBParams = MakeShared<FJsonObject>();
+		SetBBParams->SetStringField(TEXT("bt_path"), BTPath);
+		SetBBParams->SetStringField(TEXT("blackboard_path"), BBPath);
+		FMonolithActionResult LinkResult = Dispatch(TEXT("ai"), TEXT("set_bt_blackboard"), SetBBParams);
+		if (!LinkResult.bSuccess)
+		{
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to link BT to Blackboard: %s"), *LinkResult.ErrorMessage));
+		}
 	}
 
 	// 3. Create AI Controller via scaffold
@@ -1406,6 +1429,16 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleScaffoldPatrolInvestigat
 			return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create BT: %s"), *R.ErrorMessage));
 		}
 		CreatedAssets.Add(BTPath);
+
+		// Phase D1: belt-and-suspenders BB linkage (Issue #48)
+		TSharedPtr<FJsonObject> SetBBParams = MakeShared<FJsonObject>();
+		SetBBParams->SetStringField(TEXT("bt_path"), BTPath);
+		SetBBParams->SetStringField(TEXT("blackboard_path"), BBPath);
+		FMonolithActionResult LinkResult = Dispatch(TEXT("ai"), TEXT("set_bt_blackboard"), SetBBParams);
+		if (!LinkResult.bSuccess)
+		{
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to link BT to Blackboard: %s"), *LinkResult.ErrorMessage));
+		}
 	}
 
 	// 3. Create controller
@@ -1645,12 +1678,19 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleScaffoldEQSMoveSequence(
 				// Set the BB key on the MoveTo
 				if (!NodeId.IsEmpty())
 				{
+					// Phase D4: typo fix `property_value` → `value`; promote to hard Dispatch with early-return
+					// (this wiring is critical to the EQS→MoveTo chain working at all).
 					TSharedPtr<FJsonObject> PropP = MakeShared<FJsonObject>();
 					PropP->SetStringField(TEXT("asset_path"), BTPath);
 					PropP->SetStringField(TEXT("node_id"), NodeId);
 					PropP->SetStringField(TEXT("property_name"), TEXT("BlackboardKey.SelectedKeyName"));
-					PropP->SetStringField(TEXT("property_value"), BBKey);
-					DispatchOrWarn(TEXT("ai"), TEXT("set_bt_node_property"), PropP, Warnings, TEXT("Set MoveTo BB key"));
+					PropP->SetStringField(TEXT("value"), BBKey);
+					FMonolithActionResult PropR = Dispatch(TEXT("ai"), TEXT("set_bt_node_property"), PropP);
+					if (!PropR.bSuccess)
+					{
+						return FMonolithActionResult::Error(FString::Printf(
+							TEXT("Failed to set MoveTo BB key (set_bt_node_property): %s"), *PropR.ErrorMessage));
+					}
 				}
 			}
 		}
@@ -1744,6 +1784,18 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleCreateBTFromTemplate(con
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to build BT: %s"), *R.ErrorMessage));
 	}
 
+	// Phase D1: belt-and-suspenders BB linkage (Issue #48)
+	{
+		TSharedPtr<FJsonObject> SetBBParams = MakeShared<FJsonObject>();
+		SetBBParams->SetStringField(TEXT("bt_path"), SavePath);
+		SetBBParams->SetStringField(TEXT("blackboard_path"), BBPath);
+		FMonolithActionResult LinkResult = Dispatch(TEXT("ai"), TEXT("set_bt_blackboard"), SetBBParams);
+		if (!LinkResult.bSuccess)
+		{
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to link BT to Blackboard: %s"), *LinkResult.ErrorMessage));
+		}
+	}
+
 	// Augment result
 	if (R.Result.IsValid())
 	{
@@ -1796,10 +1848,17 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleCreateSTFromTemplate(con
 
 	// Step 2: Set schema to AI (standard for AI State Trees)
 	{
+		// Phase D4: typo fix `schema` → `schema_class` (canonical param);
+		// promote to hard Dispatch with early-return — without a schema the State Tree is invalid.
 		TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
 		P->SetStringField(TEXT("asset_path"), SavePath);
-		P->SetStringField(TEXT("schema"), TEXT("StateTreeAIComponentSchema"));
-		DispatchOrWarn(TEXT("ai"), TEXT("set_st_schema"), P, Warnings, TEXT("Set schema"));
+		P->SetStringField(TEXT("schema_class"), TEXT("StateTreeAIComponentSchema"));
+		FMonolithActionResult SchemaR = Dispatch(TEXT("ai"), TEXT("set_st_schema"), P);
+		if (!SchemaR.bSuccess)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Failed to set State Tree schema (set_st_schema): %s"), *SchemaR.ErrorMessage));
+		}
 	}
 
 	// Step 3: Add template states
@@ -1808,40 +1867,68 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleCreateSTFromTemplate(con
 		// States: Patrol → Investigate → Chase
 		for (const FString& StateName : { TEXT("Patrol"), TEXT("Investigate"), TEXT("Chase") })
 		{
+			// Phase D4: typo fix `state_name` → `name` (canonical param for add_st_state);
+			// promote to hard Dispatch with early-return — missing template states leave the tree empty.
 			TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
 			P->SetStringField(TEXT("asset_path"), SavePath);
-			P->SetStringField(TEXT("state_name"), StateName);
-			DispatchOrWarn(TEXT("ai"), TEXT("add_st_state"), P, Warnings, FString::Printf(TEXT("Add state %s"), *StateName));
+			P->SetStringField(TEXT("name"), StateName);
+			FMonolithActionResult AddR = Dispatch(TEXT("ai"), TEXT("add_st_state"), P);
+			if (!AddR.bSuccess)
+			{
+				return FMonolithActionResult::Error(FString::Printf(
+					TEXT("Failed to add State Tree state '%s' (add_st_state): %s"), *StateName, *AddR.ErrorMessage));
+			}
 		}
 	}
 	else if (TemplateName == TEXT("combat"))
 	{
 		for (const FString& StateName : { TEXT("Engage"), TEXT("Attack"), TEXT("Reposition"), TEXT("Flee") })
 		{
+			// Phase D4: typo fix `state_name` → `name` (canonical param for add_st_state);
+			// promote to hard Dispatch with early-return — missing template states leave the tree empty.
 			TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
 			P->SetStringField(TEXT("asset_path"), SavePath);
-			P->SetStringField(TEXT("state_name"), StateName);
-			DispatchOrWarn(TEXT("ai"), TEXT("add_st_state"), P, Warnings, FString::Printf(TEXT("Add state %s"), *StateName));
+			P->SetStringField(TEXT("name"), StateName);
+			FMonolithActionResult AddR = Dispatch(TEXT("ai"), TEXT("add_st_state"), P);
+			if (!AddR.bSuccess)
+			{
+				return FMonolithActionResult::Error(FString::Printf(
+					TEXT("Failed to add State Tree state '%s' (add_st_state): %s"), *StateName, *AddR.ErrorMessage));
+			}
 		}
 	}
 	else if (TemplateName == TEXT("investigation"))
 	{
 		for (const FString& StateName : { TEXT("MoveToLocation"), TEXT("LookAround"), TEXT("SearchArea"), TEXT("ReturnToPost") })
 		{
+			// Phase D4: typo fix `state_name` → `name` (canonical param for add_st_state);
+			// promote to hard Dispatch with early-return — missing template states leave the tree empty.
 			TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
 			P->SetStringField(TEXT("asset_path"), SavePath);
-			P->SetStringField(TEXT("state_name"), StateName);
-			DispatchOrWarn(TEXT("ai"), TEXT("add_st_state"), P, Warnings, FString::Printf(TEXT("Add state %s"), *StateName));
+			P->SetStringField(TEXT("name"), StateName);
+			FMonolithActionResult AddR = Dispatch(TEXT("ai"), TEXT("add_st_state"), P);
+			if (!AddR.bSuccess)
+			{
+				return FMonolithActionResult::Error(FString::Printf(
+					TEXT("Failed to add State Tree state '%s' (add_st_state): %s"), *StateName, *AddR.ErrorMessage));
+			}
 		}
 	}
 	else if (TemplateName == TEXT("ambient"))
 	{
 		for (const FString& StateName : { TEXT("Idle"), TEXT("Wander"), TEXT("Interact"), TEXT("Rest") })
 		{
+			// Phase D4: typo fix `state_name` → `name` (canonical param for add_st_state);
+			// promote to hard Dispatch with early-return — missing template states leave the tree empty.
 			TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
 			P->SetStringField(TEXT("asset_path"), SavePath);
-			P->SetStringField(TEXT("state_name"), StateName);
-			DispatchOrWarn(TEXT("ai"), TEXT("add_st_state"), P, Warnings, FString::Printf(TEXT("Add state %s"), *StateName));
+			P->SetStringField(TEXT("name"), StateName);
+			FMonolithActionResult AddR = Dispatch(TEXT("ai"), TEXT("add_st_state"), P);
+			if (!AddR.bSuccess)
+			{
+				return FMonolithActionResult::Error(FString::Printf(
+					TEXT("Failed to add State Tree state '%s' (add_st_state): %s"), *StateName, *AddR.ErrorMessage));
+			}
 		}
 	}
 
@@ -1890,6 +1977,152 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleBatchValidateAIAssets(co
 	int32 TotalAssets = 0;
 	int32 TotalIssues = 0;
 	TArray<TSharedPtr<FJsonValue>> AllResults;
+
+	// Phase F #51: scoped mode — when caller supplies 'asset_paths', validate ONLY those.
+	// Avoids the full-project scan when the caller already knows which assets to check.
+	const TArray<TSharedPtr<FJsonValue>>* AssetPathsArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("asset_paths"), AssetPathsArr) && AssetPathsArr && AssetPathsArr->Num() > 0)
+	{
+		// Resolve each path -> dispatch to the action matching its class.
+		auto DispatchOne = [&](const FString& AssetPath, const FString& TypeName, const FString& ActionName)
+		{
+			TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
+			P->SetStringField(TEXT("asset_path"), AssetPath);
+			FMonolithActionResult R = Dispatch(TEXT("ai"), ActionName, P);
+			++TotalAssets;
+
+			if (R.bSuccess && R.Result.IsValid())
+			{
+				int32 IssueCount = FMath::RoundToInt32(R.Result->GetNumberField(TEXT("issue_count")));
+				if (IssueCount > 0)
+				{
+					TotalIssues += IssueCount;
+					TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+					Entry->SetStringField(TEXT("asset_path"), AssetPath);
+					Entry->SetStringField(TEXT("type"), TypeName);
+					Entry->SetNumberField(TEXT("issue_count"), IssueCount);
+					if (R.Result->HasField(TEXT("issues")))
+					{
+						Entry->SetArrayField(TEXT("issues"), R.Result->GetArrayField(TEXT("issues")));
+					}
+					AllResults.Add(MakeShared<FJsonValueObject>(Entry));
+				}
+			}
+			else if (!R.bSuccess)
+			{
+				++TotalIssues;
+				TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+				Entry->SetStringField(TEXT("asset_path"), AssetPath);
+				Entry->SetStringField(TEXT("type"), TypeName);
+				Entry->SetNumberField(TEXT("issue_count"), 1);
+
+				TArray<TSharedPtr<FJsonValue>> ErrArr;
+				TSharedPtr<FJsonObject> ErrObj = MakeShared<FJsonObject>();
+				ErrObj->SetStringField(TEXT("severity"), TEXT("error"));
+				ErrObj->SetStringField(TEXT("message"), FString::Printf(TEXT("Validation failed: %s"), *R.ErrorMessage));
+				ErrArr.Add(MakeShared<FJsonValueObject>(ErrObj));
+				Entry->SetArrayField(TEXT("issues"), ErrArr);
+				AllResults.Add(MakeShared<FJsonValueObject>(Entry));
+			}
+		};
+
+		TArray<FString> SkippedUnknown;
+		for (const TSharedPtr<FJsonValue>& V : *AssetPathsArr)
+		{
+			FString PathStr;
+			if (!V.IsValid() || !V->TryGetString(PathStr) || PathStr.IsEmpty())
+			{
+				continue;
+			}
+
+			// Try to identify the asset class via AssetRegistry to pick the right validator.
+			FAssetData AD = AR.GetAssetByObjectPath(FSoftObjectPath(PathStr));
+			if (!AD.IsValid())
+			{
+				// Try treating PathStr as a package path (common for the paths returned from validators).
+				const FString PackagePath = PathStr.Contains(TEXT(".")) ? PathStr : (PathStr + TEXT(".") + FPaths::GetBaseFilename(PathStr));
+				AD = AR.GetAssetByObjectPath(FSoftObjectPath(PackagePath));
+			}
+			if (!AD.IsValid())
+			{
+				SkippedUnknown.Add(PathStr);
+				continue;
+			}
+
+			const FTopLevelAssetPath ClassPath = AD.AssetClassPath;
+
+			if (ClassPath == UBehaviorTree::StaticClass()->GetClassPathName())
+			{
+				DispatchOne(PathStr, TEXT("BehaviorTree"), TEXT("validate_behavior_tree"));
+			}
+#if WITH_STATETREE
+			else if (ClassPath == UStateTree::StaticClass()->GetClassPathName())
+			{
+				DispatchOne(PathStr, TEXT("StateTree"), TEXT("validate_state_tree"));
+			}
+#endif
+			else if (ClassPath == UEnvQuery::StaticClass()->GetClassPathName())
+			{
+				DispatchOne(PathStr, TEXT("EQS"), TEXT("validate_eqs_query"));
+			}
+#if WITH_SMARTOBJECTS
+			else
+			{
+				if (UClass* SOClass = FindFirstObject<UClass>(TEXT("SmartObjectDefinition"), EFindFirstObjectOptions::EnsureIfAmbiguous))
+				{
+					if (ClassPath == SOClass->GetClassPathName())
+					{
+						DispatchOne(PathStr, TEXT("SmartObject"), TEXT("validate_smart_object_definition"));
+						continue;
+					}
+				}
+				// Else: maybe an AIController Blueprint
+				if (ClassPath == UBlueprint::StaticClass()->GetClassPathName())
+				{
+					FAssetTagValueRef ParentTag = AD.TagsAndValues.FindTag(FName(TEXT("ParentClass")));
+					if (ParentTag.IsSet() && ParentTag.GetValue().Contains(TEXT("AIController")))
+					{
+						DispatchOne(PathStr, TEXT("AIController"), TEXT("validate_ai_controller"));
+						continue;
+					}
+				}
+				SkippedUnknown.Add(PathStr);
+			}
+#else
+			else if (ClassPath == UBlueprint::StaticClass()->GetClassPathName())
+			{
+				FAssetTagValueRef ParentTag = AD.TagsAndValues.FindTag(FName(TEXT("ParentClass")));
+				if (ParentTag.IsSet() && ParentTag.GetValue().Contains(TEXT("AIController")))
+				{
+					DispatchOne(PathStr, TEXT("AIController"), TEXT("validate_ai_controller"));
+				}
+				else
+				{
+					SkippedUnknown.Add(PathStr);
+				}
+			}
+			else
+			{
+				SkippedUnknown.Add(PathStr);
+			}
+#endif
+		}
+
+		Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Scoped batch validation: %d assets checked, %d issues found"), TotalAssets, TotalIssues));
+		Result->SetNumberField(TEXT("total_assets"), TotalAssets);
+		Result->SetNumberField(TEXT("total_issues"), TotalIssues);
+		Result->SetBoolField(TEXT("all_valid"), TotalIssues == 0);
+		Result->SetArrayField(TEXT("results"), AllResults);
+		Result->SetBoolField(TEXT("scoped"), true);
+		Result->SetNumberField(TEXT("requested_count"), AssetPathsArr->Num());
+		if (SkippedUnknown.Num() > 0)
+		{
+			TArray<TSharedPtr<FJsonValue>> SkippedArr;
+			for (const FString& S : SkippedUnknown) SkippedArr.Add(MakeShared<FJsonValueString>(S));
+			Result->SetArrayField(TEXT("skipped_unknown_class"), SkippedArr);
+		}
+		return FMonolithActionResult::Success(Result);
+	}
 
 	// Helper: validate all assets of a type using a given action
 	auto ValidateAssets = [&](const FTopLevelAssetPath& ClassPath, const FString& TypeName, const FString& ActionName)
@@ -2467,6 +2700,13 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleScaffoldCompanionAI(cons
 		FMonolithActionResult R = Dispatch(TEXT("ai"), TEXT("build_behavior_tree_from_spec"), P);
 		if (!R.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create BT: %s"), *R.ErrorMessage));
 		CreatedAssets.Add(BTPath);
+
+		// Phase D1: belt-and-suspenders BB linkage (Issue #48)
+		TSharedPtr<FJsonObject> SetBBParams = MakeShared<FJsonObject>();
+		SetBBParams->SetStringField(TEXT("bt_path"), BTPath);
+		SetBBParams->SetStringField(TEXT("blackboard_path"), BBPath);
+		FMonolithActionResult LinkResult = Dispatch(TEXT("ai"), TEXT("set_bt_blackboard"), SetBBParams);
+		if (!LinkResult.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to link BT to Blackboard: %s"), *LinkResult.ErrorMessage));
 	}
 
 	// 3. Create full AI character via dispatch
@@ -2635,6 +2875,13 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleScaffoldBossAI(const TSh
 		FMonolithActionResult R = Dispatch(TEXT("ai"), TEXT("build_behavior_tree_from_spec"), P);
 		if (!R.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create BT: %s"), *R.ErrorMessage));
 		CreatedAssets.Add(BTPath);
+
+		// Phase D1: belt-and-suspenders BB linkage (Issue #48)
+		TSharedPtr<FJsonObject> SetBBParams = MakeShared<FJsonObject>();
+		SetBBParams->SetStringField(TEXT("bt_path"), BTPath);
+		SetBBParams->SetStringField(TEXT("blackboard_path"), BBPath);
+		FMonolithActionResult LinkResult = Dispatch(TEXT("ai"), TEXT("set_bt_blackboard"), SetBBParams);
+		if (!LinkResult.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to link BT to Blackboard: %s"), *LinkResult.ErrorMessage));
 	}
 
 	// 3. AI Controller
@@ -2795,6 +3042,13 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleScaffoldAmbientNPC(const
 		FMonolithActionResult R = Dispatch(TEXT("ai"), TEXT("build_behavior_tree_from_spec"), P);
 		if (!R.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create BT: %s"), *R.ErrorMessage));
 		CreatedAssets.Add(BTPath);
+
+		// Phase D1: belt-and-suspenders BB linkage (Issue #48)
+		TSharedPtr<FJsonObject> SetBBParams = MakeShared<FJsonObject>();
+		SetBBParams->SetStringField(TEXT("bt_path"), BTPath);
+		SetBBParams->SetStringField(TEXT("blackboard_path"), BBPath);
+		FMonolithActionResult LinkResult = Dispatch(TEXT("ai"), TEXT("set_bt_blackboard"), SetBBParams);
+		if (!LinkResult.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to link BT to Blackboard: %s"), *LinkResult.ErrorMessage));
 	}
 
 	// 3. Controller
@@ -2956,6 +3210,13 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleScaffoldHorrorStalker(co
 		FMonolithActionResult R = Dispatch(TEXT("ai"), TEXT("build_behavior_tree_from_spec"), P);
 		if (!R.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create BT: %s"), *R.ErrorMessage));
 		CreatedAssets.Add(BTPath);
+
+		// Phase D1: belt-and-suspenders BB linkage (Issue #48)
+		TSharedPtr<FJsonObject> SetBBParams = MakeShared<FJsonObject>();
+		SetBBParams->SetStringField(TEXT("bt_path"), BTPath);
+		SetBBParams->SetStringField(TEXT("blackboard_path"), BBPath);
+		FMonolithActionResult LinkResult = Dispatch(TEXT("ai"), TEXT("set_bt_blackboard"), SetBBParams);
+		if (!LinkResult.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to link BT to Blackboard: %s"), *LinkResult.ErrorMessage));
 	}
 
 	// 3. Controller
@@ -3085,6 +3346,13 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleScaffoldHorrorAmbush(con
 		FMonolithActionResult R = Dispatch(TEXT("ai"), TEXT("build_behavior_tree_from_spec"), P);
 		if (!R.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create BT: %s"), *R.ErrorMessage));
 		CreatedAssets.Add(BTPath);
+
+		// Phase D1: belt-and-suspenders BB linkage (Issue #48)
+		TSharedPtr<FJsonObject> SetBBParams = MakeShared<FJsonObject>();
+		SetBBParams->SetStringField(TEXT("bt_path"), BTPath);
+		SetBBParams->SetStringField(TEXT("blackboard_path"), BBPath);
+		FMonolithActionResult LinkResult = Dispatch(TEXT("ai"), TEXT("set_bt_blackboard"), SetBBParams);
+		if (!LinkResult.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to link BT to Blackboard: %s"), *LinkResult.ErrorMessage));
 	}
 
 	// 3. Controller
@@ -3198,6 +3466,13 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleScaffoldHorrorPresence(c
 		FMonolithActionResult R = Dispatch(TEXT("ai"), TEXT("build_behavior_tree_from_spec"), P);
 		if (!R.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create BT: %s"), *R.ErrorMessage));
 		CreatedAssets.Add(BTPath);
+
+		// Phase D1: belt-and-suspenders BB linkage (Issue #48)
+		TSharedPtr<FJsonObject> SetBBParams = MakeShared<FJsonObject>();
+		SetBBParams->SetStringField(TEXT("bt_path"), BTPath);
+		SetBBParams->SetStringField(TEXT("blackboard_path"), BBPath);
+		FMonolithActionResult LinkResult = Dispatch(TEXT("ai"), TEXT("set_bt_blackboard"), SetBBParams);
+		if (!LinkResult.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to link BT to Blackboard: %s"), *LinkResult.ErrorMessage));
 	}
 
 	// 3. Controller (no perception — invisible entity)
@@ -3307,6 +3582,13 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleScaffoldHorrorMimic(cons
 		FMonolithActionResult R = Dispatch(TEXT("ai"), TEXT("build_behavior_tree_from_spec"), P);
 		if (!R.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create BT: %s"), *R.ErrorMessage));
 		CreatedAssets.Add(BTPath);
+
+		// Phase D1: belt-and-suspenders BB linkage (Issue #48)
+		TSharedPtr<FJsonObject> SetBBParams = MakeShared<FJsonObject>();
+		SetBBParams->SetStringField(TEXT("bt_path"), BTPath);
+		SetBBParams->SetStringField(TEXT("blackboard_path"), BBPath);
+		FMonolithActionResult LinkResult = Dispatch(TEXT("ai"), TEXT("set_bt_blackboard"), SetBBParams);
+		if (!LinkResult.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to link BT to Blackboard: %s"), *LinkResult.ErrorMessage));
 	}
 
 	// 3. Controller
@@ -3443,6 +3725,13 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleScaffoldStealthGameAI(co
 		FMonolithActionResult R = Dispatch(TEXT("ai"), TEXT("build_behavior_tree_from_spec"), P);
 		if (!R.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create BT: %s"), *R.ErrorMessage));
 		CreatedAssets.Add(BTPath);
+
+		// Phase D1: belt-and-suspenders BB linkage (Issue #48)
+		TSharedPtr<FJsonObject> SetBBParams = MakeShared<FJsonObject>();
+		SetBBParams->SetStringField(TEXT("bt_path"), BTPath);
+		SetBBParams->SetStringField(TEXT("blackboard_path"), BBPath);
+		FMonolithActionResult LinkResult = Dispatch(TEXT("ai"), TEXT("set_bt_blackboard"), SetBBParams);
+		if (!LinkResult.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to link BT to Blackboard: %s"), *LinkResult.ErrorMessage));
 	}
 
 	// 3. Controller
@@ -3552,6 +3841,13 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleScaffoldTurretAI(const T
 		FMonolithActionResult R = Dispatch(TEXT("ai"), TEXT("build_behavior_tree_from_spec"), P);
 		if (!R.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create BT: %s"), *R.ErrorMessage));
 		CreatedAssets.Add(BTPath);
+
+		// Phase D1: belt-and-suspenders BB linkage (Issue #48)
+		TSharedPtr<FJsonObject> SetBBParams = MakeShared<FJsonObject>();
+		SetBBParams->SetStringField(TEXT("bt_path"), BTPath);
+		SetBBParams->SetStringField(TEXT("blackboard_path"), BBPath);
+		FMonolithActionResult LinkResult = Dispatch(TEXT("ai"), TEXT("set_bt_blackboard"), SetBBParams);
+		if (!LinkResult.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to link BT to Blackboard: %s"), *LinkResult.ErrorMessage));
 	}
 
 	// 3. Controller
@@ -3666,6 +3962,13 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleScaffoldGroupCoordinator
 		FMonolithActionResult R = Dispatch(TEXT("ai"), TEXT("build_behavior_tree_from_spec"), P);
 		if (!R.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create BT: %s"), *R.ErrorMessage));
 		CreatedAssets.Add(BTPath);
+
+		// Phase D1: belt-and-suspenders BB linkage (Issue #48)
+		TSharedPtr<FJsonObject> SetBBParams = MakeShared<FJsonObject>();
+		SetBBParams->SetStringField(TEXT("bt_path"), BTPath);
+		SetBBParams->SetStringField(TEXT("blackboard_path"), BBPath);
+		FMonolithActionResult LinkResult = Dispatch(TEXT("ai"), TEXT("set_bt_blackboard"), SetBBParams);
+		if (!LinkResult.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to link BT to Blackboard: %s"), *LinkResult.ErrorMessage));
 	}
 
 	// 3. Controller
@@ -3799,6 +4102,13 @@ FMonolithActionResult FMonolithAIScaffoldActions::HandleScaffoldFlyingAI(const T
 		FMonolithActionResult R = Dispatch(TEXT("ai"), TEXT("build_behavior_tree_from_spec"), P);
 		if (!R.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create BT: %s"), *R.ErrorMessage));
 		CreatedAssets.Add(BTPath);
+
+		// Phase D1: belt-and-suspenders BB linkage (Issue #48)
+		TSharedPtr<FJsonObject> SetBBParams = MakeShared<FJsonObject>();
+		SetBBParams->SetStringField(TEXT("bt_path"), BTPath);
+		SetBBParams->SetStringField(TEXT("blackboard_path"), BBPath);
+		FMonolithActionResult LinkResult = Dispatch(TEXT("ai"), TEXT("set_bt_blackboard"), SetBBParams);
+		if (!LinkResult.bSuccess) return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to link BT to Blackboard: %s"), *LinkResult.ErrorMessage));
 	}
 
 	// 3. Controller

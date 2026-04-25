@@ -62,10 +62,19 @@ private:
 	/** Get or create a builder for an existing MetaSound asset by path */
 	static class UMetaSoundBuilderBase* GetBuilderForAsset(const FString& AssetPath, FString& OutError);
 
-	/** Resolve a node_id_or_handle string to a FMetaSoundNodeHandle within a builder */
+	/** Resolve a node_id_or_handle string to a FMetaSoundNodeHandle within a builder.
+	 *  Phase F #3: when AssetPath is non-empty, also consults the user-label alias registry
+	 *  populated by add_metasound_node so callers can refer to nodes by their assigned label. */
 	static bool ResolveNodeHandle(
 		class UMetaSoundBuilderBase* Builder, const FString& NodeIdOrHandle,
-		struct FMetaSoundNodeHandle& OutHandle, FString& OutError);
+		struct FMetaSoundNodeHandle& OutHandle, FString& OutError,
+		const FString& AssetPath = FString());
+
+	/** Phase F #3: register a user-supplied label -> engine GUID mapping for later resolution. */
+	static void RegisterNodeIdAlias(const FString& AssetPath, const FString& UserLabel, const FGuid& NodeGuid);
+
+	/** Phase F #3: look up a user label registered by add_metasound_node. Returns invalid FGuid on miss. */
+	static FGuid LookupNodeIdAlias(const FString& AssetPath, const FString& UserLabel);
 };
 
 #endif // WITH_METASOUND

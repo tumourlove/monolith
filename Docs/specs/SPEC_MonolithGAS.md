@@ -9,7 +9,7 @@
 ## MonolithGAS
 
 **Dependencies:** Core, CoreUObject, Engine, MonolithCore, GameplayAbilities, GameplayTags
-**Namespace:** `gas` | **Tool:** `gas_query(action, params)` | **Actions:** 130
+**Namespace:** `gas` | **Tool:** `gas_query(action, params)` | **Actions:** 131 (Phase J F8: +`grant_ability_to_pawn`)
 **Conditional:** GBA (Blueprint Attributes) features wrapped in `#if WITH_GBA`. Core GAS engine modules (GameplayAbilities, GameplayTags, GameplayTasks) are always available. When GBA is absent, Blueprint AttributeSet creation is disabled but all 130 actions still register and compile cleanly. When `bEnableGAS` is disabled in settings, 0 actions registered.
 **Settings toggle:** `bEnableGAS` (default: True)
 
@@ -28,7 +28,7 @@ MonolithGAS provides full MCP coverage of the Gameplay Ability System. It covers
 | Targets | 5 | Target data handles, target actor selection, target data confirmation, custom target data types |
 | Input | 5 | Bind abilities to Enhanced Input actions, input tag mapping, activation on input |
 | Inspect | 6 | Runtime inspection of active abilities, applied effects, attribute snapshots, ability task state, prediction keys |
-| Scaffold | 6 | Scaffold common GAS setups: init_attribute_set, init_asc_actor, init_ability_set, init_damage_pipeline, init_cooldown_system, init_stacking_effect |
+| Scaffold | 7 | Scaffold common GAS setups: init_attribute_set, init_asc_actor, init_ability_set, init_damage_pipeline, init_cooldown_system, init_stacking_effect, **`grant_ability_to_pawn`** (Phase J F8 — author-time append to ASC startup-abilities array via reflection) |
 
 ### Notes
 

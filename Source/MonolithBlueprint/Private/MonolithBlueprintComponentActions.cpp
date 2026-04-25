@@ -2,6 +2,7 @@
 #include "MonolithBlueprintInternal.h"
 #include "MonolithJsonUtils.h"
 #include "MonolithParamSchema.h"
+#include "MonolithAssetUtils.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SkinnedAsset.h"
@@ -558,7 +559,7 @@ FMonolithActionResult FMonolithBlueprintComponentActions::HandleSetComponentProp
 			// Load without class constraint — ObjProp->PropertyClass may be an
 			// abstract base (e.g. USkinnedAsset) and asset loader can't pick a
 			// concrete subclass from that. Validate compatibility after loading.
-			NewObject = StaticLoadObject(UObject::StaticClass(), nullptr, *Path);
+			NewObject = FMonolithAssetUtils::LoadAssetByPath(UObject::StaticClass(), Path);
 			if (!NewObject)
 			{
 				return FMonolithActionResult::Error(FString::Printf(

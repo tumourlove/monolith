@@ -36,6 +36,53 @@
 #include "Dom/JsonValue.h"
 
 // ============================================================================
+// Phase F #3 — node_id alias registry
+// ----------------------------------------------------------------------------
+// add_metasound_node accepts an optional decorative `node_id` (user label).
+// Without this registry the param was echoed back to the caller but the engine
+// never associated it with the new node, so subsequent calls (remove_metasound_node,
+// connect_metasound_nodes, etc.) had to use the raw GUID. The alias registry
+// maps (AssetPath, UserLabel) -> Engine NodeID GUID so callers can keep using
+// their labels.
+// ============================================================================
+
+namespace
+{
+	// Per-asset alias map. Static to the module — lives until editor shutdown.
+	// Outer key = MetaSound asset path; inner key = user label; value = engine NodeID.
+	TMap<FString, TMap<FString, FGuid>>& GetMetaSoundNodeIdAliasMap()
+	{
+		static TMap<FString, TMap<FString, FGuid>> Map;
+		return Map;
+	}
+}
+
+void FMonolithAudioMetaSoundActions::RegisterNodeIdAlias(const FString& AssetPath, const FString& UserLabel, const FGuid& NodeGuid)
+{
+	if (AssetPath.IsEmpty() || UserLabel.IsEmpty() || !NodeGuid.IsValid())
+	{
+		return;
+	}
+	GetMetaSoundNodeIdAliasMap().FindOrAdd(AssetPath).Add(UserLabel, NodeGuid);
+}
+
+FGuid FMonolithAudioMetaSoundActions::LookupNodeIdAlias(const FString& AssetPath, const FString& UserLabel)
+{
+	if (AssetPath.IsEmpty() || UserLabel.IsEmpty())
+	{
+		return FGuid();
+	}
+	if (TMap<FString, FGuid>* PerAsset = GetMetaSoundNodeIdAliasMap().Find(AssetPath))
+	{
+		if (FGuid* Found = PerAsset->Find(UserLabel))
+		{
+			return *Found;
+		}
+	}
+	return FGuid();
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
@@ -178,7 +225,8 @@ UMetaSoundBuilderBase* FMonolithAudioMetaSoundActions::GetBuilderForAsset(const 
 
 bool FMonolithAudioMetaSoundActions::ResolveNodeHandle(
 	UMetaSoundBuilderBase* Builder, const FString& NodeIdOrHandle,
-	FMetaSoundNodeHandle& OutHandle, FString& OutError)
+	FMetaSoundNodeHandle& OutHandle, FString& OutError,
+	const FString& AssetPath)
 {
 	// Try parsing as GUID first (format: 32 hex chars or standard GUID format)
 	FGuid ParsedGuid;
@@ -210,7 +258,25 @@ bool FMonolithAudioMetaSoundActions::ResolveNodeHandle(
 		return true;
 	}
 
-	OutError = FString::Printf(TEXT("Could not resolve node '%s' — not a valid GUID or graph I/O name in this builder"), *NodeIdOrHandle);
+	// Phase F #3: try the user-label alias registry populated by add_metasound_node.
+	if (!AssetPath.IsEmpty())
+	{
+		const FGuid AliasGuid = LookupNodeIdAlias(AssetPath, NodeIdOrHandle);
+		if (AliasGuid.IsValid())
+		{
+			OutHandle.NodeID = AliasGuid;
+			if (Builder->ContainsNode(OutHandle))
+			{
+				return true;
+			}
+			OutError = FString::Printf(
+				TEXT("Node label '%s' was registered for '%s' but the underlying node no longer exists in the builder"),
+				*NodeIdOrHandle, *AssetPath);
+			return false;
+		}
+	}
+
+	OutError = FString::Printf(TEXT("Could not resolve node '%s' — not a valid GUID, graph I/O name, or registered node_id alias"), *NodeIdOrHandle);
 	return false;
 }
 
@@ -244,7 +310,7 @@ void FMonolithAudioMetaSoundActions::RegisterActions(FMonolithToolRegistry& Regi
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("MetaSound asset path"))
 			.Required(TEXT("node_class"), TEXT("array"), TEXT("Node class as [Namespace, Name, Variant], e.g. [\"UE\", \"Sine\", \"Audio\"]"))
-			.Optional(TEXT("node_id"), TEXT("string"), TEXT("User-assigned label for the node (for reference in subsequent calls)"))
+			.Optional(TEXT("node_id"), TEXT("string"), TEXT("User-assigned label. When set, registers an alias so subsequent calls (remove/connect/find_inputs/etc.) can pass this label instead of the GUID."))
 			.Build());
 
 	Registry.RegisterAction(TEXT("audio"), TEXT("remove_metasound_node"),
@@ -376,6 +442,7 @@ void FMonolithAudioMetaSoundActions::RegisterActions(FMonolithToolRegistry& Regi
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path for the new MetaSound"))
 			.Required(TEXT("spec"), TEXT("object"), TEXT("Full MetaSound specification: {type, format, one_shot, interfaces, inputs, outputs, nodes, connections, graph_input_connections, interface_connections}"))
+			.Optional(TEXT("strict_mode"), TEXT("boolean"), TEXT("If true, abort with error (no save) when any node/connection/input is skipped"), TEXT("false"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("audio"), TEXT("create_metasound_preset"),
@@ -634,7 +701,13 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::AddMetaSoundNode(const TSh
 
 	if (Params->HasField(TEXT("node_id")))
 	{
-		ResultJson->SetStringField(TEXT("node_id"), Params->GetStringField(TEXT("node_id")));
+		const FString UserLabel = Params->GetStringField(TEXT("node_id"));
+		ResultJson->SetStringField(TEXT("node_id"), UserLabel);
+
+		// Phase F #3: register the user label so subsequent calls (remove/connect/find_inputs/etc.)
+		// can pass `node_id_or_handle = <label>` and have it resolve to this NodeID.
+		RegisterNodeIdAlias(AssetPath, UserLabel, NodeHandle.NodeID);
+		ResultJson->SetBoolField(TEXT("node_id_alias_registered"), true);
 	}
 
 	// Mark dirty
@@ -666,7 +739,7 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::RemoveMetaSoundNode(const 
 	}
 
 	FMetaSoundNodeHandle NodeHandle;
-	if (!ResolveNodeHandle(Builder, NodeIdStr, NodeHandle, Error))
+	if (!ResolveNodeHandle(Builder, NodeIdStr, NodeHandle, Error, AssetPath))
 	{
 		return FMonolithActionResult::Error(Error);
 	}
@@ -706,11 +779,11 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::ConnectMetaSoundNodes(cons
 	}
 
 	FMetaSoundNodeHandle SourceHandle, DestHandle;
-	if (!ResolveNodeHandle(Builder, FromNode, SourceHandle, Error))
+	if (!ResolveNodeHandle(Builder, FromNode, SourceHandle, Error, AssetPath))
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("from_node: %s"), *Error));
 	}
-	if (!ResolveNodeHandle(Builder, ToNode, DestHandle, Error))
+	if (!ResolveNodeHandle(Builder, ToNode, DestHandle, Error, AssetPath))
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("to_node: %s"), *Error));
 	}
@@ -751,11 +824,11 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::DisconnectMetaSoundNodes(c
 	}
 
 	FMetaSoundNodeHandle SourceHandle, DestHandle;
-	if (!ResolveNodeHandle(Builder, FromNode, SourceHandle, Error))
+	if (!ResolveNodeHandle(Builder, FromNode, SourceHandle, Error, AssetPath))
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("from_node: %s"), *Error));
 	}
-	if (!ResolveNodeHandle(Builder, ToNode, DestHandle, Error))
+	if (!ResolveNodeHandle(Builder, ToNode, DestHandle, Error, AssetPath))
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("to_node: %s"), *Error));
 	}
@@ -1308,7 +1381,7 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::FindMetaSoundNodeInputs(co
 	}
 
 	FMetaSoundNodeHandle NodeHandle;
-	if (!ResolveNodeHandle(Builder, NodeIdStr, NodeHandle, Error))
+	if (!ResolveNodeHandle(Builder, NodeIdStr, NodeHandle, Error, AssetPath))
 	{
 		return FMonolithActionResult::Error(Error);
 	}
@@ -1378,7 +1451,7 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::FindMetaSoundNodeOutputs(c
 	}
 
 	FMetaSoundNodeHandle NodeHandle;
-	if (!ResolveNodeHandle(Builder, NodeIdStr, NodeHandle, Error))
+	if (!ResolveNodeHandle(Builder, NodeIdStr, NodeHandle, Error, AssetPath))
 	{
 		return FMonolithActionResult::Error(Error);
 	}
@@ -1503,6 +1576,122 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 		return FMonolithActionResult::Error(TEXT("Invalid asset_path"));
 	}
 
+	bool bStrictMode = false;
+	Params->TryGetBoolField(TEXT("strict_mode"), bStrictMode);
+
+	// =====================================================================
+	// PRE-VALIDATION PASS — collect connection/declaration mismatches before
+	// any builder mutation. In strict mode this aborts before save.
+	// =====================================================================
+	TArray<FString> PreValidationErrors;
+	TSet<FString> DeclaredNodeIds;
+
+	const TArray<TSharedPtr<FJsonValue>>* PreNodesArray = nullptr;
+	if (Spec->TryGetArrayField(TEXT("nodes"), PreNodesArray) && PreNodesArray)
+	{
+		for (const auto& NodeVal : *PreNodesArray)
+		{
+			const TSharedPtr<FJsonObject>& NodeObj = NodeVal->AsObject();
+			if (!NodeObj.IsValid()) continue;
+			const FString NodeId = NodeObj->GetStringField(TEXT("id"));
+			if (NodeId.IsEmpty())
+			{
+				PreValidationErrors.Add(TEXT("Node missing 'id' field"));
+				continue;
+			}
+			const TArray<TSharedPtr<FJsonValue>>* ClassArr = nullptr;
+			if (!NodeObj->TryGetArrayField(TEXT("class"), ClassArr) || !ClassArr)
+			{
+				PreValidationErrors.Add(FString::Printf(TEXT("Node '%s' missing 'class' array"), *NodeId));
+				continue;
+			}
+			DeclaredNodeIds.Add(NodeId);
+		}
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* PreConnsArray = nullptr;
+	if (Spec->TryGetArrayField(TEXT("connections"), PreConnsArray) && PreConnsArray)
+	{
+		for (const auto& ConnVal : *PreConnsArray)
+		{
+			const TSharedPtr<FJsonObject>& ConnObj = ConnVal->AsObject();
+			if (!ConnObj.IsValid()) continue;
+			const FString FromId = ConnObj->GetStringField(TEXT("from"));
+			const FString ToId = ConnObj->GetStringField(TEXT("to"));
+			if (!DeclaredNodeIds.Contains(FromId) || !DeclaredNodeIds.Contains(ToId))
+			{
+				PreValidationErrors.Add(FString::Printf(TEXT("Connection '%s' -> '%s' references undeclared node"), *FromId, *ToId));
+			}
+		}
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* PreGraphInConns = nullptr;
+	if (Spec->TryGetArrayField(TEXT("graph_input_connections"), PreGraphInConns) && PreGraphInConns)
+	{
+		for (const auto& ConnVal : *PreGraphInConns)
+		{
+			const TSharedPtr<FJsonObject>& ConnObj = ConnVal->AsObject();
+			if (!ConnObj.IsValid()) continue;
+			const FString ToNodeId = ConnObj->GetStringField(TEXT("to_node"));
+			if (!DeclaredNodeIds.Contains(ToNodeId))
+			{
+				PreValidationErrors.Add(FString::Printf(TEXT("graph_input_connection target node '%s' not declared"), *ToNodeId));
+			}
+		}
+	}
+
+	const TSharedPtr<FJsonObject>* PreInterfaceConns = nullptr;
+	if (Spec->TryGetObjectField(TEXT("interface_connections"), PreInterfaceConns) && PreInterfaceConns && PreInterfaceConns->IsValid())
+	{
+		for (const auto& Pair : (*PreInterfaceConns)->Values)
+		{
+			const TSharedPtr<FJsonObject>& ConnObj = Pair.Value->AsObject();
+			if (!ConnObj.IsValid()) continue;
+			if (ConnObj->HasField(TEXT("to_node")))
+			{
+				const FString ToNodeId = ConnObj->GetStringField(TEXT("to_node"));
+				if (!DeclaredNodeIds.Contains(ToNodeId))
+				{
+					PreValidationErrors.Add(FString::Printf(TEXT("interface_connection '%s' target node '%s' not declared"), *Pair.Key, *ToNodeId));
+				}
+			}
+			if (ConnObj->HasField(TEXT("from_node")))
+			{
+				const FString FromNodeId = ConnObj->GetStringField(TEXT("from_node"));
+				if (!DeclaredNodeIds.Contains(FromNodeId))
+				{
+					PreValidationErrors.Add(FString::Printf(TEXT("interface_connection '%s' source node '%s' not declared"), *Pair.Key, *FromNodeId));
+				}
+			}
+		}
+	}
+
+	if (bStrictMode && PreValidationErrors.Num() > 0)
+	{
+		FString Msg = TEXT("strict_mode: spec pre-validation failed (asset NOT saved):");
+		for (const FString& E : PreValidationErrors)
+		{
+			Msg += TEXT("\n  - ") + E;
+		}
+		return FMonolithActionResult::Error(Msg);
+	}
+
+	// Tracking arrays — populated during build, returned in skipped_* fields.
+	TArray<TSharedPtr<FJsonValue>> SkippedNodes;
+	TArray<TSharedPtr<FJsonValue>> SkippedInputs;
+	TArray<TSharedPtr<FJsonValue>> SkippedOutputs;
+	TArray<TSharedPtr<FJsonValue>> SkippedConnections;
+	TArray<TSharedPtr<FJsonValue>> SkippedInterfaces;
+	TArray<TSharedPtr<FJsonValue>> SkippedDefaults;
+
+	auto MakeSkipObj = [](const FString& Identifier, const FString& Reason) -> TSharedPtr<FJsonValue>
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("id"), Identifier);
+		Obj->SetStringField(TEXT("reason"), Reason);
+		return MakeShared<FJsonValueObject>(Obj);
+	};
+
 	// 1. Create builder
 	UMetaSoundBuilderSubsystem& Sub = UMetaSoundBuilderSubsystem::GetChecked();
 	EMetaSoundBuilderResult BuildResult;
@@ -1553,12 +1742,15 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 		for (const auto& InterfaceVal : *InterfacesArray)
 		{
 			FString InterfaceName;
-			if (InterfaceVal->TryGetString(InterfaceName))
+			if (!InterfaceVal->TryGetString(InterfaceName) || InterfaceName.IsEmpty())
 			{
-				EMetaSoundBuilderResult InterfaceResult;
-				Builder->AddInterface(FName(*InterfaceName), InterfaceResult);
-				// Silently ignore failures for interfaces already present (e.g. from CreateSourceBuilder)
+				SkippedInterfaces.Add(MakeSkipObj(TEXT("<empty>"), TEXT("Interface name missing or not a string")));
+				continue;
 			}
+			EMetaSoundBuilderResult InterfaceResult;
+			Builder->AddInterface(FName(*InterfaceName), InterfaceResult);
+			// Note: failures here often mean interface already present (e.g. from CreateSourceBuilder)
+			// — not necessarily fatal. We do not log these as skipped to avoid noise.
 		}
 	}
 
@@ -1569,11 +1761,19 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 		for (const auto& InputVal : *InputsArray)
 		{
 			const TSharedPtr<FJsonObject>& InputObj = InputVal->AsObject();
-			if (!InputObj.IsValid()) continue;
+			if (!InputObj.IsValid())
+			{
+				SkippedInputs.Add(MakeSkipObj(TEXT("<invalid>"), TEXT("Input entry is not a JSON object")));
+				continue;
+			}
 
 			const FString InputName = InputObj->GetStringField(TEXT("name"));
 			const FString InputType = InputObj->GetStringField(TEXT("type"));
-			if (InputName.IsEmpty() || InputType.IsEmpty()) continue;
+			if (InputName.IsEmpty() || InputType.IsEmpty())
+			{
+				SkippedInputs.Add(MakeSkipObj(InputName.IsEmpty() ? TEXT("<unnamed>") : InputName, TEXT("Input missing 'name' or 'type'")));
+				continue;
+			}
 
 			FMetasoundFrontendLiteral DefaultLiteral;
 			FString LitError;
@@ -1582,6 +1782,10 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 
 			EMetaSoundBuilderResult InputResult;
 			Builder->AddGraphInputNode(FName(*InputName), FName(*InputType), DefaultLiteral, InputResult);
+			if (InputResult != EMetaSoundBuilderResult::Succeeded)
+			{
+				SkippedInputs.Add(MakeSkipObj(InputName, FString::Printf(TEXT("AddGraphInputNode failed (type='%s')"), *InputType)));
+			}
 		}
 	}
 
@@ -1592,11 +1796,19 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 		for (const auto& OutputVal : *OutputsArray)
 		{
 			const TSharedPtr<FJsonObject>& OutputObj = OutputVal->AsObject();
-			if (!OutputObj.IsValid()) continue;
+			if (!OutputObj.IsValid())
+			{
+				SkippedOutputs.Add(MakeSkipObj(TEXT("<invalid>"), TEXT("Output entry is not a JSON object")));
+				continue;
+			}
 
 			const FString OutputName = OutputObj->GetStringField(TEXT("name"));
 			const FString OutputType = OutputObj->GetStringField(TEXT("type"));
-			if (OutputName.IsEmpty() || OutputType.IsEmpty()) continue;
+			if (OutputName.IsEmpty() || OutputType.IsEmpty())
+			{
+				SkippedOutputs.Add(MakeSkipObj(OutputName.IsEmpty() ? TEXT("<unnamed>") : OutputName, TEXT("Output missing 'name' or 'type'")));
+				continue;
+			}
 
 			FMetasoundFrontendLiteral DefaultLiteral;
 			FString LitError;
@@ -1604,6 +1816,10 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 
 			EMetaSoundBuilderResult OutputResult;
 			Builder->AddGraphOutputNode(FName(*OutputName), FName(*OutputType), DefaultLiteral, OutputResult);
+			if (OutputResult != EMetaSoundBuilderResult::Succeeded)
+			{
+				SkippedOutputs.Add(MakeSkipObj(OutputName, FString::Printf(TEXT("AddGraphOutputNode failed (type='%s')"), *OutputType)));
+			}
 		}
 	}
 
@@ -1617,12 +1833,17 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 		for (const auto& NodeVal : *NodesArray)
 		{
 			const TSharedPtr<FJsonObject>& NodeObj = NodeVal->AsObject();
-			if (!NodeObj.IsValid()) continue;
+			if (!NodeObj.IsValid())
+			{
+				SkippedNodes.Add(MakeSkipObj(TEXT("<invalid>"), TEXT("Node entry is not a JSON object")));
+				continue;
+			}
 
 			const FString NodeId = NodeObj->GetStringField(TEXT("id"));
 			const TArray<TSharedPtr<FJsonValue>>* ClassArr = nullptr;
 			if (!NodeObj->TryGetArrayField(TEXT("class"), ClassArr) || !ClassArr)
 			{
+				SkippedNodes.Add(MakeSkipObj(NodeId.IsEmpty() ? TEXT("<unnamed>") : NodeId, TEXT("Node missing 'class' array")));
 				continue;
 			}
 
@@ -1631,6 +1852,7 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 			if (!ParseNodeClassName(*ClassArr, ClassName, ParseError))
 			{
 				UE_LOG(LogMonolith, Warning, TEXT("build_metasound_from_spec: Skipping node '%s': %s"), *NodeId, *ParseError);
+				SkippedNodes.Add(MakeSkipObj(NodeId, FString::Printf(TEXT("Class parse error: %s"), *ParseError)));
 				continue;
 			}
 
@@ -1641,6 +1863,8 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 			{
 				UE_LOG(LogMonolith, Warning, TEXT("build_metasound_from_spec: Failed to add node '%s' [%s, %s, %s]"),
 					*NodeId, *ClassName.Namespace.ToString(), *ClassName.Name.ToString(), *ClassName.Variant.ToString());
+				SkippedNodes.Add(MakeSkipObj(NodeId, FString::Printf(TEXT("AddNodeByClassName failed [%s.%s.%s]"),
+					*ClassName.Namespace.ToString(), *ClassName.Name.ToString(), *ClassName.Variant.ToString())));
 				continue;
 			}
 
@@ -1657,7 +1881,13 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 					FMetaSoundBuilderNodeInputHandle InputHandle = Builder->FindNodeInputByName(
 						Handle, FName(*DefaultPair.Key), FindResult);
 
-					if (FindResult != EMetaSoundBuilderResult::Succeeded) continue;
+					if (FindResult != EMetaSoundBuilderResult::Succeeded)
+					{
+						SkippedDefaults.Add(MakeSkipObj(
+							FString::Printf(TEXT("%s.%s"), *NodeId, *DefaultPair.Key),
+							TEXT("Pin not found on node — default ignored")));
+						continue;
+					}
 
 					// Try to determine data type from the node's document interface
 					// For simplicity, attempt all scalar types based on JSON value type
@@ -1725,12 +1955,18 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 		for (const auto& ConnVal : *ConnectionsArray)
 		{
 			const TSharedPtr<FJsonObject>& ConnObj = ConnVal->AsObject();
-			if (!ConnObj.IsValid()) continue;
+			if (!ConnObj.IsValid())
+			{
+				SkippedConnections.Add(MakeSkipObj(TEXT("<invalid>"), TEXT("Connection entry is not a JSON object")));
+				continue;
+			}
 
 			const FString FromId = ConnObj->GetStringField(TEXT("from"));
 			const FString OutputName = ConnObj->GetStringField(TEXT("output"));
 			const FString ToId = ConnObj->GetStringField(TEXT("to"));
 			const FString InputName = ConnObj->GetStringField(TEXT("input"));
+
+			const FString ConnIdent = FString::Printf(TEXT("%s.%s -> %s.%s"), *FromId, *OutputName, *ToId, *InputName);
 
 			const FMetaSoundNodeHandle* FromHandle = NodeMap.Find(FromId);
 			const FMetaSoundNodeHandle* ToHandle = NodeMap.Find(ToId);
@@ -1738,6 +1974,9 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 			if (!FromHandle || !ToHandle)
 			{
 				UE_LOG(LogMonolith, Warning, TEXT("build_metasound_from_spec: Connection from '%s' to '%s' — node not found"), *FromId, *ToId);
+				SkippedConnections.Add(MakeSkipObj(ConnIdent, FString::Printf(TEXT("Endpoint node not found (from='%s' present=%s, to='%s' present=%s)"),
+					*FromId, FromHandle ? TEXT("yes") : TEXT("no"),
+					*ToId, ToHandle ? TEXT("yes") : TEXT("no"))));
 				continue;
 			}
 
@@ -1752,6 +1991,7 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 			{
 				UE_LOG(LogMonolith, Warning, TEXT("build_metasound_from_spec: Failed to connect %s.%s -> %s.%s"),
 					*FromId, *OutputName, *ToId, *InputName);
+				SkippedConnections.Add(MakeSkipObj(ConnIdent, TEXT("ConnectNodes failed (pin name/type mismatch?)")));
 			}
 		}
 	}
@@ -1763,16 +2003,23 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 		for (const auto& ConnVal : *GraphInputConns)
 		{
 			const TSharedPtr<FJsonObject>& ConnObj = ConnVal->AsObject();
-			if (!ConnObj.IsValid()) continue;
+			if (!ConnObj.IsValid())
+			{
+				SkippedConnections.Add(MakeSkipObj(TEXT("<invalid graph_input>"), TEXT("graph_input_connection entry is not a JSON object")));
+				continue;
+			}
 
 			const FString GraphInputName = ConnObj->GetStringField(TEXT("input"));
 			const FString ToNodeId = ConnObj->GetStringField(TEXT("to_node"));
 			const FString ToPinName = ConnObj->GetStringField(TEXT("to_pin"));
 
+			const FString ConnIdent = FString::Printf(TEXT("graph_input '%s' -> %s.%s"), *GraphInputName, *ToNodeId, *ToPinName);
+
 			const FMetaSoundNodeHandle* ToHandle = NodeMap.Find(ToNodeId);
 			if (!ToHandle)
 			{
 				UE_LOG(LogMonolith, Warning, TEXT("build_metasound_from_spec: graph_input_connection to '%s' — node not found"), *ToNodeId);
+				SkippedConnections.Add(MakeSkipObj(ConnIdent, FString::Printf(TEXT("Target node '%s' not found"), *ToNodeId)));
 				continue;
 			}
 
@@ -1781,6 +2028,10 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 			if (ConnResult == EMetaSoundBuilderResult::Succeeded)
 			{
 				ConnectionCount++;
+			}
+			else
+			{
+				SkippedConnections.Add(MakeSkipObj(ConnIdent, TEXT("ConnectGraphInputToNode failed")));
 			}
 		}
 	}
@@ -1793,7 +2044,11 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 		{
 			const FString& InterfacePinName = Pair.Key;
 			const TSharedPtr<FJsonObject>& ConnObj = Pair.Value->AsObject();
-			if (!ConnObj.IsValid()) continue;
+			if (!ConnObj.IsValid())
+			{
+				SkippedInterfaces.Add(MakeSkipObj(InterfacePinName, TEXT("Connection value is not a JSON object")));
+				continue;
+			}
 
 			// Input connections: interface provides a trigger/value → connect to a node input
 			if (ConnObj->HasField(TEXT("to_node")))
@@ -1805,6 +2060,9 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 				if (!ToHandle)
 				{
 					UE_LOG(LogMonolith, Warning, TEXT("build_metasound_from_spec: interface_connection '%s' -> '%s' — node not found"), *InterfacePinName, *ToNodeId);
+					SkippedInterfaces.Add(MakeSkipObj(
+						FString::Printf(TEXT("%s -> %s.%s"), *InterfacePinName, *ToNodeId, *ToPinName),
+						FString::Printf(TEXT("Target node '%s' not found"), *ToNodeId)));
 					continue;
 				}
 
@@ -1823,6 +2081,12 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 				{
 					ConnectionCount++;
 				}
+				else
+				{
+					SkippedInterfaces.Add(MakeSkipObj(
+						FString::Printf(TEXT("%s -> %s.%s"), *InterfacePinName, *ToNodeId, *ToPinName),
+						TEXT("ConnectGraphInputToNode failed for interface input")));
+				}
 			}
 
 			// Output connections: node output → connect to interface output (graph output)
@@ -1835,6 +2099,9 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 				if (!FromHandle)
 				{
 					UE_LOG(LogMonolith, Warning, TEXT("build_metasound_from_spec: interface_connection from '%s' — node not found"), *FromNodeId);
+					SkippedInterfaces.Add(MakeSkipObj(
+						FString::Printf(TEXT("%s.%s -> %s"), *FromNodeId, *FromPinName, *InterfacePinName),
+						FString::Printf(TEXT("Source node '%s' not found"), *FromNodeId)));
 					continue;
 				}
 
@@ -1851,8 +2118,25 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 				{
 					ConnectionCount++;
 				}
+				else
+				{
+					SkippedInterfaces.Add(MakeSkipObj(
+						FString::Printf(TEXT("%s.%s -> %s"), *FromNodeId, *FromPinName, *InterfacePinName),
+						TEXT("ConnectNodeToGraphOutput failed for interface output")));
+				}
 			}
 		}
+	}
+
+	// 8b. strict_mode bail-out — if anything was skipped, refuse to save.
+	const int32 TotalSkipped = SkippedNodes.Num() + SkippedInputs.Num() + SkippedOutputs.Num()
+		+ SkippedConnections.Num() + SkippedInterfaces.Num() + SkippedDefaults.Num();
+	if (bStrictMode && TotalSkipped > 0)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("strict_mode: %d items skipped during build (nodes=%d, inputs=%d, outputs=%d, connections=%d, interfaces=%d, defaults=%d) — asset NOT saved. Re-run with strict_mode=false to inspect skipped_* arrays."),
+			TotalSkipped, SkippedNodes.Num(), SkippedInputs.Num(), SkippedOutputs.Num(),
+			SkippedConnections.Num(), SkippedInterfaces.Num(), SkippedDefaults.Num()));
 	}
 
 	// 9. Auto-layout
@@ -1878,6 +2162,17 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::BuildMetaSoundFromSpec(con
 	ResultJson->SetStringField(TEXT("asset_path"), NewAsset.GetObject()->GetPathName());
 	ResultJson->SetNumberField(TEXT("node_count"), NodeCount);
 	ResultJson->SetNumberField(TEXT("connection_count"), ConnectionCount);
+	ResultJson->SetArrayField(TEXT("skipped_nodes"), SkippedNodes);
+	ResultJson->SetArrayField(TEXT("skipped_inputs"), SkippedInputs);
+	ResultJson->SetArrayField(TEXT("skipped_outputs"), SkippedOutputs);
+	ResultJson->SetArrayField(TEXT("skipped_connections"), SkippedConnections);
+	ResultJson->SetArrayField(TEXT("skipped_interfaces"), SkippedInterfaces);
+	ResultJson->SetArrayField(TEXT("skipped_defaults"), SkippedDefaults);
+	if (TotalSkipped > 0)
+	{
+		ResultJson->SetStringField(TEXT("warning"), FString::Printf(
+			TEXT("%d spec items were skipped during build — see skipped_* arrays. Use strict_mode=true to abort instead."), TotalSkipped));
+	}
 	return FMonolithActionResult::Success(ResultJson);
 }
 
@@ -2640,7 +2935,7 @@ FMonolithActionResult FMonolithAudioMetaSoundActions::SetMetaSoundNodeLocation(c
 	}
 
 	FMetaSoundNodeHandle NodeHandle;
-	if (!ResolveNodeHandle(Builder, NodeIdStr, NodeHandle, Error))
+	if (!ResolveNodeHandle(Builder, NodeIdStr, NodeHandle, Error, AssetPath))
 	{
 		return FMonolithActionResult::Error(Error);
 	}
