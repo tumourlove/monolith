@@ -1,10 +1,12 @@
 #include "MonolithBlueprintEditCradle.h"
 #include "UObject/UnrealType.h"
+#include "UObject/Package.h"
+#include "Templates/Function.h"
 
 namespace MonolithEditCradle
 {
 
-bool MayContainObjectRef(FProperty* Prop)
+static bool MayContainObjectRef(FProperty* Prop)
 {
     if (!Prop) return false;
     if (CastField<FObjectProperty>(Prop))     return true;
@@ -49,127 +51,84 @@ static bool IsObjectRefLeaf(FProperty* Prop)
         || CastField<FInterfaceProperty>(Prop);
 }
 
-void FireCradleRecursive(
-    UObject* Obj,
+using FObjectRefLeafVisitor = TFunctionRef<void(
+    FProperty* LeafProp,
+    const void* LeafValuePtr,
+    const TArray<FProperty*>& Chain)>;
+
+/**
+ * Walks Prop's property tree, invoking Visitor at every object-ref leaf.
+ * ContainerPtr is the container-of-Prop: the UObject at the top, the enclosing
+ * struct / array element / map slot as we descend. Chain accumulates the
+ * root→leaf property path for cradle callers; reparent callers ignore it.
+ */
+static void WalkObjectRefLeaves(
     FProperty* Prop,
     const void* ContainerPtr,
-    TArray<FProperty*>& ParentChain)
+    TArray<FProperty*>& Chain,
+    const FObjectRefLeafVisitor& Visitor)
 {
-    // IMPORTANT: ContainerPtr is the container of Prop, not the UObject.
-    // For top-level: ContainerPtr == UObject*.
-    // For nested struct fields: ContainerPtr == struct value pointer.
     const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(ContainerPtr);
 
-    // --- Struct: iterate members ---
+    auto VisitInner = [&](FProperty* Inner, const void* InnerContainerPtr)
+    {
+        Chain.Add(Inner);
+
+        if (IsObjectRefLeaf(Inner))
+        {
+            const void* LeafValuePtr = Inner->ContainerPtrToValuePtr<void>(InnerContainerPtr);
+            Visitor(Inner, LeafValuePtr, Chain);
+        }
+        else if (MayContainObjectRef(Inner))
+        {
+            WalkObjectRefLeaves(Inner, InnerContainerPtr, Chain, Visitor);
+        }
+
+        Chain.Pop();
+    };
+
     if (const FStructProperty* StructProp = CastField<FStructProperty>(Prop))
     {
         for (TFieldIterator<FProperty> It(StructProp->Struct); It; ++It)
         {
-            FProperty* Inner = *It;
-
-            ParentChain.Add(Inner);
-
-            if (IsObjectRefLeaf(Inner))
-            {
-                FireEditNotification(Obj, ParentChain);
-            }
-
-            if (MayContainObjectRef(Inner) && !IsObjectRefLeaf(Inner))
-            {
-                // NOTE: ValuePtr is the struct's value — it becomes the
-                // container for inner properties (their offsets are relative
-                // to the struct, not the UObject).
-                FireCradleRecursive(Obj, Inner, ValuePtr, ParentChain);
-            }
-
-            ParentChain.Pop();
+            VisitInner(*It, ValuePtr);
         }
     }
-
-    // --- Array: iterate elements ---
     else if (const FArrayProperty* ArrayProp = CastField<FArrayProperty>(Prop))
     {
         FScriptArrayHelper Helper(ArrayProp, ValuePtr);
-        FProperty* Inner = ArrayProp->Inner;
-
         for (int32 i = 0; i < Helper.Num(); ++i)
         {
-            const void* ElemPtr = Helper.GetRawPtr(i);
-
-            ParentChain.Add(Inner);
-
-            if (IsObjectRefLeaf(Inner))
-            {
-                FireEditNotification(Obj, ParentChain);
-            }
-
-            if (MayContainObjectRef(Inner) && !IsObjectRefLeaf(Inner))
-            {
-                // ElemPtr is the element value — container for inner's sub-props
-                FireCradleRecursive(Obj, Inner, ElemPtr, ParentChain);
-            }
-
-            ParentChain.Pop();
+            // ArrayProp->Inner has offset 0 within each element, so ElemPtr
+            // serves as both the container for Inner and Inner's value pointer.
+            VisitInner(ArrayProp->Inner, Helper.GetRawPtr(i));
         }
     }
-
-    // --- Map: iterate entries (key + value) ---
     else if (const FMapProperty* MapProp = CastField<FMapProperty>(Prop))
     {
+        // Sparse storage: iterate to GetMaxIndex, not Num (UnrealType.h:4579).
         FScriptMapHelper Helper(MapProp, ValuePtr);
-
-        for (int32 i = 0; i < Helper.Num(); ++i)
+        for (int32 i = 0; i < Helper.GetMaxIndex(); ++i)
         {
             if (!Helper.IsValidIndex(i)) continue;
-
-            // Process both key and value properties
-            for (FProperty* Inner : { MapProp->KeyProp, MapProp->ValueProp })
-            {
-                const void* Ptr = (Inner == MapProp->KeyProp)
-                    ? Helper.GetKeyPtr(i) : Helper.GetValuePtr(i);
-
-                ParentChain.Add(Inner);
-
-                if (IsObjectRefLeaf(Inner))
-                {
-                    FireEditNotification(Obj, ParentChain);
-                }
-
-                if (MayContainObjectRef(Inner) && !IsObjectRefLeaf(Inner))
-                {
-                    FireCradleRecursive(Obj, Inner, Ptr, ParentChain);
-                }
-
-                ParentChain.Pop();
-            }
+            // KeyProp has offset 0, ValueProp has offset MapLayout.ValueOffset within
+            // each hash-pair slot (FMapProperty::LinkInternal in PropertyMap.cpp:226).
+            // Pass PairPtr as the shared container so ContainerPtrToValuePtr resolves
+            // Key to PairPtr+0 and Value to PairPtr+ValueOffset. Passing GetValuePtr(i)
+            // directly would double-offset (GetValuePtr already bakes in ValueOffset).
+            const void* PairPtr = Helper.GetPairPtr(i);
+            VisitInner(MapProp->KeyProp,   PairPtr);
+            VisitInner(MapProp->ValueProp, PairPtr);
         }
     }
-
-    // --- Set: iterate elements ---
     else if (const FSetProperty* SetProp = CastField<FSetProperty>(Prop))
     {
+        // Sparse storage: see map case.
         FScriptSetHelper Helper(SetProp, ValuePtr);
-        FProperty* Inner = SetProp->ElementProp;
-
-        for (int32 i = 0; i < Helper.Num(); ++i)
+        for (int32 i = 0; i < Helper.GetMaxIndex(); ++i)
         {
             if (!Helper.IsValidIndex(i)) continue;
-
-            const void* ElemPtr = Helper.GetElementPtr(i);
-
-            ParentChain.Add(Inner);
-
-            if (IsObjectRefLeaf(Inner))
-            {
-                FireEditNotification(Obj, ParentChain);
-            }
-
-            if (MayContainObjectRef(Inner) && !IsObjectRefLeaf(Inner))
-            {
-                FireCradleRecursive(Obj, Inner, ElemPtr, ParentChain);
-            }
-
-            ParentChain.Pop();
+            VisitInner(SetProp->ElementProp, Helper.GetElementPtr(i));
         }
     }
 }
@@ -190,7 +149,56 @@ void FireFullCradle(UObject* Obj, FProperty* Prop)
     if (MayContainObjectRef(Prop))
     {
         TArray<FProperty*> Chain = { Prop };
-        FireCradleRecursive(Obj, Prop, Obj, Chain);
+        WalkObjectRefLeaves(Prop, Obj, Chain,
+            [Obj](FProperty*, const void*, const TArray<FProperty*>& CurrentChain)
+            {
+                FireEditNotification(Obj, CurrentChain);
+            });
+    }
+}
+
+// --- Reparent transient-outer inline subobjects ---
+
+static bool IsInstancedObjectLeaf(FProperty* Prop)
+{
+    if (const FObjectProperty* ObjProp = CastField<FObjectProperty>(Prop))
+    {
+        return ObjProp->HasAnyPropertyFlags(CPF_InstancedReference | CPF_PersistentInstance);
+    }
+    return false;
+}
+
+static void ReparentIfTransient(UObject* TargetObject, UObject* Sub)
+{
+    if (!Sub) return;
+    if (Sub->GetOutermost() != GetTransientPackage()) return;
+    Sub->Rename(nullptr, TargetObject, REN_DontCreateRedirectors | REN_NonTransactional);
+}
+
+void ReparentTransientInstancedSubobjects(UObject* TargetObject, FProperty* Prop)
+{
+    if (!TargetObject || !Prop) return;
+
+    if (IsInstancedObjectLeaf(Prop))
+    {
+        const FObjectProperty* ObjProp = CastFieldChecked<FObjectProperty>(Prop);
+        UObject* Sub = ObjProp->GetObjectPropertyValue(
+            Prop->ContainerPtrToValuePtr<void>(TargetObject));
+        ReparentIfTransient(TargetObject, Sub);
+        return;
+    }
+
+    if (MayContainObjectRef(Prop))
+    {
+        TArray<FProperty*> Chain = { Prop };
+        WalkObjectRefLeaves(Prop, TargetObject, Chain,
+            [TargetObject](FProperty* LeafProp, const void* LeafValuePtr, const TArray<FProperty*>&)
+            {
+                if (!IsInstancedObjectLeaf(LeafProp)) return;
+                const FObjectProperty* ObjProp = CastFieldChecked<FObjectProperty>(LeafProp);
+                UObject* Sub = ObjProp->GetObjectPropertyValue(LeafValuePtr);
+                ReparentIfTransient(TargetObject, Sub);
+            });
     }
 }
 

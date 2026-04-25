@@ -836,8 +836,6 @@ FMonolithActionResult FMonolithBlueprintStructActions::HandleCreateDataAsset(con
 	}
 
 	// Fire edit cradle on all properties — initializes FOverridableManager state (#29).
-	// Uses FireFullCradle (not FireCradleRecursive directly) so the root property is
-	// included in every notification chain.
 	NewAsset->SetFlags(RF_Transactional);
 	FScopedTransaction Transaction(NSLOCTEXT("MonolithBlueprintStructActions",
 		"CreateDataAsset", "Monolith Create Data Asset"));

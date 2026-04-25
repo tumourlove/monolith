@@ -409,6 +409,11 @@ FMonolithActionResult FMonolithBlueprintCDOActions::HandleSetCDOProperty(const T
 		}
 	}
 
+	// FJsonObjectConverter outers new subobjects to /Engine/Transient when its container
+	// isn't a UObject (JsonObjectConverter.cpp:964); FLinkerSave drops those refs at save.
+	// Reparent before FireFullCradle so the cradle's Pre/Post fires on correct outers.
+	MonolithEditCradle::ReparentTransientInstancedSubobjects(TargetObject, Prop);
+
 	// Recursive cradle: fires PostEditChangeChainProperty for every nested
 	// sub-property that contains an object reference, ensuring FOverridableManager
 	// marks each inner TObjectPtr as overridden.
