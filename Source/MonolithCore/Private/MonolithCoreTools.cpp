@@ -49,9 +49,14 @@ void FMonolithCoreTools::RegisterAll()
 		NsProp->SetStringField(TEXT("description"), TEXT("Optional: filter to a specific namespace"));
 		Schema->SetObjectField(TEXT("namespace"), NsProp);
 
+		TSharedPtr<FJsonObject> CatProp = MakeShared<FJsonObject>();
+		CatProp->SetStringField(TEXT("type"), TEXT("string"));
+		CatProp->SetStringField(TEXT("description"), TEXT("Optional: filter actions within the namespace by category (e.g. 'CommonUI' inside 'ui')"));
+		Schema->SetObjectField(TEXT("category"), CatProp);
+
 		Registry.RegisterAction(
 			TEXT("monolith"), TEXT("discover"),
-			TEXT("List available tool namespaces and their actions. Pass namespace to filter."),
+			TEXT("List available tool namespaces and their actions. Pass namespace (and optional category) to filter."),
 			FMonolithActionHandler::CreateStatic(&FMonolithCoreTools::HandleDiscover),
 			Schema
 		);
@@ -98,9 +103,11 @@ FMonolithActionResult FMonolithCoreTools::HandleDiscover(const TSharedPtr<FJsonO
 	FMonolithToolRegistry& Registry = FMonolithToolRegistry::Get();
 
 	FString FilterNamespace;
+	FString FilterCategory;
 	if (Params.IsValid())
 	{
 		Params->TryGetStringField(TEXT("namespace"), FilterNamespace);
+		Params->TryGetStringField(TEXT("category"), FilterCategory);
 	}
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
@@ -165,13 +172,30 @@ FMonolithActionResult FMonolithCoreTools::HandleDiscover(const TSharedPtr<FJsonO
 			);
 		}
 
+		// Apply optional category filter (only meaningful when namespace is specified).
+		if (!FilterCategory.IsEmpty())
+		{
+			Actions = Actions.FilterByPredicate([&FilterCategory](const FMonolithActionInfo& Info)
+			{
+				return Info.Category.Equals(FilterCategory, ESearchCase::IgnoreCase);
+			});
+		}
+
 		Result->SetStringField(TEXT("namespace"), FilterNamespace);
+		if (!FilterCategory.IsEmpty())
+		{
+			Result->SetStringField(TEXT("category"), FilterCategory);
+		}
 		TArray<TSharedPtr<FJsonValue>> ActionArray;
 		for (const FMonolithActionInfo& ActionInfo : Actions)
 		{
 			TSharedPtr<FJsonObject> ActionObj = MakeShared<FJsonObject>();
 			ActionObj->SetStringField(TEXT("action"), ActionInfo.Action);
 			ActionObj->SetStringField(TEXT("description"), ActionInfo.Description);
+			if (!ActionInfo.Category.IsEmpty())
+			{
+				ActionObj->SetStringField(TEXT("category"), ActionInfo.Category);
+			}
 			if (ActionInfo.ParamSchema.IsValid())
 			{
 				ActionObj->SetObjectField(TEXT("params"), ActionInfo.ParamSchema);

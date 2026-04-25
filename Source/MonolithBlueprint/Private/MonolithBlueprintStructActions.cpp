@@ -13,6 +13,8 @@
 #include "Engine/DataTable.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "MonolithBlueprintEditCradle.h"
+#include "ScopedTransaction.h"
 
 // ============================================================
 //  Registration
@@ -831,6 +833,20 @@ FMonolithActionResult FMonolithBlueprintStructActions::HandleCreateDataAsset(con
 	{
 		return FMonolithActionResult::Error(FString::Printf(
 			TEXT("NewObject failed for class '%s' at path '%s'."), *ResolvedClass->GetName(), *SavePath));
+	}
+
+	// Fire edit cradle on all properties — initializes FOverridableManager state (#29).
+	NewAsset->SetFlags(RF_Transactional);
+	FScopedTransaction Transaction(NSLOCTEXT("MonolithBlueprintStructActions",
+		"CreateDataAsset", "Monolith Create Data Asset"));
+	NewAsset->Modify();
+
+	for (TFieldIterator<FProperty> It(ResolvedClass); It; ++It)
+	{
+		FProperty* Prop = *It;
+		if (Prop->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated))
+			continue;
+		MonolithEditCradle::FireFullCradle(NewAsset, Prop);
 	}
 
 	// Read skip_save param

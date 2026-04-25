@@ -6,6 +6,9 @@
 #include "HttpServerModule.h"
 #include "HttpServerResponse.h"
 #include "GenericPlatform/GenericPlatformProcess.h"
+#include "SocketSubsystem.h"
+#include "Sockets.h"
+#include "IPAddress.h"
 
 FMonolithHttpServer::FMonolithHttpServer()
 {
@@ -24,63 +27,76 @@ bool FMonolithHttpServer::Start(int32 Port)
 		return true;
 	}
 
-	HttpRouter = FHttpServerModule::Get().GetHttpRouter(Port, true);
-	if (!HttpRouter.IsValid())
+	// On a fresh editor launch, the OS keeps the port in TIME_WAIT for up to
+	// 2*MSL (~30s on macOS/Linux) after the previous editor shut down. UE's
+	// HttpServerModule also caches a broken listener internally and won't
+	// rebind until StopAllListeners() is called. Budget ~40s total so a
+	// rapid close+reopen cycle doesn't drop the MCP server on the floor.
+	constexpr int32 MaxAttempts = 20;
+	constexpr float BackoffSeconds = 2.0f;
+
+	for (int32 Attempt = 1; Attempt <= MaxAttempts; ++Attempt)
 	{
-		UE_LOG(LogMonolith, Error, TEXT("Failed to get HTTP router on port %d — port may be in use"), Port);
-		return false;
+		if (Attempt > 1)
+		{
+			UE_LOG(LogMonolith, Warning, TEXT("HTTP bind attempt %d/%d on port %d — waiting %.1fs"),
+				Attempt, MaxAttempts, Port, BackoffSeconds);
+			FPlatformProcess::Sleep(BackoffSeconds);
+
+			// Drop our router handle + routes so GetHttpRouter can evict failed listener.
+			if (HttpRouter.IsValid())
+			{
+				for (const FHttpRouteHandle& Handle : RouteHandles)
+				{
+					HttpRouter->UnbindRoute(Handle);
+				}
+			}
+			RouteHandles.Empty();
+			HttpRouter.Reset();
+
+			// Full module reset — the HttpServerModule caches a failed listener
+			// and refuses to re-bind the same port until we explicitly stop it.
+			FHttpServerModule::Get().StopAllListeners();
+		}
+
+		HttpRouter = FHttpServerModule::Get().GetHttpRouter(Port, true);
+		if (!HttpRouter.IsValid())
+		{
+			UE_LOG(LogMonolith, Warning, TEXT("GetHttpRouter failed on port %d (attempt %d)"), Port, Attempt);
+			continue;
+		}
+
+		BindRoutes();
+		FHttpServerModule::Get().StartAllListeners();
+
+		// Brief wait for OS to complete bind before probing
+		FPlatformProcess::Sleep(0.1f);
+
+		if (ProbePort(Port))
+		{
+			bIsRunning = true;
+			BoundPort = Port;
+			StartTime = FDateTime::UtcNow();
+			UE_LOG(LogMonolith, Log, TEXT("Monolith MCP server listening on port %d (attempt %d)"), Port, Attempt);
+			return true;
+		}
+
+		UE_LOG(LogMonolith, Warning, TEXT("Port %d not listening after StartAllListeners (attempt %d)"), Port, Attempt);
 	}
 
-	// Bind POST /mcp — main JSON-RPC endpoint
-	RouteHandles.Add(HttpRouter->BindRoute(
-		FHttpPath(TEXT("/mcp")),
-		EHttpServerRequestVerbs::VERB_POST,
-		FHttpRequestHandler::CreateRaw(this, &FMonolithHttpServer::HandlePostMcp)
-	));
-
-	// Bind GET /mcp — SSE endpoint for server notifications
-	RouteHandles.Add(HttpRouter->BindRoute(
-		FHttpPath(TEXT("/mcp")),
-		EHttpServerRequestVerbs::VERB_GET,
-		FHttpRequestHandler::CreateRaw(this, &FMonolithHttpServer::HandleGetMcp)
-	));
-
-	// Bind DELETE /mcp — session termination
-	RouteHandles.Add(HttpRouter->BindRoute(
-		FHttpPath(TEXT("/mcp")),
-		EHttpServerRequestVerbs::VERB_DELETE,
-		FHttpRequestHandler::CreateRaw(this, &FMonolithHttpServer::HandleDeleteMcp)
-	));
-
-	// Bind OPTIONS /mcp — CORS preflight
-	RouteHandles.Add(HttpRouter->BindRoute(
-		FHttpPath(TEXT("/mcp")),
-		EHttpServerRequestVerbs::VERB_OPTIONS,
-		FHttpRequestHandler::CreateRaw(this, &FMonolithHttpServer::HandleOptions)
-	));
-
-	// Bind GET /health — lightweight health check (no JSON-RPC)
-	RouteHandles.Add(HttpRouter->BindRoute(
-		FHttpPath(TEXT("/health")),
-		EHttpServerRequestVerbs::VERB_GET,
-		FHttpRequestHandler::CreateRaw(this, &FMonolithHttpServer::HandleHealthCheck)
-	));
-
-	// Bind OPTIONS /health — CORS preflight
-	RouteHandles.Add(HttpRouter->BindRoute(
-		FHttpPath(TEXT("/health")),
-		EHttpServerRequestVerbs::VERB_OPTIONS,
-		FHttpRequestHandler::CreateRaw(this, &FMonolithHttpServer::HandleOptions)
-	));
-
-	FHttpServerModule::Get().StartAllListeners();
-
-	bIsRunning = true;
-	BoundPort = Port;
-	StartTime = FDateTime::UtcNow();
-
-	UE_LOG(LogMonolith, Log, TEXT("Monolith MCP server started on port %d"), Port);
-	return true;
+	UE_LOG(LogMonolith, Error, TEXT("Failed to bind Monolith MCP server on port %d after %d attempts (~%ds total)"),
+		Port, MaxAttempts, static_cast<int32>(MaxAttempts * BackoffSeconds));
+	// Clean up
+	if (HttpRouter.IsValid())
+	{
+		for (const FHttpRouteHandle& Handle : RouteHandles)
+		{
+			HttpRouter->UnbindRoute(Handle);
+		}
+	}
+	RouteHandles.Empty();
+	HttpRouter.Reset();
+	return false;
 }
 
 void FMonolithHttpServer::Stop()
@@ -104,6 +120,83 @@ void FMonolithHttpServer::Stop()
 
 	bIsRunning = false;
 	UE_LOG(LogMonolith, Log, TEXT("Monolith MCP server stopped"));
+}
+
+void FMonolithHttpServer::BindRoutes()
+{
+	if (!HttpRouter.IsValid()) return;
+
+	RouteHandles.Add(HttpRouter->BindRoute(
+		FHttpPath(TEXT("/mcp")),
+		EHttpServerRequestVerbs::VERB_POST,
+		FHttpRequestHandler::CreateRaw(this, &FMonolithHttpServer::HandlePostMcp)));
+
+	RouteHandles.Add(HttpRouter->BindRoute(
+		FHttpPath(TEXT("/mcp")),
+		EHttpServerRequestVerbs::VERB_GET,
+		FHttpRequestHandler::CreateRaw(this, &FMonolithHttpServer::HandleGetMcp)));
+
+	RouteHandles.Add(HttpRouter->BindRoute(
+		FHttpPath(TEXT("/mcp")),
+		EHttpServerRequestVerbs::VERB_DELETE,
+		FHttpRequestHandler::CreateRaw(this, &FMonolithHttpServer::HandleDeleteMcp)));
+
+	RouteHandles.Add(HttpRouter->BindRoute(
+		FHttpPath(TEXT("/mcp")),
+		EHttpServerRequestVerbs::VERB_OPTIONS,
+		FHttpRequestHandler::CreateRaw(this, &FMonolithHttpServer::HandleOptions)));
+
+	RouteHandles.Add(HttpRouter->BindRoute(
+		FHttpPath(TEXT("/health")),
+		EHttpServerRequestVerbs::VERB_GET,
+		FHttpRequestHandler::CreateRaw(this, &FMonolithHttpServer::HandleHealthCheck)));
+
+	RouteHandles.Add(HttpRouter->BindRoute(
+		FHttpPath(TEXT("/health")),
+		EHttpServerRequestVerbs::VERB_OPTIONS,
+		FHttpRequestHandler::CreateRaw(this, &FMonolithHttpServer::HandleOptions)));
+}
+
+bool FMonolithHttpServer::ProbePort(int32 Port)
+{
+	ISocketSubsystem* SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+	if (!SocketSubsystem) return false;
+
+	TSharedRef<FInternetAddr> Addr = SocketSubsystem->CreateInternetAddr();
+	bool bValid = false;
+	Addr->SetIp(TEXT("127.0.0.1"), bValid);
+	if (!bValid) return false;
+	Addr->SetPort(Port);
+
+	FSocket* Socket = SocketSubsystem->CreateSocket(NAME_Stream, TEXT("MonolithProbe"), false);
+	if (!Socket) return false;
+
+	Socket->SetNonBlocking(false);
+	const bool bConnected = Socket->Connect(*Addr);
+	Socket->Close();
+	SocketSubsystem->DestroySocket(Socket);
+	return bConnected;
+}
+
+bool FMonolithHttpServer::Restart(int32 Port)
+{
+	// Unbind our routes
+	if (HttpRouter.IsValid())
+	{
+		for (const FHttpRouteHandle& Handle : RouteHandles)
+		{
+			HttpRouter->UnbindRoute(Handle);
+		}
+	}
+	RouteHandles.Empty();
+	HttpRouter.Reset();
+
+	// Full stop — safe here because we own the listener
+	FHttpServerModule::Get().StopAllListeners();
+
+	bIsRunning = false;
+	BoundPort = 0;
+	return Start(Port);
 }
 
 // ============================================================================

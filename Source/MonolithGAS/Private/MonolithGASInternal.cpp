@@ -1,4 +1,5 @@
 #include "MonolithGASInternal.h"
+#include "MonolithPackagePathValidator.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/Engine.h"
@@ -57,6 +58,14 @@ UPackage* GetOrCreatePackage(const FString& SavePath, FString& OutError)
 	else if (!PackageName.StartsWith(TEXT("/")))
 	{
 		PackageName = TEXT("/Game/") + PackageName;
+	}
+
+	// Defensive: reject malformed paths (e.g. "//Game/...") before CreatePackage asserts and kills the editor.
+	if (const FString ValidationError = MonolithCore::ValidatePackagePath(PackageName); !ValidationError.IsEmpty())
+	{
+		UE_LOG(LogMonolithGAS, Warning, TEXT("GetOrCreatePackage rejected path: %s"), *ValidationError);
+		OutError = ValidationError;
+		return nullptr;
 	}
 
 	UPackage* Package = CreatePackage(*PackageName);

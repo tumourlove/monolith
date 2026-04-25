@@ -12,7 +12,8 @@ void FMonolithToolRegistry::RegisterAction(
 	const FString& Action,
 	const FString& Description,
 	const FMonolithActionHandler& Handler,
-	const TSharedPtr<FJsonObject>& ParamSchema)
+	const TSharedPtr<FJsonObject>& ParamSchema,
+	const FString& Category)
 {
 	FScopeLock Lock(&RegistryLock);
 
@@ -27,6 +28,7 @@ void FMonolithToolRegistry::RegisterAction(
 	RegAction.Info.Namespace = Namespace;
 	RegAction.Info.Action = Action;
 	RegAction.Info.Description = Description;
+	RegAction.Info.Category = Category;
 	RegAction.Info.ParamSchema = ParamSchema;
 	RegAction.Handler = Handler;
 

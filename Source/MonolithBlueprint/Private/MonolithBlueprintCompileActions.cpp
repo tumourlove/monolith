@@ -16,6 +16,8 @@
 #include "EdGraphNode_Comment.h"
 #include "EdGraphSchema_K2.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "MonolithBlueprintEditCradle.h"
+#include "ScopedTransaction.h"
 
 // ============================================================
 //  Registration
@@ -470,6 +472,24 @@ FMonolithActionResult FMonolithBlueprintCompileActions::HandleCreateBlueprint(co
 	// partially initialized state.  Serialization walks every sub-object
 	// through IsValidChecked() which asserts if any inner UObject is null.
 	FKismetEditorUtilities::CompileBlueprint(NewBP, EBlueprintCompileOptions::SkipGarbageCollection);
+
+	// Fire edit cradle on CDO properties after compile (#29).
+	// Uses FireFullCradle so root property is included in notification chain.
+	UObject* CDO = NewBP->GeneratedClass ? NewBP->GeneratedClass->GetDefaultObject() : nullptr;
+	if (CDO)
+	{
+		CDO->SetFlags(RF_Transactional);
+		FScopedTransaction Transaction(NSLOCTEXT("MonolithBlueprintCompileActions",
+			"CreateBlueprint", "Monolith Create Blueprint"));
+		CDO->Modify();
+		for (TFieldIterator<FProperty> It(CDO->GetClass()); It; ++It)
+		{
+			FProperty* Prop = *It;
+			if (Prop->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated))
+				continue;
+			MonolithEditCradle::FireFullCradle(CDO, Prop);
+		}
+	}
 
 	Package->MarkPackageDirty();
 	FAssetRegistryModule::AssetCreated(NewBP);

@@ -379,7 +379,10 @@ FMonolithActionResult FMonolithMeshDecalActions::PlaceDecals(const TSharedPtr<FJ
 			return FMonolithActionResult::Error(TEXT("Must provide either 'locations' (array of [x,y,z]) or 'region' ({center, extent}) with 'count'"));
 		}
 
-		FVector Center, Extent;
+		// Default-init to silence MSVC C4701 — ParseVector's || short-circuit + early return
+		// makes use-after-unset unreachable, but MSVC's flow analyzer can't prove it.
+		FVector Center = FVector::ZeroVector;
+		FVector Extent = FVector::ZeroVector;
 		if (!MonolithMeshUtils::ParseVector(*RegionObj, TEXT("center"), Center) ||
 			!MonolithMeshUtils::ParseVector(*RegionObj, TEXT("extent"), Extent))
 		{

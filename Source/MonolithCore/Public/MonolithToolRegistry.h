@@ -38,6 +38,7 @@ struct FMonolithActionInfo
 	FString Namespace;
 	FString Action;
 	FString Description;
+	FString Category;                     // Optional sub-grouping within a namespace (e.g. "CommonUI" inside "ui"). Empty = uncategorized.
 	TSharedPtr<FJsonObject> ParamSchema;  // JSON Schema for parameter validation
 };
 
@@ -63,7 +64,8 @@ public:
 		const FString& Action,
 		const FString& Description,
 		const FMonolithActionHandler& Handler,
-		const TSharedPtr<FJsonObject>& ParamSchema = nullptr
+		const TSharedPtr<FJsonObject>& ParamSchema = nullptr,
+		const FString& Category = FString()  // Optional sub-group within namespace — defaults to uncategorized
 	);
 
 	/** Unregister all actions in a namespace (called during module shutdown) */

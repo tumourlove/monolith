@@ -18,4 +18,6 @@ private:
 	static FMonolithActionResult HandleAddAnimGraphNode(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleConnectAnimGraphPins(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleSetStateAnimation(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleAddVariableGet(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSetAnimGraphNodeProperty(const TSharedPtr<FJsonObject>& Params);
 };

@@ -18,6 +18,18 @@ Source/MonolithISX/
 Source/MonolithEditor/Private/MonolithTrainingActions.cpp
 Source/MonolithEditor/Public/MonolithTrainingActions.h
 
+# Internal-only docs — never ship in public releases
+Docs/ROADMAP.md
+Docs/research/
+Docs/specs/
+
+# CommonUI WIP — not shipped until WITH_COMMONUI goes public
+Source/MonolithUI/Private/CommonUI/
+Source/MonolithUI/Public/CommonUI/
+
+# Build tools and proxy binaries — local to dev machine
+Tools/
+
 # Agent training infrastructure — local to dev machine, not part of core plugin
 Scripts/vfx_training_harness.py
 Scripts/occult_training_harness.py

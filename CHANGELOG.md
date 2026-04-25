@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.14.4] - 2026-04-24
+
+### Fixed
+
+- **Build error: missing `MonolithPackagePathValidator.h`** ([#35](https://github.com/tumourlove/monolith/issues/35)) — Header was added to working tree but not tracked by git when v0.14.3 was cut. Three modules (`MonolithAI`, `MonolithGAS`, `MonolithUI`) included it, causing `C1083` on clean builds. Now properly tracked. Reported by **@krojew**.
+
+Full diff: [v0.14.3...v0.14.4](https://github.com/tumourlove/monolith/compare/v0.14.3...v0.14.4)
+
+## [0.14.3] - 2026-04-24
+
+### Added
+
+- **HTTP bind retry with port probe** ([#33](https://github.com/tumourlove/monolith/pull/33)) — `Start()` now retries up to 5 times with exponential backoff when the port is held by a zombie editor instance. A TCP socket probe verifies the bind actually took, instead of trusting `StartAllListeners()` which can fail silently. New `Monolith.Restart` console command for manual recovery without restarting the editor. PR by **@MaxenceEpitech**.
+
+- **Animation IK and bone control nodes** ([#34](https://github.com/tumourlove/monolith/pull/34)) — `add_anim_graph_node` now supports `TwoBoneIK`, `ModifyBone`, `LocalToComponentSpace`, and `ComponentToLocalSpace` node types. TwoBoneIK auto-exposes `EffectorLocation`, `JointTargetLocation`, and `Alpha` as input pins. New `expose_pins` parameter for manual pin control on any node type. PR by **@MaxenceEpitech**.
+
+- **`add_variable_get` action** ([#34](https://github.com/tumourlove/monolith/pull/34)) — Places a `K2Node_VariableGet` in an ABP anim graph for reading AnimInstance member variables. Validates the variable exists on the skeleton class before spawning. Animation action count: 115 → 116. PR by **@MaxenceEpitech**.
+
+### Fixed
+
+- **Nested struct/array cross-package TObjectPtr serialization** ([#29](https://github.com/tumourlove/monolith/issues/29)) — `set_cdo_property` now fires recursive `PreEditChange`/`PostEditChangeChainProperty` on every nested sub-property containing object references, matching the Details panel's full edit cradle. Previously only the outer property got the notification, so inner `TObjectPtr` fields in structs and arrays would serialize as null on save. Also wired the cradle into `create_data_asset` and `create_blueprint` to fix creation-side `FOverridableManager` poisoning. Reported by **@danielandric**.
+
+### Credits
+
+- **@MaxenceEpitech** — PRs [#33](https://github.com/tumourlove/monolith/pull/33), [#34](https://github.com/tumourlove/monolith/pull/34) (HTTP retry + animation IK nodes). Two solid contributions in the same day.
+- **@danielandric** — Issue [#29](https://github.com/tumourlove/monolith/issues/29) (nested property cradle). Thorough repro with the IMC DefaultKeyMappings case — made the fix straightforward.
+
+Full diff: [v0.14.2...v0.14.3](https://github.com/tumourlove/monolith/compare/v0.14.2...v0.14.3)
+
 ## [0.14.0] - 2026-04-20
 
 ### Added

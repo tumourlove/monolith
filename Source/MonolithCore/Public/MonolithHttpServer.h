@@ -3,6 +3,9 @@
 #include "CoreMinimal.h"
 #include "HttpRouteHandle.h"
 #include "IHttpRouter.h"
+#include "SocketSubsystem.h"
+#include "Sockets.h"
+#include "IPAddress.h"
 
 class FJsonObject;
 class FJsonValue;
@@ -23,6 +26,9 @@ public:
 
 	/** Stop the server and unbind all routes */
 	void Stop();
+
+	/** Stop then Start — useful after a silent bind failure */
+	bool Restart(int32 Port);
 
 	/** Is the server currently running? */
 	bool IsRunning() const { return bIsRunning; }
@@ -49,6 +55,12 @@ private:
 	TUniquePtr<FHttpServerResponse> MakeJsonResponse(const FString& JsonBody, EHttpServerResponseCodes Code = EHttpServerResponseCodes::Ok);
 	TUniquePtr<FHttpServerResponse> MakeSseResponse(const TArray<TSharedPtr<FJsonObject>>& Messages);
 	void AddCorsHeaders(FHttpServerResponse& Response);
+
+	/** Register all HTTP routes on the current HttpRouter. */
+	void BindRoutes();
+
+	/** Probe 127.0.0.1:Port via a TCP connect to verify the listener is actually bound. */
+	static bool ProbePort(int32 Port);
 
 	// --- State ---
 	TSharedPtr<IHttpRouter> HttpRouter;

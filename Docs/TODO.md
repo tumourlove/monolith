@@ -1,6 +1,56 @@
 # Monolith — TODO
 
-Last updated: 2026-04-08
+Last updated: 2026-04-24 (v0.14.3)
+
+---
+
+### v0.14.3 Changes (2026-04-24)
+
+#### MonolithCore — HTTP Bind Retry + Restart
+
+- [x] `FMonolithHttpServer::Start()` — HTTP bind retry with TCP port probe (5 attempts, exponential backoff). Prevents startup failures when the port is briefly held by a prior editor session.
+- [x] `FMonolithHttpServer::Restart()` — New method for runtime recovery without editor restart.
+- [x] `Monolith.Restart` console command — Wired to Restart() for manual recovery.
+- [x] Added Sockets + Networking module dependencies to MonolithCore.
+
+#### MonolithAnimation — 4 New Node Types + add_variable_get (115 → 116 actions)
+
+- [x] `add_anim_graph_node` — 4 new node types: TwoBoneIK, ModifyBone, LocalToComponentSpace, ComponentToLocalSpace.
+- [x] `add_variable_get` — New action (K2Node_VariableGet) for placing variable getter nodes in anim graphs.
+
+#### MonolithBlueprint — EditCradle + Issue #29 Fix
+
+- [x] **MonolithBlueprintEditCradle** — Recursive property-edit cradle for nested struct/array properties. Wired into `set_cdo_property`, `create_data_asset`, `create_blueprint`. Fixes cross-package TObjectPtr serialization (nested structs/arrays with TObjectPtr references to other packages were silently dropped by FLinkerSave's harvest walk on save).
+- [x] **Issue [#29](https://github.com/tumourlove/monolith/issues/29) — FIXED.** Root cause: nested struct/array CDO property edits with cross-package TObjectPtr references (e.g., IMC DefaultKeyMappings referencing InputAction assets) were silently dropped on save. EditCradle fires PreEditChange/PostEditChange at the correct property depth so FOverridableManager tracks the edit and FLinkerSave harvests all referenced objects. Credit: @danielandric for thorough repro.
+
+---
+
+### MonolithUI M0.5 — CommonUI Action Pack, 50 Actions COMPLETE (2026-04-19, v0.14.0)
+
+- [x] Phase 1 — Foundation: Build.cs 3-location CommonUI detection, `#if WITH_COMMONUI` scaffolding, `FMonolithActionInfo.Category` + backwards-compatible `RegisterAction`, `discover()` category filter, shared Pattern 1/2/3 helpers (asset create, widget-tree load/mutate/compile, runtime UFunction invoke, property-from-JSON), 9 category stubs, module wiring, dynamic action-count log (dv.245–251)
+- [x] Phase 2 Category A — Activatable Lifecycle (8 actions): create_activatable_widget, create_activatable_stack, create_activatable_switcher, configure_activatable, push/pop/get_state [RUNTIME], set_activatable_transition (dv.253)
+- [x] Phase 2 Category B — Buttons + Styling (9 actions): convert_button_to_common, configure_common_button, create_common_button/text/border_style, apply_style_to_widget, batch_retheme, configure_common_text/border (dv.256)
+- [x] Phase 2 Category C — Input/Actions/Glyphs (7 actions): create_input_action_data_table, add_input_action_row, bind_common_action_widget, create_bound_action_bar, get/set_input_type [RUNTIME], list_platform_input_tables (dv.257)
+- [x] Phase 3 Category D — Navigation/Focus (5 actions): set_widget_navigation, set_initial_focus_target, force_focus [RUNTIME], get_focus_path [RUNTIME], request_refresh_focus [RUNTIME] (dv.260)
+- [x] Phase 3 Category E — Lists/Tabs/Groups (7 actions): setup_common_list_view, create_tab_list_widget, register_tab [RUNTIME], create_button_group [RUNTIME], configure_animated_switcher, create_widget_carousel, create_hardware_visibility_border (dv.261)
+- [x] Phase 4 Categories F+G+I (10 actions): configure_numeric_text, configure_rotator, create_lazy_image, create_load_guard, show_common_message [RUNTIME], configure_modal_overlay, enforce_focus_ring, wrap_with_reduce_motion_gate, set_text_scale_binding, apply_high_contrast_variant (dv.262)
+- [x] Phase 5 Category H — Audit + Lint (4 actions): audit_commonui_widget, export_commonui_report, hot_reload_styles [RUNTIME, EXPERIMENTAL], dump_action_router_state [RUNTIME, EXPERIMENTAL] (dv.266)
+- [x] Infrastructure collateral: `MonolithIndexLog.h` moved Private → Public (transitive include bug exposed)
+- [x] Version bump 0.13.2 → 0.14.0 in both `Monolith.uplugin` and `MonolithCoreModule.h`
+
+#### MonolithUI M0.5 — Testing Pending (M0.5.1)
+
+- [ ] **Functional testing** — All 50 CommonUI actions need PIE-session test pass. Editor automation tests for Categories A/B/C/D/E/F/G/H/I.
+- [ ] **Conditional compilation test** — re-verify clean compile with `MONOLITH_RELEASE_BUILD=1` env var (WITH_COMMONUI=0 path).
+- [ ] **Bridge integration test** — author a minimal main menu WBP via the new actions end-to-end (keystone test for Claude Design bridge M1).
+- [ ] **Category A runtime interaction tests** — push-during-transition, pop-while-empty, push-modal-over-modal, clear-during-transition.
+
+#### MonolithUI M0.5 — Known Limitations (shipped, documented)
+
+- `convert_button_to_common` does NOT auto-transfer UButton children to UCommonButtonBase — UCommonButtonBase uses internal widget tree, not AddChild. Callers must rewire manually.
+- `set_initial_focus_target` requires the target WBP to expose a `DesiredFocusTargetName` or `InitialFocusTargetName` FName UPROPERTY and override `NativeGetDesiredFocusTarget`. Action errors out if neither property exists.
+- `show_common_message` is fire-and-forward — async result-binding (Yes/No) requires dialog WBP to handle internally. No MCP-side delegate routing yet.
+- `dump_action_router_state` cannot read `UCommonUIActionRouterBase::CurrentInputLocks` (private-transient in engine). Engine PR candidate (M0.7).
 
 ---
 
@@ -145,7 +195,7 @@ Last updated: 2026-04-08
   - Step-by-step: "How to create a Fantasy Dungeon preset pack"
   - How to test presets via MCP before distributing
   - How to export/import/share preset packs
-- [ ] **SPEC.md MonolithMesh section** — Full 241-action reference with param schemas (currently has Phase 1-4 section + proc geo overhaul + Procedural Town Generator SP1-SP10 + validate_building)
+- [ ] **specs/SPEC_MonolithMesh.md** — Full 241-action reference with param schemas (currently has Phase 1-4 section + proc geo overhaul + Procedural Town Generator SP1-SP10 + validate_building)
 - [ ] **MCP.md mesh_query docs** — Tool reference for mesh_query namespace
 - [ ] **README update** — Feature highlight for MonolithMesh in the plugin README
 
@@ -323,7 +373,7 @@ The mesh module ships horror defaults (storytelling patterns, room templates, ac
 - [x] **MonolithUI — MCP testing** — DONE (2026-03-22). All 42 actions PASS. Full test results in TESTING.md.
 - [ ] **MonolithUI — Phase 3 deprecation warnings** — `GetBindings` and `FMovieSceneBinding::GetName` may generate deprecation warnings in UE 5.7. Audit and update call sites.
 - [x] **MonolithUI — agent skill file** — DONE (2026-03-22). `unreal-ui` skill created in `.claude/skills/` and `Plugins/Monolith/Skills/`, added to `interface-architect` agent definition.
-- [x] **MonolithUI — bUIEnabled settings toggle** — DONE (2026-03-22). `UMonolithSettings::bUIEnabled` wired to registration gating (confirmed in SPEC.md settings table).
+- [x] **MonolithUI — bUIEnabled settings toggle** — DONE (2026-03-22). `UMonolithSettings::bUIEnabled` wired to registration gating (confirmed in SPEC_CORE.md settings table).
 
 ---
 

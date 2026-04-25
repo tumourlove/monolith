@@ -16,6 +16,13 @@ void UMonolithSourceSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 
+	// Commandlet mode (cook/compile): skip DB open. The running editor holds a WAL lock on
+	// EngineSource.db; a second open surfaces as "disk I/O error" → UAT ExitCode=1.
+	if (IsRunningCommandlet())
+	{
+		return;
+	}
+
 	Database = MakeUnique<FMonolithSourceDatabase>();
 	FString DbPath = GetDatabasePath();
 

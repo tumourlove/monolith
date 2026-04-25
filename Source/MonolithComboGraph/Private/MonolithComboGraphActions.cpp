@@ -842,7 +842,7 @@ FMonolithActionResult FMonolithComboGraphActions::HandleValidateComboGraph(const
 		ReachableNodes.Add(FirstNode);
 		while (Queue.Num() > 0)
 		{
-			UObject* Current = Queue.Pop(false);
+			UObject* Current = Queue.Pop(EAllowShrinking::No);
 			TArray<UObject*> Children = GetChildrenNodes(Current);
 			for (UObject* Child : Children)
 			{

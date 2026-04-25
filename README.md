@@ -464,7 +464,7 @@ Monolith bundles 15 Claude Code skills in `Skills/` — domain-specific workflow
 ## Documentation
 
 - [API_REFERENCE.md](Docs/API_REFERENCE.md) — Full action reference with parameters
-- [SPEC.md](Docs/SPEC.md) — Technical specification and design decisions
+- [SPEC_CORE.md](Docs/SPEC_CORE.md) — Technical specification and design decisions (per-module specs under [Docs/specs/](Docs/specs/))
 - [CONTRIBUTING.md](CONTRIBUTING.md) — Dev setup, coding conventions, PR process
 - [CHANGELOG.md](CHANGELOG.md) — Version history and release notes
 - [Wiki](https://github.com/tumourlove/monolith/wiki) — Installation guides, test status, FAQ

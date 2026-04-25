@@ -11,6 +11,10 @@
 #include "MonolithJsonUtils.h"
 #include "MonolithToolRegistry.h"
 
+#if WITH_COMMONUI
+#include "CommonUI/MonolithCommonUIActions.h"
+#endif
+
 #define LOCTEXT_NAMESPACE "MonolithUI"
 
 void FMonolithUIModule::StartupModule()
@@ -27,7 +31,13 @@ void FMonolithUIModule::StartupModule()
     FMonolithUISettingsActions::RegisterActions(Registry);
     FMonolithUIAccessibilityActions::RegisterActions(Registry);
 
-    UE_LOG(LogMonolith, Log, TEXT("Monolith — UI module loaded (42 actions)"));
+#if WITH_COMMONUI
+    FMonolithCommonUIActions::RegisterAll(Registry);
+#endif
+
+    // Dynamic action count — reflects base UMG + any conditionally-registered CommonUI actions.
+    const int32 UINamespaceActions = Registry.GetActions(TEXT("ui")).Num();
+    UE_LOG(LogMonolith, Log, TEXT("Monolith — UI module loaded (%d ui actions)"), UINamespaceActions);
 }
 
 void FMonolithUIModule::ShutdownModule()

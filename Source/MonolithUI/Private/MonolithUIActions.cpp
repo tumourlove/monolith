@@ -2,6 +2,7 @@
 #include "MonolithUIActions.h"
 #include "MonolithUIInternal.h"
 #include "MonolithParamSchema.h"
+#include "MonolithPackagePathValidator.h"
 #include "WidgetBlueprintFactory.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "UObject/SavePackage.h"
@@ -100,6 +101,13 @@ FMonolithActionResult FMonolithUIActions::HandleCreateWidgetBlueprint(const TSha
     if (!MonolithUIInternal::TryGetRequiredString(Params, TEXT("save_path"), SavePath, ParamError))
     {
         return ParamError;
+    }
+
+    // Defensive: reject malformed paths (e.g. "//Game/...") before they reach CreatePackage,
+    // which asserts in UObjectGlobals.cpp and kills the editor.
+    if (const FString ValidationError = MonolithCore::ValidatePackagePath(SavePath); !ValidationError.IsEmpty())
+    {
+        return FMonolithActionResult::Error(ValidationError);
     }
 
     FString ParentClassName = MonolithUIInternal::GetOptionalString(Params, TEXT("parent_class"));
@@ -320,10 +328,34 @@ FMonolithActionResult FMonolithUIActions::HandleAddWidget(const TSharedPtr<FJson
             FString::Printf(TEXT("Failed to construct widget of class %s"), *WidgetClassName));
     }
 
-    // Add to parent
+    // Add to parent.
+    //
+    // UPanelWidget::AddChild returns nullptr in three conditions
+    // (Engine/Source/Runtime/UMG/Private/Components/PanelWidget.cpp:132-142):
+    //   1. Content is null — impossible here; NewWidget was just constructed.
+    //   2. !bCanHaveMultipleChildren && GetChildrenCount() > 0 — the single-child
+    //      invariant on UContentWidget subclasses (Border, RoundedBorder,
+    //      Button, SizeBox, ScaleBox, BackgroundBlur, InvalidationBox,
+    //      RetainerBox, SafeZone, NamedSlot).
+    //   3. (Subclass-specific rejections via OnSlotAdded, rare in practice.)
+    //
+    // When case 2 fires, callers routinely waste time staring at the opaque
+    // message before realizing a VerticalBox/HorizontalBox wrapper is missing.
+    // Classify it here so the error speaks for itself.
     UPanelSlot* Slot = ParentPanel->AddChild(NewWidget);
     if (!Slot)
     {
+        if (!ParentPanel->CanHaveMultipleChildren() && ParentPanel->GetChildrenCount() > 0)
+        {
+            UWidget* ExistingChild = ParentPanel->GetChildAt(0);
+            const FString ExistingName = ExistingChild ? ExistingChild->GetName() : TEXT("<unknown>");
+            return FMonolithActionResult::Error(FString::Printf(
+                TEXT("AddChild failed: parent '%s' is a single-child container (%s) and already holds '%s'. ")
+                TEXT("Wrap additional children in a VerticalBox/HorizontalBox."),
+                *ParentPanel->GetName(),
+                *ParentPanel->GetClass()->GetName(),
+                *ExistingName));
+        }
         return FMonolithActionResult::Error(TEXT("AddChild returned null slot"));
     }
 

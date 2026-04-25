@@ -7,8 +7,15 @@
 #include "Misc/FileHelper.h"
 #include "GenericPlatform/GenericPlatformProcess.h"
 #include "Interfaces/IPluginManager.h"
+#include "HAL/IConsoleManager.h"
 
 #define LOCTEXT_NAMESPACE "FMonolithCoreModule"
+
+static FAutoConsoleCommand GMonolithRestartCmd(
+	TEXT("Monolith.Restart"),
+	TEXT("Restart the Monolith MCP HTTP server on its configured port."),
+	FConsoleCommandDelegate::CreateStatic(&FMonolithCoreModule::RestartHttpServer)
+);
 
 void FMonolithCoreModule::StartupModule()
 {
@@ -16,6 +23,14 @@ void FMonolithCoreModule::StartupModule()
 
 	// Self-heal future-dated mtimes from cross-TZ ZIP extraction.
 	NormalizeFutureMtimesIfNeeded();
+
+	// Skip MCP server + sentinel in commandlets (cook/compile). The running editor already holds port 9316
+	// and a second bind attempt surfaces as UAT ExitCode=1. Commandlets have no MCP consumer anyway.
+	if (IsRunningCommandlet())
+	{
+		UE_LOG(LogMonolith, Log, TEXT("Monolith — commandlet detected, skipping MCP server startup"));
+		return;
+	}
 
 	// Register core discovery/status tools
 	RegisterCoreTools();
@@ -136,6 +151,36 @@ void FMonolithCoreModule::NormalizeFutureMtimesIfNeeded()
 	}
 
 	UE_LOG(LogMonolith, Log, TEXT("Normalized %d file(s), %d failed"), Touched, Failed);
+}
+
+void FMonolithCoreModule::RestartHttpServer()
+{
+	if (!IsAvailable())
+	{
+		UE_LOG(LogMonolith, Warning, TEXT("Monolith.Restart: MonolithCore module not loaded"));
+		return;
+	}
+
+	FMonolithCoreModule& Module = Get();
+	if (!Module.HttpServer.IsValid())
+	{
+		UE_LOG(LogMonolith, Warning, TEXT("Monolith.Restart: HTTP server instance missing"));
+		return;
+	}
+
+	const UMonolithSettings* Settings = UMonolithSettings::Get();
+	const int32 Port = Settings ? Settings->ServerPort : 9316;
+
+	UE_LOG(LogMonolith, Log, TEXT("Monolith.Restart: restarting HTTP server on port %d"), Port);
+	if (Module.HttpServer->Restart(Port))
+	{
+		Module.WriteSentinelFile(Port);
+		UE_LOG(LogMonolith, Log, TEXT("Monolith.Restart: success"));
+	}
+	else
+	{
+		UE_LOG(LogMonolith, Error, TEXT("Monolith.Restart: failed to rebind port %d"), Port);
+	}
 }
 
 #undef LOCTEXT_NAMESPACE

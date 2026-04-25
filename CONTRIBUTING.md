@@ -284,7 +284,7 @@ Then use Claude Code or any MCP-compatible client to interact with the tools.
 
 4. **Update docs** — If you add actions, update:
    - The relevant skill in `Skills/`
-   - `Docs/SPEC.md` action tables
+   - `Docs/specs/SPEC_<Module>.md` action tables (per-module spec for the namespace you touched)
    - `README.md` action counts (if totals change)
 
 5. **Commit messages** — Use conventional format: `feat:`, `fix:`, `docs:`, `refactor:`
