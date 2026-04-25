@@ -208,3 +208,24 @@ Write-Host "Size: ${fileSize}MB" -ForegroundColor Green
 Write-Host "`nVerify: optional deps should be OFF in the binaries." -ForegroundColor Cyan
 Write-Host "  WITH_BLUEPRINT_ASSIST=0, WITH_GBA=0" -ForegroundColor Cyan
 Write-Host "  Your next editor build will auto-detect deps normally." -ForegroundColor DarkGray
+
+# --- SHA256 hash for release notes (Issue #38) ---
+# Marker token is `Monolith-SHA256:` (not bare `SHA256:`) so the auto-updater's
+# regex never collides with prose mentions of the word SHA256 elsewhere in the
+# release body. The parser anchors on this exact sentinel.
+if (Test-Path $OutputZip) {
+    $Hash = (Get-FileHash -Algorithm SHA256 -Path $OutputZip).Hash.ToLower()
+    Write-Host ""
+    Write-Host "================================================================" -ForegroundColor Cyan
+    Write-Host "SHA256: $Hash" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Paste this exact line into the GitHub Release notes body:" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Monolith-SHA256: $Hash" -ForegroundColor White
+    Write-Host ""
+    Write-Host "The auto-updater parses this exact marker and refuses to install" -ForegroundColor Yellow
+    Write-Host "if the downloaded zip's hash does not match. Do not rename or"     -ForegroundColor Yellow
+    Write-Host "reformat the marker -- the prefix and a single space before the"   -ForegroundColor Yellow
+    Write-Host "hex string are required."                                          -ForegroundColor Yellow
+    Write-Host "================================================================" -ForegroundColor Cyan
+}

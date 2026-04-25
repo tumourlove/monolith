@@ -6,6 +6,9 @@
 #include "HttpModule.h"
 #include "Interfaces/IHttpRequest.h"
 #include "Interfaces/IHttpResponse.h"
+#include "GenericPlatform/GenericPlatformMisc.h"
+#include "HAL/PlatformMisc.h"
+#include "Internationalization/Regex.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonReader.h"
@@ -222,6 +225,31 @@ void UMonolithUpdateSubsystem::CheckForUpdate()
 				{
 					FString ReleaseNotes;
 					JsonObj->TryGetStringField(TEXT("body"), ReleaseNotes);
+
+					// Parse the "Monolith-SHA256: <64-hex>" marker added by
+					// make_release.ps1 (Issue #38). Unique sentinel prefix prevents
+					// collision with prose mentions of "SHA256" elsewhere in the
+					// release body. The trailing `(?![0-9a-fA-F])` boundary rejects
+					// 65+ char strings that would otherwise silently truncate to 64
+					// and produce a confusing "hash mismatch" instead of "malformed
+					// marker". Stashed on the subsystem; consumed by OnDownloadComplete.
+					Self->PendingExpectedSha256.Empty();
+					{
+						static const FRegexPattern HashPattern(
+							TEXT("Monolith-SHA256:\\s*([0-9a-fA-F]{64})(?![0-9a-fA-F])"));
+						FRegexMatcher Matcher(HashPattern, ReleaseNotes);
+						if (Matcher.FindNext())
+						{
+							Self->PendingExpectedSha256 = Matcher.GetCaptureGroup(1).ToLower();
+						}
+						else
+						{
+							UE_LOG(LogMonolith, Warning,
+								TEXT("Release %s notes do not include a Monolith-SHA256 marker — install will proceed without integrity check."),
+								*RemoteVersion);
+						}
+					}
+
 					Self->ShowUpdateNotification(RemoteVersion, ZipUrl, ReleaseNotes);
 				}
 				else
@@ -474,8 +502,50 @@ void UMonolithUpdateSubsystem::OnDownloadComplete(const FString& Version, bool b
 	if (!bSuccess || Data.Num() == 0)
 	{
 		UE_LOG(LogMonolith, Error, TEXT("Update download failed or empty"));
+		PendingExpectedSha256.Empty();
 		bUpdateInProgress = false;
 		return;
+	}
+
+	// Integrity check against the SHA256 advertised in the release notes
+	// (Issue #38). If the marker was missing in CheckForUpdate, PendingExpectedSha256
+	// is empty and we log a warning + continue (no regression for legacy installs).
+	// Hash MUST run before any disk write so a tampered payload never lands
+	// on the filesystem.
+	if (!PendingExpectedSha256.IsEmpty())
+	{
+		FSHA256Signature Signature;
+		if (!FPlatformMisc::GetSHA256Signature(Data.GetData(), static_cast<uint32>(Data.Num()), Signature))
+		{
+			UE_LOG(LogMonolith, Error,
+				TEXT("FPlatformMisc::GetSHA256Signature failed (no platform impl?). Aborting auto-update."));
+			PendingExpectedSha256.Empty();
+			bUpdateInProgress = false;
+			return;
+		}
+		// FSHA256Signature::ToString() returns lowercase hex; ToLower() is defensive.
+		const FString ActualSha256 = Signature.ToString().ToLower();
+		const FString ExpectedLower = PendingExpectedSha256.ToLower();
+
+		if (ActualSha256 != ExpectedLower)
+		{
+			UE_LOG(LogMonolith, Error,
+				TEXT("SHA256 mismatch — refusing to install. Expected %s, got %s. Aborting auto-update."),
+				*ExpectedLower, *ActualSha256);
+
+			FNotificationInfo Info(NSLOCTEXT("Monolith", "UpdateHashMismatch",
+				"Monolith auto-update aborted: download integrity check failed. See Output Log."));
+			Info.ExpireDuration = 30.0f;
+			Info.bUseThrobber = false;
+			FSlateNotificationManager::Get().AddNotification(Info);
+
+			PendingExpectedSha256.Empty();
+			bUpdateInProgress = false;
+			return;
+		}
+
+		UE_LOG(LogMonolith, Log, TEXT("SHA256 verified for Monolith %s download."), *Version);
+		PendingExpectedSha256.Empty();
 	}
 
 	// Save zip to temp

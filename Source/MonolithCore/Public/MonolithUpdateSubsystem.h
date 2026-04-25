@@ -83,4 +83,11 @@ private:
 
 	bool bUpdateInProgress = false;
 	FTSTicker::FDelegateHandle UpdateCheckTickerHandle;
+
+	/** SHA256 hash parsed from the GitHub release notes (Monolith-SHA256: <64-hex>
+	 *  marker added by make_release.ps1). Stashed during CheckForUpdate, consumed
+	 *  by OnDownloadComplete to verify the downloaded zip before extraction.
+	 *  Empty string means the release didn't include a marker — legacy releases
+	 *  log a warning and proceed without verification (no regression). Issue #38. */
+	FString PendingExpectedSha256;
 };
