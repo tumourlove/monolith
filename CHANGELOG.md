@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`mesh.export_mesh` action** — Exports a `UStaticMesh` or `USkeletalMesh` asset to an FBX file on disk via `UAssetExportTask` and the engine's built-in FBX exporter. Inverse operation of the existing `import_mesh` action; enables a round-trip workflow for editing project meshes in DCC tools (Blender, Maya, Houdini) directly from the agent — no manual right-click → Asset Actions → Export. Mesh action count: 7 → 8. PR by **@MaxenceEpitech**.
+
 ## [0.14.4] - 2026-04-24
 
 ### Fixed
