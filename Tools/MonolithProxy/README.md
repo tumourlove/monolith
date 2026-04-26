@@ -28,7 +28,7 @@ If the C++ proxy encounters issues, you can revert to the Python proxy by updati
 
 Update the monolith entry in:
 1. `D:\Unreal Projects\Leviathan\.mcp.json`
-2. `C:\Users\lucas\.claude.json`
+2. `%USERPROFILE%\.claude.json` (Windows) or `~/.claude.json` (macOS / Linux)
 
 Then restart Claude Code.
 

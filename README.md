@@ -220,13 +220,13 @@ You should get back a list of namespace tools (`blueprint_query`, `material_quer
 
 ### Step 5: Add project instructions for your AI
 
-Copy `Templates/CLAUDE.md.example` to your project root as `CLAUDE.md` (for Claude Code) or adapt it for your LLM of choice. It lists all 19 tools, their action counts, and workflow tips that help the AI use Monolith effectively.
+Different AI coding assistants use different conventions for project-instructions files (`CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, `.cursorrules` for Cursor, `.github/copilot-instructions.md` for Copilot, plus a long tail). Those conventions evolve faster than a static template can keep up — so rather than ship a template that grows stale, the recommended workflow is to ask your AI directly.
 
-```bash
-cp Plugins/Monolith/Templates/CLAUDE.md.example CLAUDE.md
-```
+Practical prompt to feed your assistant once Monolith is installed and running:
 
-> **Not using Claude?** The template is plain Markdown — the tool list and workflow section port directly to Cursor rules, Cline system prompts, or any LLM's instruction format. The content is what matters, not the filename.
+> *"I've installed the Monolith Unreal plugin. It exposes ~1239 actions across 16 namespaces (`blueprint`, `material`, `animation`, `niagara`, `mesh`, `ui`, `gas`, `ai`, `audio`, etc.) over an in-process MCP HTTP listener at `http://localhost:9316/mcp`. What's the best-practice format for a project-instructions file for [your assistant — e.g. `CLAUDE.md`, `AGENTS.md`, `.cursorrules`]? It should help with action discovery via `monolith_discover()`, asset-path conventions like `/Game/Path/Asset`, and verifying UE 5.7 APIs via `source_query` before writing code."*
+
+Whatever your AI generates, drop it at the appropriate path for your toolchain. The action counts and workflow notes from this README's earlier sections are usable input.
 
 ### Step 6: (Optional) Index your project's C++ source
 

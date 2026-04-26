@@ -135,6 +135,12 @@ $trackedFiles = $allTrackedFiles | Where-Object {
             break
         }
     }
+    # Strip internal testing-execution records (Docs/testing/) — per-feature test-pass
+    # diaries with no downstream consumer value. Public-facing test artefacts live
+    # elsewhere (SPEC sections, automation tests under Source/).
+    if ($keep -and $path -like "Docs/testing/*") {
+        $keep = $false
+    }
     $keep
 }
 $strippedSourceCount = $allTrackedFiles.Count - $trackedFiles.Count
