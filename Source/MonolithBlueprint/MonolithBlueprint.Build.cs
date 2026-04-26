@@ -24,7 +24,8 @@ public class MonolithBlueprint : ModuleRules
 			"KismetCompiler",
 			"EditorScriptingUtilities",
 			"Json",
-			"JsonUtilities"
+			"JsonUtilities",
+			"StructUtils"
 		});
 	}
 }

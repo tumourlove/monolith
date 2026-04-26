@@ -9,6 +9,7 @@
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
 #include "JsonObjectConverter.h"
+#include "StructUtils/InstancedStruct.h"
 #include "ScopedTransaction.h"
 #include "MonolithBlueprintEditCradle.h"
 
@@ -104,6 +105,27 @@ namespace MonolithCDOInternal
 		{
 			UObject* ObjVal = ObjProp->GetObjectPropertyValue(ValuePtr);
 			return MakeShared<FJsonValueString>(ObjVal ? ObjVal->GetPathName() : TEXT("None"));
+		}
+
+		// TInstancedStruct — unwrap and emit the concrete struct with a __struct tag
+		if (const FStructProperty* InstancedStructProp = CastField<FStructProperty>(Prop);
+			InstancedStructProp && InstancedStructProp->Struct == TBaseStructure<FInstancedStruct>::Get())
+		{
+			const FInstancedStruct& Instanced = *static_cast<const FInstancedStruct*>(ValuePtr);
+			const UScriptStruct* InnerStruct = Instanced.GetScriptStruct();
+			const uint8* InnerMem = Instanced.GetMemory();
+			auto Obj = MakeShared<FJsonObject>();
+			if (InnerStruct && InnerMem)
+			{
+				Obj->SetStringField(TEXT("__struct"), InnerStruct->GetPathName());
+				for (TFieldIterator<FProperty> It(InnerStruct); It; ++It)
+				{
+					FProperty* Inner = *It;
+					const void* InnerPtr = Inner->ContainerPtrToValuePtr<void>(InnerMem);
+					Obj->SetField(Inner->GetName(), PropertyToJsonValue(Inner, InnerPtr, CDO));
+				}
+			}
+			return MakeShared<FJsonValueObject>(Obj);
 		}
 
 		// Struct — recurse
