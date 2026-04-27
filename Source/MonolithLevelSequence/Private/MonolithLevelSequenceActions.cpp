@@ -64,6 +64,14 @@ void FMonolithLevelSequenceActions::RegisterActions(FMonolithToolRegistry& Regis
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Full Level Sequence asset path"))
 			.Build());
+
+	Registry.RegisterAction(TEXT("level_sequence"), TEXT("list_bindings"),
+		TEXT("List ALL bindings inside a Level Sequence regardless of event tracks. UE 5.7 stores modern Spawnables as Possessables inside UMovieScene while their real identity (UMovieSceneSpawnableActorBinding etc.) lives on UMovieSceneSequence::GetBindingReferences(); list_event_bindings sees only event-bound rows and would miss them. Each row reports kind (possessable/spawnable/replaceable/custom), bound class, and — for custom bindings — the exact UCLASS name and pretty label. Optional kind filter narrows the result."),
+		FMonolithActionHandler::CreateStatic(&FMonolithLevelSequenceActions::ListBindings),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Full Level Sequence asset path"))
+			.Optional(TEXT("kind"), TEXT("string"), TEXT("Filter: possessable | spawnable | replaceable | custom | all (default)"))
+			.Build());
 }
 
 // ============================================================================
@@ -774,5 +782,152 @@ FMonolithActionResult FMonolithLevelSequenceActions::ListDirectorVariables(const
 	Result->SetStringField(TEXT("ls_path"), AssetPath);
 	Result->SetArrayField(TEXT("variables"), Rows);
 	Result->SetNumberField(TEXT("count"), Rows.Num());
+	return FMonolithActionResult::Success(Result);
+}
+
+FMonolithActionResult FMonolithLevelSequenceActions::ListBindings(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!GEditor)
+	{
+		return FMonolithActionResult::Error(TEXT("GEditor not available"));
+	}
+
+	UMonolithIndexSubsystem* IndexSS = GEditor->GetEditorSubsystem<UMonolithIndexSubsystem>();
+	if (!IndexSS || !IndexSS->GetDatabase())
+	{
+		return FMonolithActionResult::Error(TEXT("Index database not ready"));
+	}
+
+	FSQLiteDatabase* RawDB = IndexSS->GetDatabase()->GetRawDatabase();
+	if (!RawDB)
+	{
+		return FMonolithActionResult::Error(TEXT("Raw SQLite database not available"));
+	}
+
+	FString AssetPath;
+	if (!Params->TryGetStringField(TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("asset_path is required"));
+	}
+
+	FString KindFilter;
+	Params->TryGetStringField(TEXT("kind"), KindFilter);
+	KindFilter = KindFilter.ToLower();
+	const bool bFilterByKind = !KindFilter.IsEmpty() && KindFilter != TEXT("all");
+
+	// level_sequence_bindings stores ls_asset_id (the AssetId at index time) but
+	// callers query by ls_path. The directors table provides the bridge. For LS
+	// without a Director, fall back to looking up assets.path → assets.id.
+	int64 LsAssetId = -1;
+	{
+		FSQLitePreparedStatement Stmt;
+		if (Stmt.Create(*RawDB, TEXT("SELECT ls_asset_id FROM level_sequence_directors WHERE ls_path = ?")))
+		{
+			Stmt.SetBindingValueByIndex(1, AssetPath);
+			if (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+			{
+				Stmt.GetColumnValueByIndex(0, LsAssetId);
+			}
+			Stmt.Destroy();
+		}
+	}
+	if (LsAssetId <= 0)
+	{
+		// Fallback for LS without a Director — resolve via core assets table.
+		FSQLitePreparedStatement Stmt;
+		if (Stmt.Create(*RawDB, TEXT("SELECT id FROM assets WHERE path = ?")))
+		{
+			Stmt.SetBindingValueByIndex(1, AssetPath);
+			if (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+			{
+				Stmt.GetColumnValueByIndex(0, LsAssetId);
+			}
+			Stmt.Destroy();
+		}
+	}
+	if (LsAssetId <= 0)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("No Level Sequence indexed for path '%s'"), *AssetPath));
+	}
+
+	FString SQL = TEXT(
+		"SELECT binding_guid, binding_index, name, kind, bound_class, "
+		"       custom_binding_class, custom_binding_pretty, track_count "
+		"FROM level_sequence_bindings "
+		"WHERE ls_asset_id = ?");
+	if (bFilterByKind)
+	{
+		SQL += TEXT(" AND kind = ?");
+	}
+	SQL += TEXT(
+		" ORDER BY CASE kind "
+		"  WHEN 'possessable' THEN 0 "
+		"  WHEN 'spawnable' THEN 1 "
+		"  WHEN 'replaceable' THEN 2 "
+		"  WHEN 'custom' THEN 3 "
+		"  ELSE 4 END, name, binding_guid, binding_index");
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(*RawDB, *SQL))
+	{
+		return FMonolithActionResult::Error(TEXT("Failed to prepare list_bindings SQL"));
+	}
+	Stmt.SetBindingValueByIndex(1, LsAssetId);
+	if (bFilterByKind)
+	{
+		Stmt.SetBindingValueByIndex(2, KindFilter);
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Rows;
+	TMap<FString, int32> KindCounts;
+
+	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		FString BGuid, Name, Kind, BoundClass, CustomClass, CustomPretty;
+		int64 BindingIndex = 0, TrackCount = 0;
+		Stmt.GetColumnValueByIndex(0, BGuid);
+		Stmt.GetColumnValueByIndex(1, BindingIndex);
+		Stmt.GetColumnValueByIndex(2, Name);
+		Stmt.GetColumnValueByIndex(3, Kind);
+		Stmt.GetColumnValueByIndex(4, BoundClass);
+		Stmt.GetColumnValueByIndex(5, CustomClass);
+		Stmt.GetColumnValueByIndex(6, CustomPretty);
+		Stmt.GetColumnValueByIndex(7, TrackCount);
+
+		auto Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("binding_guid"), BGuid);
+		Obj->SetNumberField(TEXT("binding_index"), static_cast<double>(BindingIndex));
+		if (Name.IsEmpty())         Obj->SetField(TEXT("name"), MakeShared<FJsonValueNull>());        else Obj->SetStringField(TEXT("name"), Name);
+		Obj->SetStringField(TEXT("kind"), Kind);
+		if (BoundClass.IsEmpty())   Obj->SetField(TEXT("bound_class"), MakeShared<FJsonValueNull>()); else Obj->SetStringField(TEXT("bound_class"), BoundClass);
+		if (CustomClass.IsEmpty())  Obj->SetField(TEXT("custom_binding_class"), MakeShared<FJsonValueNull>());  else Obj->SetStringField(TEXT("custom_binding_class"), CustomClass);
+		if (CustomPretty.IsEmpty()) Obj->SetField(TEXT("custom_binding_pretty"), MakeShared<FJsonValueNull>()); else Obj->SetStringField(TEXT("custom_binding_pretty"), CustomPretty);
+		Obj->SetNumberField(TEXT("track_count"), static_cast<double>(TrackCount));
+
+		Rows.Add(MakeShared<FJsonValueObject>(Obj));
+		KindCounts.FindOrAdd(Kind)++;
+	}
+	Stmt.Destroy();
+
+	auto KindBreakdown = MakeShared<FJsonObject>();
+	for (const TPair<FString, int32>& Pair : KindCounts)
+	{
+		KindBreakdown->SetNumberField(Pair.Key, Pair.Value);
+	}
+
+	auto Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("ls_path"), AssetPath);
+	if (bFilterByKind)
+	{
+		Result->SetStringField(TEXT("kind_filter"), KindFilter);
+	}
+	else
+	{
+		Result->SetField(TEXT("kind_filter"), MakeShared<FJsonValueNull>());
+	}
+	Result->SetArrayField(TEXT("bindings"), Rows);
+	Result->SetNumberField(TEXT("count"), Rows.Num());
+	Result->SetObjectField(TEXT("kind_counts"), KindBreakdown);
 	return FMonolithActionResult::Success(Result);
 }

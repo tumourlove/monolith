@@ -5,6 +5,11 @@
 #include "MovieSceneBinding.h"
 #include "MovieScenePossessable.h"
 #include "MovieSceneSpawnable.h"
+#include "MovieSceneSequence.h"
+#include "MovieSceneBindingReferences.h"
+#include "Bindings/MovieSceneCustomBinding.h"
+#include "Bindings/MovieSceneSpawnableBinding.h"
+#include "Bindings/MovieSceneReplaceableBinding.h"
 #include "Tracks/MovieSceneEventTrack.h"
 #include "Sections/MovieSceneEventTriggerSection.h"
 #include "Sections/MovieSceneEventRepeaterSection.h"
@@ -304,38 +309,143 @@ namespace
 		}
 	}
 
-	/** Resolve a binding GUID to (name, kind, class). Mutates out-params. */
-	void ResolveBinding(UMovieScene* MS, const FGuid& Guid, FString& OutName, FString& OutKind, FString& OutClass)
+	/**
+	 * Classify a binding GUID into (name, kind, bound_class, custom_binding_class, custom_binding_pretty).
+	 *
+	 * UE 5.7 introduced UMovieSceneCustomBinding (in BindingReferences) which sits ALONGSIDE
+	 * the legacy FMovieScenePossessable / FMovieSceneSpawnable structures. The migration path
+	 * (see ULevelSequence::ConvertOldSpawnables) registers modern Spawnables AS Possessables
+	 * inside UMovieScene while attaching their real spawnable identity to BindingReferences.
+	 * That means FindPossessable() returns non-null for them, and they would be mis-classified
+	 * as "possessable" if we didn't also consult Sequence->GetBindingReferences().
+	 *
+	 * Output meaning:
+	 *   OutKind             — editor-facing kind: possessable / spawnable / replaceable / custom / unknown
+	 *   OutClass            — class of the bound object (preferred from CustomBinding when present)
+	 *   OutCustomClass      — exact UCLASS name of the custom binding (e.g. MovieSceneSpawnableActorBinding)
+	 *   OutCustomPretty     — human-readable type label from GetBindingTypePrettyName()
+	 */
+	void ClassifyBinding(
+		UMovieSceneSequence* Seq, UMovieScene* MS, const FGuid& Guid, int32 BindingIndex,
+		FString& OutName, FString& OutKind, FString& OutClass,
+		FString& OutCustomClass, FString& OutCustomPretty)
 	{
 		OutName.Reset();
 		OutKind.Reset();
 		OutClass.Reset();
+		OutCustomClass.Reset();
+		OutCustomPretty.Reset();
 		if (!MS) return;
 
-		if (FMovieScenePossessable* P = MS->FindPossessable(Guid))
+		FMovieScenePossessable* Possessable = MS->FindPossessable(Guid);
+		FMovieSceneSpawnable*   LegacySpawn = MS->FindSpawnable(Guid);
+
+		if (Possessable)
 		{
-			OutName = P->GetName();
-			OutKind = TEXT("possessable");
+			OutName = Possessable->GetName();
 #if WITH_EDITORONLY_DATA
-			if (const UClass* Cls = P->GetPossessedObjectClass())
+			if (const UClass* Cls = Possessable->GetPossessedObjectClass())
 			{
 				OutClass = Cls->GetName();
 			}
 #endif
 		}
-		else if (FMovieSceneSpawnable* S = MS->FindSpawnable(Guid))
+		else if (LegacySpawn)
 		{
-			OutName = S->GetName();
+			OutName = LegacySpawn->GetName();
 			OutKind = TEXT("spawnable");
-			if (const UObject* Tmpl = S->GetObjectTemplate())
+			if (const UObject* Tmpl = LegacySpawn->GetObjectTemplate())
 			{
 				OutClass = Tmpl->GetClass()->GetName();
 			}
 		}
-		else
+
+		const UMovieSceneCustomBinding* Custom = nullptr;
+		if (Seq)
 		{
-			OutKind = TEXT("unknown");
+			if (const FMovieSceneBindingReferences* Refs = Seq->GetBindingReferences())
+			{
+				Custom = Refs->GetCustomBinding(Guid, BindingIndex);
+			}
 		}
+
+		if (Custom)
+		{
+			OutCustomClass  = Custom->GetClass()->GetName();
+			OutCustomPretty = Custom->GetBindingTypePrettyName().ToString();
+
+			if (UClass* BoundCls = Custom->GetBoundObjectClass())
+			{
+				// CustomBinding's bound class is more authoritative than the
+				// possessable upgrade-stub class — prefer it when both exist.
+				OutClass = BoundCls->GetName();
+			}
+
+			if (Custom->IsA<UMovieSceneSpawnableBindingBase>())
+			{
+				OutKind = TEXT("spawnable");
+			}
+			else if (Custom->IsA<UMovieSceneReplaceableBindingBase>())
+			{
+				OutKind = TEXT("replaceable");
+			}
+			else
+			{
+				OutKind = TEXT("custom");
+			}
+		}
+		else if (OutKind.IsEmpty())
+		{
+			OutKind = Possessable ? TEXT("possessable") : TEXT("unknown");
+		}
+	}
+
+	/** Backward-compatible 3-out wrapper around ClassifyBinding (drops custom-binding info). */
+	void ResolveBinding(UMovieSceneSequence* Seq, UMovieScene* MS, const FGuid& Guid,
+		FString& OutName, FString& OutKind, FString& OutClass)
+	{
+		FString CustomClass, CustomPretty;
+		ClassifyBinding(Seq, MS, Guid, 0, OutName, OutKind, OutClass, CustomClass, CustomPretty);
+	}
+
+	/** Insert one row into level_sequence_bindings via a prepared statement. */
+	void InsertBindingRow(
+		FSQLiteDatabase* RawDB,
+		int64 LsAssetId,
+		const FString& BindingGuidStr,
+		int32 BindingIndex,
+		const FString& Name,
+		const FString& Kind,
+		const FString& BoundClass,
+		const FString& CustomBindingClass,
+		const FString& CustomBindingPretty,
+		int32 TrackCount)
+	{
+		if (!RawDB) return;
+
+		FSQLitePreparedStatement Stmt;
+		if (!Stmt.Create(*RawDB, TEXT(
+			"INSERT INTO level_sequence_bindings "
+			"(ls_asset_id, binding_guid, binding_index, name, kind, bound_class, "
+			" custom_binding_class, custom_binding_pretty, track_count) "
+			"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")))
+		{
+			return;
+		}
+
+		Stmt.SetBindingValueByIndex(1, LsAssetId);
+		Stmt.SetBindingValueByIndex(2, BindingGuidStr);
+		Stmt.SetBindingValueByIndex(3, BindingIndex);
+		BindNullableString(Stmt, 4, Name);
+		// kind is NOT NULL — ClassifyBinding always sets it (worst case 'unknown').
+		Stmt.SetBindingValueByIndex(5, Kind);
+		BindNullableString(Stmt, 6, BoundClass);
+		BindNullableString(Stmt, 7, CustomBindingClass);
+		BindNullableString(Stmt, 8, CustomBindingPretty);
+		Stmt.SetBindingValueByIndex(9, TrackCount);
+
+		Stmt.Execute();
+		Stmt.Destroy();
 	}
 }
 
@@ -425,6 +535,39 @@ void FLevelSequenceIndexer::EnsureTablesExist(FMonolithIndexDatabase& DB)
 	RawDB->Execute(TEXT("CREATE INDEX IF NOT EXISTS idx_lsdir_eb_func ON level_sequence_event_bindings(fires_function_id)"));
 	RawDB->Execute(TEXT("CREATE INDEX IF NOT EXISTS idx_lsdir_eb_funcname ON level_sequence_event_bindings(fires_function_name)"));
 
+	// Per-binding table — one row per (Guid, BindingIndex) regardless of whether
+	// the binding has event tracks. Captures the full UE 5.7 picture including
+	// modern Spawnables backed by UMovieSceneCustomBinding (which UMovieScene
+	// also registers as Possessables for tracks; the custom binding identity
+	// lives on UMovieSceneSequence::GetBindingReferences()).
+	//
+	// kind ∈ {possessable, spawnable, replaceable, custom, unknown}
+	//   spawnable    — legacy FMovieSceneSpawnable OR custom UMovieSceneSpawnableBindingBase
+	//   replaceable  — custom UMovieSceneReplaceableBindingBase
+	//   custom       — any other UMovieSceneCustomBinding subclass
+	//   possessable  — plain possessable with no custom binding
+	//
+	// custom_binding_class is the exact UCLASS name (e.g. MovieSceneSpawnableActorBinding)
+	// or NULL for legacy bindings without a UMovieSceneCustomBinding.
+	// ls_asset_id deliberately FK-free; same reason as level_sequence_directors above.
+	RawDB->Execute(TEXT(
+		"CREATE TABLE IF NOT EXISTS level_sequence_bindings ("
+		"  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+		"  ls_asset_id INTEGER NOT NULL,"
+		"  binding_guid TEXT NOT NULL,"
+		"  binding_index INTEGER NOT NULL DEFAULT 0,"
+		"  name TEXT,"
+		"  kind TEXT NOT NULL,"
+		"  bound_class TEXT,"
+		"  custom_binding_class TEXT,"
+		"  custom_binding_pretty TEXT,"
+		"  track_count INTEGER NOT NULL DEFAULT 0"
+		")"
+	));
+	RawDB->Execute(TEXT("CREATE INDEX IF NOT EXISTS idx_ls_bind_ls ON level_sequence_bindings(ls_asset_id)"));
+	RawDB->Execute(TEXT("CREATE INDEX IF NOT EXISTS idx_ls_bind_kind ON level_sequence_bindings(kind)"));
+	RawDB->Execute(TEXT("CREATE INDEX IF NOT EXISTS idx_ls_bind_custom ON level_sequence_bindings(custom_binding_class)"));
+
 	bTablesCreated = true;
 }
 
@@ -446,16 +589,45 @@ bool FLevelSequenceIndexer::IndexAsset(const FAssetData& AssetData, UObject* Loa
 	int64 OldDirId = -1, OldAssetId = -1;
 	SelectExistingDirectorIdAndAssetId(RawDB, LsPathEarly, OldDirId, OldAssetId);
 
-	// Wipe event_bindings under BOTH the current asset id and the old one.
+	// Wipe event_bindings + bindings under BOTH the current asset id and the old one.
 	// Without the OldAssetId pass, prior-reindex rows would orphan and never
 	// be cleaned because their ls_asset_id no longer matches anything we know.
 	ExecWithInt64(RawDB, TEXT("DELETE FROM level_sequence_event_bindings WHERE ls_asset_id = ?"), AssetId);
+	ExecWithInt64(RawDB, TEXT("DELETE FROM level_sequence_bindings WHERE ls_asset_id = ?"), AssetId);
 	if (OldAssetId > 0 && OldAssetId != AssetId)
 	{
 		ExecWithInt64(RawDB, TEXT("DELETE FROM level_sequence_event_bindings WHERE ls_asset_id = ?"), OldAssetId);
+		ExecWithInt64(RawDB, TEXT("DELETE FROM level_sequence_bindings WHERE ls_asset_id = ?"), OldAssetId);
 	}
 
 #if WITH_EDITORONLY_DATA
+	// Index all bindings (one row per Guid×BindingIndex) BEFORE the Director early-return,
+	// so cinematics with no Director still get their binding inventory recorded.
+	if (UMovieScene* MS = Seq->GetMovieScene())
+	{
+		const UMovieScene* CMSBindings = MS;
+		const FMovieSceneBindingReferences* BindingRefs = Seq->GetBindingReferences();
+
+		for (const FMovieSceneBinding& Binding : CMSBindings->GetBindings())
+		{
+			const FGuid Guid = Binding.GetObjectGuid();
+			const FString GuidStr = Guid.ToString(EGuidFormats::Digits);
+			const int32 TrackCount = Binding.GetTracks().Num();
+			// BindingReferences allows a priority-list of bindings per Guid; emit a row
+			// per index so callers can see the full picture. When no references exist
+			// for this Guid (pure legacy possessable/spawnable), emit one row at index 0.
+			const int32 NumRefs = BindingRefs ? BindingRefs->GetReferences(Guid).Num() : 0;
+			const int32 RowsForGuid = FMath::Max(1, NumRefs);
+
+			for (int32 Idx = 0; Idx < RowsForGuid; ++Idx)
+			{
+				FString Name, Kind, BoundClass, CustomClass, CustomPretty;
+				ClassifyBinding(Seq, MS, Guid, Idx, Name, Kind, BoundClass, CustomClass, CustomPretty);
+				InsertBindingRow(RawDB, AssetId, GuidStr, Idx, Name, Kind, BoundClass, CustomClass, CustomPretty, TrackCount);
+			}
+		}
+	}
+
 	UBlueprint* DirBP = Seq->GetDirectorBlueprint();
 	if (!DirBP)
 	{
@@ -645,7 +817,7 @@ bool FLevelSequenceIndexer::IndexAsset(const FAssetData& AssetData, UObject* Loa
 		{
 			const FGuid Guid = Binding.GetObjectGuid();
 			FString BindingName, BindingKind, BoundClass;
-			ResolveBinding(MS, Guid, BindingName, BindingKind, BoundClass);
+			ResolveBinding(Seq, MS, Guid, BindingName, BindingKind, BoundClass);
 
 			const FString GuidStr = Guid.ToString(EGuidFormats::Digits);
 			for (UMovieSceneTrack* Track : Binding.GetTracks())

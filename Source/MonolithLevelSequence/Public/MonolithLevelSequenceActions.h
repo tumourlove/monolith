@@ -67,4 +67,17 @@ public:
 	 * declaration order. Variables come from DirBP->NewVariables.
 	 */
 	static FMonolithActionResult ListDirectorVariables(const TSharedPtr<FJsonObject>& Params);
+
+	/**
+	 * List ALL bindings inside one Level Sequence (one row per Guid×BindingIndex),
+	 * regardless of whether the binding has event tracks. UE 5.7 distinguishes:
+	 *   possessable  — plain possessable, no UMovieSceneCustomBinding
+	 *   spawnable    — legacy FMovieSceneSpawnable OR custom UMovieSceneSpawnableBindingBase
+	 *   replaceable  — custom UMovieSceneReplaceableBindingBase
+	 *   custom       — any other UMovieSceneCustomBinding subclass
+	 * For custom bindings, custom_binding_class names the exact UCLASS (e.g.
+	 * MovieSceneSpawnableActorBinding) and custom_binding_pretty carries the
+	 * editor-facing label.
+	 */
+	static FMonolithActionResult ListBindings(const TSharedPtr<FJsonObject>& Params);
 };
