@@ -10,6 +10,7 @@
 #include "MonolithJsonUtils.h"
 #include "MonolithParamSchema.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_CustomEvent.h"
 #include "K2Node_VariableGet.h"
@@ -21,6 +22,11 @@
 #include "K2Node_DynamicCast.h"
 #include "K2Node_Timeline.h"
 #include "K2Node_Event.h"
+#include "K2Node_ComponentBoundEvent.h"
+#include "K2Node_AddDelegate.h"
+#include "K2Node_RemoveDelegate.h"
+#include "K2Node_ClearDelegate.h"
+#include "K2Node_CallDelegate.h"
 #include "K2Node_Self.h"
 #include "K2Node_FunctionResult.h"
 #include "K2Node_MakeStruct.h"
@@ -173,15 +179,15 @@ bool MonolithBlueprintInternal::HasCustomEventNamed(UBlueprint* BP, FName EventN
 void FMonolithBlueprintNodeActions::RegisterActions(FMonolithToolRegistry& Registry)
 {
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("add_node"),
-		TEXT("Add a new node to a Blueprint graph. Supports CallFunction, VariableGet, VariableSet, CustomEvent, Branch, Sequence, MacroInstance, SpawnActorFromClass, DynamicCast, Self, Return, MakeStruct, BreakStruct, SwitchOnEnum, SwitchOnInt, SwitchOnString, FormatText, MakeArray, Select node types. Also supports shorthand aliases: ForEachLoop, ForLoop, ForLoopWithBreak, DoOnce, FlipFlop, Gate (macro shortcuts), IsValid, Delay, RetriggerableDelay (function shortcuts), make_struct, break_struct, switch_enum, switch_int, switch_string, format_text, make_array, select."),
+		TEXT("Add a new node to a Blueprint graph. Supports CallFunction, VariableGet, VariableSet, CustomEvent, Branch, Sequence, MacroInstance, SpawnActorFromClass, DynamicCast, Self, Return, MakeStruct, BreakStruct, SwitchOnEnum, SwitchOnInt, SwitchOnString, FormatText, MakeArray, Select node types. Also supports shorthand aliases: ForEachLoop, ForLoop, ForLoopWithBreak, DoOnce, FlipFlop, Gate (macro shortcuts), IsValid, Delay, RetriggerableDelay (function shortcuts), make_struct, break_struct, switch_enum, switch_int, switch_string, format_text, make_array, select. ComponentBoundEvent (binds an event entry node to a component's BlueprintAssignable multicast delegate; requires component_name + delegate_property_name), AddDelegate (binds an event to a BlueprintAssignable multicast delegate; \"Bind Event to ...\" node), RemoveDelegate (\"Unbind Event from ...\" — removes one previously bound event), ClearDelegate (\"Unbind all Events from ...\" — clears every bound listener), CallDelegate (\"Call ...\" — broadcasts a BP-resident multicast delegate to all listeners)"),
 		FMonolithActionHandler::CreateStatic(&HandleAddNode),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"),       TEXT("string"),  TEXT("Blueprint asset path"))
-			.Required(TEXT("node_type"),         TEXT("string"),  TEXT("Node type: CallFunction (or 'function'/'call'), VariableGet (or 'get'), VariableSet (or 'set'), CustomEvent (or 'event'), Branch (or 'if'), Sequence, MacroInstance (or 'macro'), SpawnActorFromClass (or 'spawn'), DynamicCast (or 'cast'), Self, Return, MakeStruct (or 'make_struct'), BreakStruct (or 'break_struct'), SwitchOnEnum (or 'switch_enum'), SwitchOnInt (or 'switch_int'), SwitchOnString (or 'switch_string'), FormatText (or 'format_text'), MakeArray (or 'make_array'), Select. Shortcuts: ForEachLoop, ForLoop, DoOnce, FlipFlop, Gate, IsValid, Delay, RetriggerableDelay"))
+			.Required(TEXT("node_type"),         TEXT("string"),  TEXT("Node type: CallFunction (or 'function'/'call'), VariableGet (or 'get'), VariableSet (or 'set'), CustomEvent (or 'event'), Branch (or 'if'), Sequence, MacroInstance (or 'macro'), SpawnActorFromClass (or 'spawn'), DynamicCast (or 'cast'), Self, Return, MakeStruct (or 'make_struct'), BreakStruct (or 'break_struct'), SwitchOnEnum (or 'switch_enum'), SwitchOnInt (or 'switch_int'), SwitchOnString (or 'switch_string'), FormatText (or 'format_text'), MakeArray (or 'make_array'), Select. Shortcuts: ForEachLoop, ForLoop, DoOnce, FlipFlop, Gate, IsValid, Delay, RetriggerableDelay, ComponentBoundEvent, AddDelegate, RemoveDelegate, ClearDelegate, CallDelegate"))
 			.Optional(TEXT("graph_name"),        TEXT("string"),  TEXT("Graph name (defaults to EventGraph)"))
 			.Optional(TEXT("position"),          TEXT("array"),   TEXT("Node position as [x, y] (default: [0, 0])"))
 			.Optional(TEXT("function_name"),     TEXT("string"),  TEXT("Function name for CallFunction nodes (e.g. PrintString)"))
-			.Optional(TEXT("target_class"),      TEXT("string"),  TEXT("Class to search for the function (e.g. KismetSystemLibrary). If omitted, searches all loaded classes."))
+			.Optional(TEXT("target_class"),      TEXT("string"),  TEXT("Class to search for the function (CallFunction) or delegate (AddDelegate / RemoveDelegate / ClearDelegate / CallDelegate). For delegate nodes, defaults to BP's generated class (self-context) if omitted. For CallFunction, searches all loaded classes if omitted."))
 			.Optional(TEXT("variable_name"),     TEXT("string"),  TEXT("Variable name for VariableGet/VariableSet nodes"))
 			.Optional(TEXT("event_name"),        TEXT("string"),  TEXT("Custom event name for CustomEvent nodes"))
 			.Optional(TEXT("macro_name"),        TEXT("string"),  TEXT("Macro graph name for MacroInstance nodes"))
@@ -194,6 +200,8 @@ void FMonolithBlueprintNodeActions::RegisterActions(FMonolithToolRegistry& Regis
 			.Optional(TEXT("num_entries"),        TEXT("integer"), TEXT("Number of input entries for MakeArray nodes (default: 1)"))
 			.Optional(TEXT("replication"),        TEXT("string"),  TEXT("Replication mode for CustomEvent nodes: none, multicast, server, client (default: none)"))
 			.Optional(TEXT("reliable"),           TEXT("bool"),    TEXT("Use reliable replication for CustomEvent nodes (default: false)"))
+			.Optional(TEXT("component_name"),         TEXT("string"),  TEXT("Component variable name (SCS/native subobject) for ComponentBoundEvent nodes"))
+			.Optional(TEXT("delegate_property_name"), TEXT("string"),  TEXT("Multicast delegate property name. Required for ComponentBoundEvent (resolved on component class) and AddDelegate / RemoveDelegate / ClearDelegate / CallDelegate (resolved on target_class or BP's generated class)."))
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("remove_node"),
@@ -254,12 +262,15 @@ void FMonolithBlueprintNodeActions::RegisterActions(FMonolithToolRegistry& Regis
 		TEXT("Dry-run node creation — returns resolved type, class, function, and all pins with types/defaults/direction without modifying any asset. Useful for discovering what pins a node will have before adding it."),
 		FMonolithActionHandler::CreateStatic(&HandleResolveNode),
 		FParamSchemaBuilder()
-			.Required(TEXT("node_type"),     TEXT("string"), TEXT("Node type: CallFunction, VariableGet, VariableSet, Branch, CustomEvent (same aliases as add_node)"))
-			.Optional(TEXT("function_name"), TEXT("string"), TEXT("Function name for CallFunction nodes"))
-			.Optional(TEXT("target_class"),  TEXT("string"), TEXT("Class to search for the function (optional for CallFunction)"))
-			.Optional(TEXT("variable_name"), TEXT("string"), TEXT("Variable name hint for VariableGet/VariableSet (uses wildcard if omitted)"))
-			.Optional(TEXT("replication"),   TEXT("string"), TEXT("Replication mode for CustomEvent: none, multicast, server, client"))
-			.Optional(TEXT("reliable"),      TEXT("bool"),   TEXT("Use reliable replication for CustomEvent"))
+			.Required(TEXT("node_type"),              TEXT("string"), TEXT("Node type: CallFunction, VariableGet, VariableSet, Branch, CustomEvent, ComponentBoundEvent, AddDelegate, RemoveDelegate, ClearDelegate, CallDelegate (same aliases as add_node)"))
+			.Optional(TEXT("function_name"),          TEXT("string"), TEXT("Function name for CallFunction nodes"))
+			.Optional(TEXT("target_class"),           TEXT("string"), TEXT("Class to search for the function (CallFunction) or delegate (AddDelegate / RemoveDelegate / ClearDelegate / CallDelegate)"))
+			.Optional(TEXT("variable_name"),          TEXT("string"), TEXT("Variable name hint for VariableGet/VariableSet (uses wildcard if omitted)"))
+			.Optional(TEXT("replication"),            TEXT("string"), TEXT("Replication mode for CustomEvent: none, multicast, server, client"))
+			.Optional(TEXT("reliable"),               TEXT("bool"),   TEXT("Use reliable replication for CustomEvent"))
+			.Optional(TEXT("asset_path"),             TEXT("string"), TEXT("Blueprint asset path (required for ComponentBoundEvent and AddDelegate / RemoveDelegate / ClearDelegate / CallDelegate self-context dry-runs)"))
+			.Optional(TEXT("component_name"),         TEXT("string"), TEXT("Component variable name for ComponentBoundEvent dry-run"))
+			.Optional(TEXT("delegate_property_name"), TEXT("string"), TEXT("Multicast delegate name for ComponentBoundEvent / AddDelegate / RemoveDelegate / ClearDelegate / CallDelegate dry-run"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("batch_execute"),
@@ -938,6 +949,152 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddNode(const TShared
 		ReturnNode->AllocateDefaultPins();
 		NewNode = ReturnNode;
 	}
+	// ---- ComponentBoundEvent ----
+	// Emits the green event-entry node spawned by clicking "+" next to a
+	// component delegate in Designer. Inherits from K2Node_Event; the abbreviated
+	// spawn pattern (no PostPlacedNewNode / CreateNewGuid) is sufficient because
+	// K2Node_ComponentBoundEvent does not override either method in UE 5.7.
+	else if (NodeType == TEXT("ComponentBoundEvent"))
+	{
+		FString CompNameStr = Params->GetStringField(TEXT("component_name"));
+		FString DelegateNameStr = Params->GetStringField(TEXT("delegate_property_name"));
+		if (CompNameStr.IsEmpty() || DelegateNameStr.IsEmpty())
+		{
+			return FMonolithActionResult::Error(
+				TEXT("ComponentBoundEvent requires 'component_name' and 'delegate_property_name'"));
+		}
+
+		FObjectProperty* CompProp = MonolithBlueprintInternal::FindComponentProperty(BP, FName(*CompNameStr));
+		if (!CompProp)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Component variable '%s' not found on Blueprint '%s' (must be a named subobject on the BP — SCS component for Actor BPs, named widget for UMG BPs)"),
+				*CompNameStr, *BP->GetName()));
+		}
+
+		FMulticastDelegateProperty* DelegateProp = MonolithBlueprintInternal::FindMulticastDelegateProperty(
+			CompProp->PropertyClass, FName(*DelegateNameStr));
+		if (!DelegateProp)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("BlueprintAssignable multicast delegate '%s' not found on class '%s'"),
+				*DelegateNameStr, *CompProp->PropertyClass->GetName()));
+		}
+
+		// Reject duplicates BP-wide. Engine's CanPasteHere uses
+		// FindBoundEventForComponent (Blueprint scope, all graphs); match that
+		// or callers will hit a hard compile error after authoring.
+		if (const UK2Node_ComponentBoundEvent* ExBound =
+			FKismetEditorUtilities::FindBoundEventForComponent(BP, FName(*DelegateNameStr), FName(*CompNameStr)))
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("ComponentBoundEvent for '%s.%s' already exists in this Blueprint (node: %s)"),
+				*CompNameStr, *DelegateNameStr, *ExBound->GetName()));
+		}
+
+		UK2Node_ComponentBoundEvent* BoundNode = NewObject<UK2Node_ComponentBoundEvent>(Graph);
+		BoundNode->InitializeComponentBoundEventParams(CompProp, DelegateProp);
+		BoundNode->NodePosX = PosX;
+		BoundNode->NodePosY = PosY;
+		Graph->AddNode(BoundNode, /*bUserAction=*/true, /*bSelectNewNode=*/false);
+		BoundNode->AllocateDefaultPins();
+
+		NewNode = BoundNode;
+	}
+	// ---- AddDelegate ----
+	// "Bind Event to <DelegateProperty>" graph node. Caller wires the resulting
+	// node's "Delegate" pin to a CustomEvent's OutputDelegate pin via connect_pins
+	// in a follow-up call (or via add_nodes_bulk + connect_pins_bulk).
+	else if (NodeType == TEXT("AddDelegate"))
+	{
+		UClass* OwnerClass = nullptr;
+		FMulticastDelegateProperty* DelegateProp = nullptr;
+		bool bSelfContext = false;
+		FMonolithActionResult Resolved = MonolithBlueprintInternal::ResolveDelegateOwnerAndProperty(
+			Params, BP->GeneratedClass, TEXT("AddDelegate"),
+			OwnerClass, DelegateProp, bSelfContext);
+		if (!Resolved.bSuccess) return Resolved;
+
+		UK2Node_AddDelegate* AddNode = NewObject<UK2Node_AddDelegate>(Graph);
+		AddNode->SetFromProperty(DelegateProp, bSelfContext, DelegateProp->GetOwnerClass());
+		AddNode->NodePosX = PosX;
+		AddNode->NodePosY = PosY;
+		Graph->AddNode(AddNode, /*bUserAction=*/true, /*bSelectNewNode=*/false);
+		AddNode->AllocateDefaultPins();
+
+		NewNode = AddNode;
+	}
+	// ---- RemoveDelegate ----
+	// "Unbind Event from <DelegateProperty>" graph node. Removes a previously
+	// bound event at runtime. Same shape as AddDelegate — caller wires the node's
+	// "Delegate" pin to the CustomEvent that was previously bound.
+	else if (NodeType == TEXT("RemoveDelegate"))
+	{
+		UClass* OwnerClass = nullptr;
+		FMulticastDelegateProperty* DelegateProp = nullptr;
+		bool bSelfContext = false;
+		FMonolithActionResult Resolved = MonolithBlueprintInternal::ResolveDelegateOwnerAndProperty(
+			Params, BP->GeneratedClass, TEXT("RemoveDelegate"),
+			OwnerClass, DelegateProp, bSelfContext);
+		if (!Resolved.bSuccess) return Resolved;
+
+		UK2Node_RemoveDelegate* RemoveNode = NewObject<UK2Node_RemoveDelegate>(Graph);
+		RemoveNode->SetFromProperty(DelegateProp, bSelfContext, DelegateProp->GetOwnerClass());
+		RemoveNode->NodePosX = PosX;
+		RemoveNode->NodePosY = PosY;
+		Graph->AddNode(RemoveNode, /*bUserAction=*/true, /*bSelectNewNode=*/false);
+		RemoveNode->AllocateDefaultPins();
+
+		NewNode = RemoveNode;
+	}
+	// ---- ClearDelegate ----
+	// "Unbind all Events from <DelegateProperty>" graph node. Removes every
+	// listener at runtime in one call. Same shape as AddDelegate but binds
+	// no event reference.
+	else if (NodeType == TEXT("ClearDelegate"))
+	{
+		UClass* OwnerClass = nullptr;
+		FMulticastDelegateProperty* DelegateProp = nullptr;
+		bool bSelfContext = false;
+		FMonolithActionResult Resolved = MonolithBlueprintInternal::ResolveDelegateOwnerAndProperty(
+			Params, BP->GeneratedClass, TEXT("ClearDelegate"),
+			OwnerClass, DelegateProp, bSelfContext);
+		if (!Resolved.bSuccess) return Resolved;
+
+		UK2Node_ClearDelegate* ClearNode = NewObject<UK2Node_ClearDelegate>(Graph);
+		ClearNode->SetFromProperty(DelegateProp, bSelfContext, DelegateProp->GetOwnerClass());
+		ClearNode->NodePosX = PosX;
+		ClearNode->NodePosY = PosY;
+		Graph->AddNode(ClearNode, /*bUserAction=*/true, /*bSelectNewNode=*/false);
+		ClearNode->AllocateDefaultPins();
+
+		NewNode = ClearNode;
+	}
+	// ---- CallDelegate ----
+	// "Call <DelegateProperty>" graph node — broadcasts a multicast delegate
+	// to all bound listeners. Used when the dispatcher itself is BP-resident
+	// (i.e. the broadcast site is in a Blueprint, not C++). Spawned node has
+	// one input pin per delegate signature parameter; caller wires payload
+	// values via set_pin_default / connect_pins as needed.
+	else if (NodeType == TEXT("CallDelegate"))
+	{
+		UClass* OwnerClass = nullptr;
+		FMulticastDelegateProperty* DelegateProp = nullptr;
+		bool bSelfContext = false;
+		FMonolithActionResult Resolved = MonolithBlueprintInternal::ResolveDelegateOwnerAndProperty(
+			Params, BP->GeneratedClass, TEXT("CallDelegate"),
+			OwnerClass, DelegateProp, bSelfContext);
+		if (!Resolved.bSuccess) return Resolved;
+
+		UK2Node_CallDelegate* CallNode = NewObject<UK2Node_CallDelegate>(Graph);
+		CallNode->SetFromProperty(DelegateProp, bSelfContext, DelegateProp->GetOwnerClass());
+		CallNode->NodePosX = PosX;
+		CallNode->NodePosY = PosY;
+		Graph->AddNode(CallNode, /*bUserAction=*/true, /*bSelectNewNode=*/false);
+		CallNode->AllocateDefaultPins();
+
+		NewNode = CallNode;
+	}
 	else
 	{
 		// Generic K2Node fallback — try to find any UK2Node subclass by name
@@ -976,7 +1133,7 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddNode(const TShared
 		else
 		{
 			return FMonolithActionResult::Error(FString::Printf(
-				TEXT("Unknown node_type '%s'. Supported types: CallFunction, VariableGet, VariableSet, CustomEvent, Branch, Sequence, MacroInstance, SpawnActorFromClass, DynamicCast, Self, Return, MakeStruct, BreakStruct, SwitchOnEnum, SwitchOnInt, SwitchOnString, FormatText, MakeArray, Select. Also accepts any UK2Node_ class name as generic fallback."),
+				TEXT("Unknown node_type '%s'. Supported types: CallFunction, VariableGet, VariableSet, CustomEvent, Branch, Sequence, MacroInstance, SpawnActorFromClass, DynamicCast, Self, Return, MakeStruct, BreakStruct, SwitchOnEnum, SwitchOnInt, SwitchOnString, FormatText, MakeArray, Select, ComponentBoundEvent, AddDelegate, RemoveDelegate, ClearDelegate, CallDelegate. Also accepts any UK2Node_ class name as generic fallback."),
 				*NodeType));
 		}
 	}
@@ -1746,6 +1903,102 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleResolveNode(const TSh
 		Node = ReturnNode;
 		Warnings.Add(TEXT("Return node pins depend on the function signature in the actual Blueprint"));
 	}
+	else if (NodeType == TEXT("ComponentBoundEvent"))
+	{
+		FString AssetPath;
+		UBlueprint* BP = MonolithBlueprintInternal::LoadBlueprintFromParams(Params, AssetPath);
+		if (!BP)
+		{
+			return FMonolithActionResult::Error(
+				TEXT("resolve_node for ComponentBoundEvent requires asset_path to resolve the component variable"));
+		}
+
+		FString CompNameStr = Params->GetStringField(TEXT("component_name"));
+		FString DelegateNameStr = Params->GetStringField(TEXT("delegate_property_name"));
+		if (CompNameStr.IsEmpty() || DelegateNameStr.IsEmpty())
+		{
+			return FMonolithActionResult::Error(
+				TEXT("ComponentBoundEvent dry-run requires 'component_name' and 'delegate_property_name'"));
+		}
+
+		FObjectProperty* CompProp = MonolithBlueprintInternal::FindComponentProperty(BP, FName(*CompNameStr));
+		if (!CompProp)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Component variable '%s' not found on Blueprint '%s' (must be a named subobject on the BP — SCS component for Actor BPs, named widget for UMG BPs)"),
+				*CompNameStr, *BP->GetName()));
+		}
+
+		FMulticastDelegateProperty* DelegateProp = MonolithBlueprintInternal::FindMulticastDelegateProperty(
+			CompProp->PropertyClass, FName(*DelegateNameStr));
+		if (!DelegateProp)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("BlueprintAssignable multicast delegate '%s' not found"), *DelegateNameStr));
+		}
+
+		UK2Node_ComponentBoundEvent* BoundNode = NewObject<UK2Node_ComponentBoundEvent>(TempGraph);
+		BoundNode->InitializeComponentBoundEventParams(CompProp, DelegateProp);
+		BoundNode->AllocateDefaultPins();
+		Node = BoundNode;
+	}
+	else if (NodeType == TEXT("AddDelegate") ||
+	         NodeType == TEXT("RemoveDelegate") ||
+	         NodeType == TEXT("ClearDelegate") ||
+	         NodeType == TEXT("CallDelegate"))
+	{
+		// Self-context fallback: if target_class is empty, try to resolve the BP
+		// from asset_path so the helper can use BP->GeneratedClass as the owner.
+		// If both target_class and asset_path are missing, the helper reports a
+		// clear error including the node-type label.
+		UClass* SelfContextClass = nullptr;
+		FString TargetClassName = Params->GetStringField(TEXT("target_class"));
+		if (TargetClassName.IsEmpty())
+		{
+			FString AssetPath;
+			if (UBlueprint* BP = MonolithBlueprintInternal::LoadBlueprintFromParams(Params, AssetPath))
+			{
+				SelfContextClass = BP->GeneratedClass;
+			}
+		}
+
+		UClass* OwnerClass = nullptr;
+		FMulticastDelegateProperty* DelegateProp = nullptr;
+		bool bSelfContext = false;
+		FMonolithActionResult Resolved = MonolithBlueprintInternal::ResolveDelegateOwnerAndProperty(
+			Params, SelfContextClass, *NodeType,
+			OwnerClass, DelegateProp, bSelfContext);
+		if (!Resolved.bSuccess) return Resolved;
+
+		if (NodeType == TEXT("AddDelegate"))
+		{
+			UK2Node_AddDelegate* N = NewObject<UK2Node_AddDelegate>(TempGraph);
+			N->SetFromProperty(DelegateProp, bSelfContext, DelegateProp->GetOwnerClass());
+			N->AllocateDefaultPins();
+			Node = N;
+		}
+		else if (NodeType == TEXT("RemoveDelegate"))
+		{
+			UK2Node_RemoveDelegate* N = NewObject<UK2Node_RemoveDelegate>(TempGraph);
+			N->SetFromProperty(DelegateProp, bSelfContext, DelegateProp->GetOwnerClass());
+			N->AllocateDefaultPins();
+			Node = N;
+		}
+		else if (NodeType == TEXT("ClearDelegate"))
+		{
+			UK2Node_ClearDelegate* N = NewObject<UK2Node_ClearDelegate>(TempGraph);
+			N->SetFromProperty(DelegateProp, bSelfContext, DelegateProp->GetOwnerClass());
+			N->AllocateDefaultPins();
+			Node = N;
+		}
+		else // CallDelegate
+		{
+			UK2Node_CallDelegate* N = NewObject<UK2Node_CallDelegate>(TempGraph);
+			N->SetFromProperty(DelegateProp, bSelfContext, DelegateProp->GetOwnerClass());
+			N->AllocateDefaultPins();
+			Node = N;
+		}
+	}
 	else
 	{
 		// Generic fallback — try to find any UK2Node subclass
@@ -1766,7 +2019,7 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleResolveNode(const TSh
 		else
 		{
 			return FMonolithActionResult::Error(FString::Printf(
-				TEXT("Unsupported node_type for resolve_node: '%s'. Supported: CallFunction, VariableGet, VariableSet, Branch, CustomEvent, Sequence, Self, MacroInstance, Return, or any UK2Node_ class name"), *NodeType));
+				TEXT("Unsupported node_type for resolve_node: '%s'. Supported: CallFunction, VariableGet, VariableSet, Branch, CustomEvent, Sequence, Self, MacroInstance, Return, ComponentBoundEvent, AddDelegate, RemoveDelegate, ClearDelegate, CallDelegate, or any UK2Node_ class name"), *NodeType));
 		}
 	}
 

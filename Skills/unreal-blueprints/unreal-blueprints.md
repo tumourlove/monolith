@@ -123,6 +123,11 @@ Also works on: Level Blueprints (map path or `$current`), Widget Blueprints.
 | `Select` / `ForEachLoop` / `ForLoop` / `ForLoopWithBreak` | — | |
 | `DoOnce` / `FlipFlop` / `Gate` | — | Engine macros |
 | `IsValid` / `Delay` / `RetriggerableDelay` | — | |
+| `ComponentBoundEvent` | `component_name`, `delegate_property_name` | "+OnClicked" event entry. Rejects duplicate (component, delegate) BP-wide. Component must be SCS or UMG widget; delegate must be `BlueprintAssignable` multicast on the component class |
+| `AddDelegate` | `delegate_property_name`, `target_class`? | "Bind Event to..." for `BlueprintAssignable` multicast. Defaults to self-context (BP's class); `target_class` accepts bare or prefixed forms |
+| `RemoveDelegate` | `delegate_property_name`, `target_class`? | "Unbind Event from..." — removes one previously bound event. Same params as `AddDelegate` |
+| `ClearDelegate` | `delegate_property_name`, `target_class`? | "Unbind all Events from..." — clears every bound listener. Same params as `AddDelegate` |
+| `CallDelegate` | `delegate_property_name`, `target_class`? | "Call ..." — broadcasts a BP-resident multicast delegate to all listeners. Spawned node has one input pin per delegate signature parameter |
 | *(any UK2Node_ class)* | — | Generic fallback |
 
 ### Compile & Create (6)

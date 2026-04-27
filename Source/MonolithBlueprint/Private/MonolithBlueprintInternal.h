@@ -19,6 +19,12 @@
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
 #include "K2Node_MacroInstance.h"
+#include "K2Node_ComponentBoundEvent.h"
+#include "K2Node_AddDelegate.h"
+#include "K2Node_RemoveDelegate.h"
+#include "K2Node_ClearDelegate.h"
+#include "K2Node_CallDelegate.h"
+#include "K2Node_BaseMCDelegate.h"
 #include "EdGraphNode_Comment.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -250,6 +256,36 @@ namespace MonolithBlueprintInternal
 				NObj->SetStringField(TEXT("function_class"), OwnerClass->GetName());
 			}
 		}
+		else if (UK2Node_ComponentBoundEvent* BoundNode = Cast<UK2Node_ComponentBoundEvent>(Node))
+		{
+			NObj->SetStringField(TEXT("component_name"),
+				BoundNode->ComponentPropertyName.ToString());
+			NObj->SetStringField(TEXT("delegate_property_name"),
+				BoundNode->DelegatePropertyName.ToString());
+			NObj->SetStringField(TEXT("event_name"),
+				BoundNode->EventReference.GetMemberName().ToString());
+			if (BoundNode->CustomFunctionName != NAME_None)
+			{
+				NObj->SetStringField(TEXT("custom_name"),
+					BoundNode->CustomFunctionName.ToString());
+			}
+			if (BoundNode->DelegateOwnerClass)
+			{
+				NObj->SetStringField(TEXT("delegate_owner_class"),
+					BoundNode->DelegateOwnerClass->GetName());
+			}
+		}
+		else if (UK2Node_BaseMCDelegate* DelegateNode = Cast<UK2Node_BaseMCDelegate>(Node))
+		{
+			NObj->SetStringField(TEXT("delegate_property_name"),
+				DelegateNode->DelegateReference.GetMemberName().ToString());
+			if (UClass* DelegateOwner = DelegateNode->DelegateReference.GetMemberParentClass())
+			{
+				NObj->SetStringField(TEXT("delegate_owner_class"), DelegateOwner->GetName());
+			}
+			NObj->SetBoolField(TEXT("self_context"),
+				DelegateNode->DelegateReference.IsSelfContext());
+		}
 		else if (UK2Node_Event* EventNode = Cast<UK2Node_Event>(Node))
 		{
 			NObj->SetStringField(TEXT("event_name"),
@@ -470,6 +506,111 @@ namespace MonolithBlueprintInternal
 			*OutAvailablePins = GetAvailablePinNames(Node, Direction);
 		}
 		return nullptr;
+	}
+
+	/**
+	 * Resolve any FObjectProperty by name on a Blueprint's generated class.
+	 * Covers SCS / native ActorComponent subobjects (Actor BPs), UMG named
+	 * widgets (Widget BPs — UButton, UTextBlock, etc.), and plain object-typed
+	 * Blueprint variables — all compile into FObjectProperty entries on the
+	 * generated class. Callers needing component/delegate validation must
+	 * combine this with FindMulticastDelegateProperty (the effective filter).
+	 * Returns null if no FObjectProperty with that name is found, or its
+	 * PropertyClass is null.
+	 */
+	inline FObjectProperty* FindComponentProperty(UBlueprint* BP, FName ComponentName)
+	{
+		if (!BP || !BP->GeneratedClass) return nullptr;
+		FObjectProperty* Prop = FindFProperty<FObjectProperty>(BP->GeneratedClass, ComponentName);
+		if (!Prop || !Prop->PropertyClass) return nullptr;
+		return Prop;
+	}
+
+	/**
+	 * Find a BlueprintAssignable multicast delegate property on a class (or any superclass).
+	 * Returns null if not found or not BlueprintAssignable.
+	 */
+	inline FMulticastDelegateProperty* FindMulticastDelegateProperty(UClass* OwnerClass, FName DelegateName)
+	{
+		if (!OwnerClass) return nullptr;
+		FMulticastDelegateProperty* Prop = FindFProperty<FMulticastDelegateProperty>(OwnerClass, DelegateName);
+		if (!Prop) return nullptr;
+		if (!Prop->HasAnyPropertyFlags(CPF_BlueprintAssignable)) return nullptr;
+		return Prop;
+	}
+
+	/**
+	 * Resolves the delegate owner class + multicast property for a delegate-node
+	 * add_node / resolve_node call (AddDelegate, RemoveDelegate, ClearDelegate,
+	 * CallDelegate). Mirrors the prefix-normalization the editor's right-click
+	 * menu performs — accepts bare and A/U-prefixed class names. SelfContextClass
+	 * is used when 'target_class' is empty (e.g. self-context: BP->GeneratedClass);
+	 * pass nullptr if no self-context fallback should be attempted.
+	 *
+	 * NodeTypeLabel goes into error messages (e.g. "AddDelegate", "RemoveDelegate")
+	 * so the caller sees which node type's required parameter was missing.
+	 *
+	 * On success, returns a Success result with OutOwnerClass / OutDelegateProp /
+	 * OutbSelfContext populated. On failure, returns an Error result; outputs are
+	 * only meaningful when bSuccess is true — do not read them on the error path.
+	 */
+	inline FMonolithActionResult ResolveDelegateOwnerAndProperty(
+		const TSharedPtr<FJsonObject>& Params,
+		UClass* SelfContextClass,
+		const TCHAR* NodeTypeLabel,
+		UClass*& OutOwnerClass,
+		FMulticastDelegateProperty*& OutDelegateProp,
+		bool& OutbSelfContext)
+	{
+		FString DelegateNameStr = Params->GetStringField(TEXT("delegate_property_name"));
+		if (DelegateNameStr.IsEmpty())
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("%s requires 'delegate_property_name'"), NodeTypeLabel));
+		}
+
+		FString TargetClassName = Params->GetStringField(TEXT("target_class"));
+		OutbSelfContext = TargetClassName.IsEmpty();
+
+		if (OutbSelfContext)
+		{
+			if (!SelfContextClass)
+			{
+				return FMonolithActionResult::Error(FString::Printf(
+					TEXT("%s requires either target_class or asset_path (for self-context)"),
+					NodeTypeLabel));
+			}
+			OutOwnerClass = SelfContextClass;
+		}
+		else
+		{
+			OutOwnerClass = FindFirstObject<UClass>(*TargetClassName, EFindFirstObjectOptions::NativeFirst);
+			if (!OutOwnerClass && !TargetClassName.StartsWith(TEXT("A")))
+				OutOwnerClass = FindFirstObject<UClass>(*FString::Printf(TEXT("A%s"), *TargetClassName), EFindFirstObjectOptions::NativeFirst);
+			if (!OutOwnerClass && !TargetClassName.StartsWith(TEXT("U")))
+				OutOwnerClass = FindFirstObject<UClass>(*FString::Printf(TEXT("U%s"), *TargetClassName), EFindFirstObjectOptions::NativeFirst);
+			// Strip a leading A/U prefix and retry bare — handles callers passing the C++ class name
+			// (e.g. "AMyActor", "UMyComponent") when UE's object registry uses the bare form.
+			if (!OutOwnerClass && TargetClassName.Len() > 1 &&
+				(TargetClassName.StartsWith(TEXT("A")) || TargetClassName.StartsWith(TEXT("U"))))
+				OutOwnerClass = FindFirstObject<UClass>(*TargetClassName.Mid(1), EFindFirstObjectOptions::NativeFirst);
+			if (!OutOwnerClass)
+			{
+				return FMonolithActionResult::Error(FString::Printf(
+					TEXT("%s target_class '%s' not found"), NodeTypeLabel, *TargetClassName));
+			}
+		}
+
+		OutDelegateProp = FindMulticastDelegateProperty(OutOwnerClass, FName(*DelegateNameStr));
+		if (!OutDelegateProp)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("BlueprintAssignable multicast delegate '%s' not found on class '%s'"),
+				*DelegateNameStr, *OutOwnerClass->GetName()));
+		}
+
+		// Success-side payload is unused — callers only check bSuccess and read the out params.
+		return FMonolithActionResult::Success(MakeShared<FJsonObject>());
 	}
 
 	/** Returns true if a UK2Node_CustomEvent with the given name already exists in any graph of the Blueprint */
