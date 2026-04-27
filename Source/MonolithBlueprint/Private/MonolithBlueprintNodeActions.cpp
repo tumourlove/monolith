@@ -2457,6 +2457,32 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddEventNode(const TS
 		}
 	}
 
+	// Fallback: when the alias resolved to a name the parent chain doesn't
+	// declare (e.g. "Tick" -> "ReceiveTick" against UUserWidget, which declares
+	// "Tick" not "ReceiveTick"), retry with the original un-aliased EventName.
+	// Without this, callers typing AActor-style names on a non-AActor parent
+	// silently fall through to K2Node_CustomEvent and never bind to the
+	// inherited override — runtime is silent.
+	if (!EventFunc && ResolvedEventName != EventName && ParentClass)
+	{
+		FName OriginalFName(*EventName);
+		for (UClass* TestClass = ParentClass; TestClass; TestClass = TestClass->GetSuperClass())
+		{
+			UFunction* TestFunc = TestClass->FindFunctionByName(OriginalFName, EIncludeSuperFlag::ExcludeSuper);
+			if (TestFunc)
+			{
+				DeclaringClass = TestClass;
+				EventFunc = TestFunc;
+				// Realign both forms of the name — the override-uniqueness check uses
+				// EventFName, SetExternalMember below uses EventFName, and the response
+				// telemetry uses ResolvedEventName.
+				ResolvedEventName = EventName;
+				EventFName = OriginalFName;
+				// Keep walking up — match the resolved-name walk's topmost-declarer contract
+			}
+		}
+	}
+
 	// If we found a native event in the inheritance chain, create an override event node
 	if (DeclaringClass && EventFunc)
 	{
