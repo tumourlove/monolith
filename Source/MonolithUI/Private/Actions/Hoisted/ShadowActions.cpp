@@ -511,6 +511,7 @@ FMonolithActionResult MonolithUI::FShadowActions::HandleApplyBoxShadow(const TSh
         UPanelSlot* NewSlot = Parent->InsertChildAt(TargetIdx, ShadowImg);
         if (!NewSlot)
         {
+            ShadowImg->Rename(nullptr, GetTransientPackage(), REN_DontCreateRedirectors | REN_DoNotDirty);
             return FMonolithActionResult::Error(
                 FString::Printf(TEXT("InsertChildAt returned null inserting shadow '%s' into parent '%s'"),
                     *ShadowName, *Parent->GetClass()->GetName()),
@@ -519,9 +520,7 @@ FMonolithActionResult MonolithUI::FShadowActions::HandleApplyBoxShadow(const TSh
 
         // Register in WidgetVariableNameToGuidMap so the WBP compiler validation
         // pass (WidgetBlueprintCompiler.cpp:794) finds the entry on re-compile.
-        WBP->WidgetVariableNameToGuidMap.Add(
-            ShadowImg->GetFName(),
-            FGuid::NewDeterministicGuid(ShadowImg->GetPathName()));
+        MonolithUI::RegisterCreatedWidget(WBP, ShadowImg);
 
         if (UCanvasPanelSlot* ShadowCanvasSlot = Cast<UCanvasPanelSlot>(NewSlot))
         {
