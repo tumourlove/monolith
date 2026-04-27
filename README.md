@@ -18,7 +18,7 @@ It works with **Claude Code**, **Cursor**, or any MCP-compatible client. If your
 
 ## Why Monolith?
 
-Most MCP integrations register every action as a separate tool, which floods the AI's context window and buries the actually useful stuff. Monolith uses a **namespace dispatch pattern** instead: each domain exposes a single `{namespace}_query(action, params)` tool, and a central `monolith_discover()` call lists everything available. Small tool list (19 tools), massive capability (1286 actions across 16 modules; sibling plugins push it past 1460 when loaded). The AI gets oriented fast and spends its context on your actual problem.
+Most MCP integrations register every action as a separate tool, which floods the AI's context window and buries the actually useful stuff. Monolith uses a **namespace dispatch pattern** instead: each domain exposes a single `{namespace}_query(action, params)` tool, and a central `monolith_discover()` call lists everything available. Small tool list (20 tools), massive capability (1293 actions across 17 modules; sibling plugins push it past 1460 when loaded). The AI gets oriented fast and spends its context on your actual problem.
 
 ## What Can It Actually Do?
 
@@ -75,7 +75,7 @@ Most MCP integrations register every action as a separate tool, which floods the
 - **Auto-updater** — Off by default as of v0.14.6. When enabled, checks GitHub Releases on editor startup, verifies SHA256 against the release notes marker, downloads and stages updates, auto-swaps on exit
 - **MCP auto-reconnect proxy** — stdio-to-HTTP proxy keeps Claude Code sessions alive across editor restarts. Available as native exe (zero dependencies) or Python script (fallback)
 - **Optional module system** — Extend Monolith with new MCP namespaces for third-party plugins (GeometryScripting, BlueprintAssist, GBA, ComboGraph, Logic Driver, MetaSound) without breaking the build for users who don't own them. The sibling-plugin pattern lets you ship your own integration plugin alongside Monolith — see `Docs/SIBLING_PLUGIN_GUIDE.md`
-- **Claude Code skills** — 15 domain-specific workflow guides bundled with the plugin
+- **Claude Code skills** — 16 domain-specific workflow guides bundled with the plugin
 - **Pure C++** — Direct UE API access, embedded HTTP MCP server, zero external dependencies
 
 ---
@@ -283,13 +283,14 @@ Monolith.uplugin
   MonolithAudio         — Audio asset CRUD, Sound Cue + MetaSound graph building, batch ops, templates, AI perception binding, sine test wave (86 actions)
   MonolithAudioRuntime  — Runtime sub-module supplying perception classes for audio.bind_sound_to_perception (0 MCP actions)
   MonolithBABridge      — Blueprint Assist integration bridge (0 MCP actions — IModularFeatures only)
+  MonolithLevelSequence — Level Sequence introspection: full per-LS binding inventory (legacy Possessable/Spawnable + UE 5.7 UMovieSceneCustomBinding family), Director Blueprint functions/variables, event-track bindings, cross-sequence reverse lookup (8 actions)
 
 Standalone Tools (in Binaries/)
   monolith_proxy.exe    — MCP stdio-to-HTTP proxy (zero UE dependency, WinHTTP + nlohmann/json)
   monolith_query.exe    — Offline DB query tool (zero UE dependency, sqlite3 amalgamation)
 ```
 
-**1286 actions total across 16 namespaces (1241 active by default; 45 town-gen experimental disabled), exposed through 19 MCP tools. Distinct handlers: 1282 — the `ui` namespace double-counts 4 aliased GAS attribute-binding actions.** Live editors with sibling plugins loaded report higher counts (e.g. with all 4 sibling plugins loaded: 1462 actions across 20 namespaces).
+**1293 actions total across 17 namespaces (1248 active by default; 45 town-gen experimental disabled), exposed through 20 MCP tools. Distinct handlers: 1289 — the `ui` namespace double-counts 4 aliased GAS attribute-binding actions.** Live editors with sibling plugins loaded report higher counts (e.g. with all 4 sibling plugins loaded: 1469 actions across 21 namespaces).
 
 ### Tool Reference
 
@@ -314,6 +315,7 @@ Standalone Tools (in Binaries/)
 | `config` | `config_query` | 6 | INI resolution, explain, diff, search |
 | `project` | `project_query` | 7 | Deep project search — FTS5 across all indexed assets including marketplace plugins |
 | `source` | `source_query` | 11 | Native C++ engine source lookup, call graphs, class hierarchy, project reindex, hot-reload-aware refresh |
+| `level_sequence` | `level_sequence_query` | 8 | Level Sequence inspection: full binding inventory (one row per Guid×BindingIndex with kind classification — legacy Possessable/Spawnable + UE 5.7 UMovieSceneSpawnableActorBinding / Replaceable / Custom), Director Blueprint own functions (user / custom_event / sequencer_endpoint) and variables, event-track bindings with Director-function resolution, cross-sequence reverse lookup of function callers |
 
 ---
 
@@ -456,7 +458,7 @@ Settings live at **Editor Preferences > Plugins > Monolith**:
 
 ## Skills
 
-Monolith bundles 15 Claude Code skills in `Skills/` — domain-specific workflow guides that give your AI the right mental model for each area:
+Monolith bundles 16 Claude Code skills in `Skills/` — domain-specific workflow guides that give your AI the right mental model for each area:
 
 | Skill | Description |
 |-------|-------------|
@@ -470,6 +472,7 @@ Monolith bundles 15 Claude Code skills in `Skills/` — domain-specific workflow
 | `unreal-gas` | Gameplay Ability System — abilities, effects, attributes, ASC, tags, cues |
 | `unreal-logicdriver` | Logic Driver Pro state machines — SM CRUD, graph editing, JSON spec, scaffolding |
 | `unreal-combograph` | ComboGraph combo trees — graph CRUD, nodes, edges, effects, ability scaffolding |
+| `unreal-level-sequences` | Level Sequence inspection — full binding inventory (legacy + UE 5.7 custom bindings), Director Blueprint functions/variables, event-track bindings, cross-sequence reverse lookup |
 | `unreal-debugging` | Build errors, log search, crash context |
 | `unreal-performance` | Config auditing, shader stats, INI tuning |
 | `unreal-project-search` | FTS5 search syntax, reference tracing |

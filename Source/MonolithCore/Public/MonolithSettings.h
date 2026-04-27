@@ -106,6 +106,10 @@ public:
 	UPROPERTY(config, EditAnywhere, Category="Indexing|Deep Indexers")
 	bool bIndexAI = true;
 
+	/** Enable Level Sequence Director Blueprint indexing (director functions, variables, event-track bindings) */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Deep Indexers")
+	bool bIndexLevelSequences = true;
+
 	/** Enable dependency graph indexing */
 	UPROPERTY(config, EditAnywhere, Category="Indexing|Post-Pass Indexers")
 	bool bIndexDependencies = true;
@@ -247,6 +251,11 @@ public:
 		meta=(DisplayName="Enable Audio Module",
 			  ToolTip="Registers audio_query actions for audio asset creation, inspection, batch management, Sound Cue graph building, and MetaSound graph building."))
 	bool bEnableAudio = true;
+
+	UPROPERTY(config, EditAnywhere, Category="Modules|Optional",
+		meta=(DisplayName="Enable Level Sequence Module",
+			  ToolTip="Registers level_sequence_query actions for Level Sequence Director Blueprint introspection (director functions, variables, event-track bindings to director functions, cross-sequence reverse lookup of function callers)."))
+	bool bEnableLevelSequence = true;
 
 	// --- Modules|Mesh ---
 

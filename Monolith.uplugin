@@ -211,6 +211,11 @@
 			"Name": "MonolithAudioRuntime",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "MonolithLevelSequence",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
 		}
 	]
 }
