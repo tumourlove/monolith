@@ -191,7 +191,7 @@ Class-as-data: style creators (`create_common_button_style`, `create_common_text
 
 | Action | Params | Description |
 |--------|--------|-------------|
-| `convert_button_to_common` | `asset_path`, `widget_name` | Replace a UButton with UCommonButtonBase (does NOT auto-transfer children) |
+| `convert_button_to_common` | `asset_path`, `widget_name` | Replace a UButton with UCommonButtonBase. Does NOT auto-transfer children; removed child variable GUIDs are pruned before compile. |
 | `configure_common_button` | `asset_path`, `widget_name`, `properties` | Set button-specific properties (triggering input action, selection state, etc.) |
 | `create_common_button_style` | `save_path`, `style_name`, `style_spec` | Create a Blueprint subclass of `UCommonButtonStyle` |
 | `create_common_text_style` | `save_path`, `style_name`, `style_spec` | Create a Blueprint subclass of `UCommonTextStyle` |
@@ -290,7 +290,7 @@ The MonolithGAS module also registers four cross-namespace aliases under `ui::` 
 
 ## Known Limitations (CommonUI)
 
-1. `convert_button_to_common` does NOT auto-transfer UButton children to UCommonButtonBase — UCommonButtonBase uses an internal widget tree, not AddChild. Callers must rewire manually.
+1. `convert_button_to_common` does NOT auto-transfer UButton children to UCommonButtonBase — UCommonButtonBase uses an internal widget tree, not AddChild. The action prunes stale child widget-variable GUIDs before compile without using UE's broader widget-deletion path, so the replaced button can keep its variable identity. Callers must rewire CommonButton content manually.
 2. `set_initial_focus_target` requires the target WBP to expose a `DesiredFocusTargetName` or `InitialFocusTargetName` FName UPROPERTY and override `NativeGetDesiredFocusTarget`. Action errors out if neither property exists.
 3. `show_common_message` is fire-and-forward — async result-binding (Yes/No) requires the dialog WBP to handle internally. No MCP-side delegate routing yet.
 4. `dump_action_router_state` cannot read `UCommonUIActionRouterBase::CurrentInputLocks` (private-transient in engine). Engine PR candidate (M0.7).

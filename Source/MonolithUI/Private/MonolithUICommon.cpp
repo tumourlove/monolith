@@ -35,6 +35,7 @@
 #include "Components/WidgetSwitcher.h"
 #include "Components/WrapBox.h"
 
+#include "Animation/WidgetAnimation.h"
 #include "WidgetBlueprint.h"
 
 // R3b -- optional EffectSurface provider probe. The UClass lookup scans loaded
@@ -273,10 +274,35 @@ namespace MonolithUI
             return;
         }
 
-        WBP->ForEachSourceWidget([WBP](UWidget* Widget)
+        TSet<FName> LiveVariableNames;
+
+        WBP->ForEachSourceWidget([WBP, &LiveVariableNames](UWidget* Widget)
         {
-            RegisterCreatedWidget(WBP, Widget);
+            if (Widget)
+            {
+                const FName WidgetName = Widget->GetFName();
+                LiveVariableNames.Add(WidgetName);
+                RegisterVariableName(WBP, WidgetName);
+            }
         });
+
+        for (UWidgetAnimation* Animation : WBP->Animations)
+        {
+            if (Animation)
+            {
+                const FName AnimationName = Animation->GetFName();
+                LiveVariableNames.Add(AnimationName);
+                RegisterVariableName(WBP, AnimationName);
+            }
+        }
+
+        for (auto It = WBP->WidgetVariableNameToGuidMap.CreateIterator(); It; ++It)
+        {
+            if (!LiveVariableNames.Contains(It.Key()))
+            {
+                It.RemoveCurrent();
+            }
+        }
     }
 
     // -------------------------------------------------------------------------

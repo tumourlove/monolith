@@ -15,6 +15,7 @@
 #include "MonolithToolRegistry.h"
 #include "MonolithParamSchema.h"
 #include "MonolithJsonUtils.h"
+#include "MonolithUICommon.h"
 
 #include "CommonButtonBase.h"
 #include "CommonTextBlock.h"
@@ -398,35 +399,44 @@ namespace MonolithCommonUIButton
 			return FMonolithActionResult::Error(TEXT("Cannot convert root-level button — parent required for reparent"));
 
 		// Capture the single child if any (UButton is a UContentWidget)
-		UWidget* Child = nullptr;
+		FString ChildName;
 		if (OldBtn->GetChildrenCount() > 0)
 		{
-			Child = OldBtn->GetChildAt(0);
+			if (UWidget* Child = OldBtn->GetChildAt(0))
+			{
+				ChildName = Child->GetName();
+			}
 		}
 
 		// Create the new common button — preserve name
 		const FName BtnName = OldBtn->GetFName();
-		Parent->RemoveChild(OldBtn);
+		const FName TempBtnName = MakeUniqueObjectName(
+			Wbp->WidgetTree,
+			TargetClass,
+			FName(*FString::Printf(TEXT("%s_CommonReplacement"), *BtnName.ToString())));
 
-		// Rename old out of the way so the new can take the name
-		OldBtn->Rename(nullptr, GetTransientPackage(), REN_DontCreateRedirectors | REN_DoNotDirty);
-
-		UCommonButtonBase* NewBtn = Wbp->WidgetTree->ConstructWidget<UCommonButtonBase>(TargetClass, BtnName);
+		UCommonButtonBase* NewBtn = Wbp->WidgetTree->ConstructWidget<UCommonButtonBase>(TargetClass, TempBtnName);
 		if (!NewBtn)
 		{
 			return FMonolithActionResult::Error(FString::Printf(
 				TEXT("ConstructWidget returned null for class '%s' (abstract or failed instantiation). "
-					 "Old UButton has already been detached — reopen the WBP and re-add the button manually, "
-					 "or pass a verified concrete 'target_class'."),
+					 "Pass a verified concrete 'target_class'."),
 				*TargetClass->GetName()));
 		}
+
+		Parent->RemoveChild(OldBtn);
+		OldBtn->Rename(nullptr, GetTransientPackage(), REN_DontCreateRedirectors | REN_DoNotDirty);
+		NewBtn->Rename(*BtnName.ToString(), Wbp->WidgetTree, REN_DontCreateRedirectors | REN_DoNotDirty);
 		Parent->AddChild(NewBtn);
+		MonolithUI::RegisterCreatedWidget(Wbp, NewBtn);
 
 		// Note: UCommonButtonBase is a UCommonUserWidget (not a UPanelWidget), so its content
 		// tree is internal rather than a single AddChild slot like UButton. Children from the
 		// original UButton must be rewired manually by the author — we cannot auto-transfer.
-		// The old UButton's child stays orphaned in the transient package once OldBtn is discarded.
+		// ReconcileWidgetVariableGuids prunes removed child names without invoking the broader
+		// editor delete path, which would also strip graph references to the replaced button.
 
+		MonolithUI::ReconcileWidgetVariableGuids(Wbp);
 		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Wbp);
 		FKismetEditorUtilities::CompileBlueprint(Wbp);
 		Wbp->GetOutermost()->MarkPackageDirty();
@@ -435,10 +445,11 @@ namespace MonolithCommonUIButton
 		Result->SetStringField(TEXT("wbp_path"), WbpPath);
 		Result->SetStringField(TEXT("widget_name"), BtnName.ToString());
 		Result->SetStringField(TEXT("new_class"), TargetClass->GetName());
-		Result->SetBoolField(TEXT("had_child"), Child != nullptr);
-		if (Child)
+		Result->SetBoolField(TEXT("had_child"), !ChildName.IsEmpty());
+		if (!ChildName.IsEmpty())
 		{
-			Result->SetStringField(TEXT("orphaned_child"), Child->GetName());
+			Result->SetStringField(TEXT("removed_child"), ChildName);
+			Result->SetStringField(TEXT("orphaned_child"), ChildName);
 			Result->SetStringField(TEXT("note"), TEXT("Old UButton child not auto-transferred — UCommonButtonBase uses internal widget tree, not AddChild. Rewire manually."));
 		}
 		return FMonolithActionResult::Success(Result);
@@ -697,7 +708,7 @@ namespace MonolithCommonUIButton
 
 		Registry.RegisterAction(
 			TEXT("ui"), TEXT("convert_button_to_common"),
-			TEXT("Replace a UButton in a WBP with a UCommonButtonBase-derived class, preserving name and parent slot. "
+			TEXT("Replace a UButton in a WBP with a UCommonButtonBase-derived class, preserving name and parent. "
 				 "Creates a transient concrete subclass by default if target_class is omitted. "
 				 "Override via 'target_class' for project-specific subclasses. Old UButton child is NOT auto-transferred."),
 			FMonolithActionHandler::CreateStatic(&HandleConvertButtonToCommon),
