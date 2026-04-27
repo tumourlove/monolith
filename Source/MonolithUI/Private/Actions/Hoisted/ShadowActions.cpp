@@ -96,6 +96,18 @@ namespace MonolithUI::ShadowInternal
         bool bInset = false;
     };
 
+    /** Promote through occupied public single-child wrappers before sibling insertion. */
+    static void ResolveSiblingInsertionTarget(UWidget*& InOutVisualTarget, UPanelWidget*& InOutParent)
+    {
+        while (InOutParent
+            && !InOutParent->CanHaveMultipleChildren()
+            && InOutParent->GetChildIndex(InOutVisualTarget) != INDEX_NONE)
+        {
+            InOutVisualTarget = InOutParent;
+            InOutParent = InOutParent->GetParent();
+        }
+    }
+
     /** Parse a single shadow object from JSON. Returns false with OutError populated on malformed entries. */
     static bool ParseShadowSpec(
         const TSharedPtr<FJsonObject>& Obj,
@@ -270,8 +282,12 @@ FMonolithActionResult MonolithUI::FShadowActions::HandleApplyBoxShadow(const TSh
     }
 
     // Sibling-insert requires a parent panel. If target IS the root, bail rather
-    // than silently restructuring the tree.
+    // than silently restructuring the tree. Occupied single-child wrappers such
+    // as SizeBox/Border cannot accept shadow siblings, so insert beside the
+    // outermost wrapper in the first multi-child parent panel.
+    UWidget* VisualTarget = Target;
     UPanelWidget* Parent = Target->GetParent();
+    ResolveSiblingInsertionTarget(VisualTarget, Parent);
     if (!Parent)
     {
         return FMonolithActionResult::Error(
@@ -279,7 +295,7 @@ FMonolithActionResult MonolithUI::FShadowActions::HandleApplyBoxShadow(const TSh
                 *WidgetName),
             -32603);
     }
-    int32 TargetIdx = Parent->GetChildIndex(Target);
+    int32 TargetIdx = Parent->GetChildIndex(VisualTarget);
     if (TargetIdx == INDEX_NONE)
     {
         return FMonolithActionResult::Error(
@@ -319,7 +335,7 @@ FMonolithActionResult MonolithUI::FShadowActions::HandleApplyBoxShadow(const TSh
     const bool bHasInsetParam       = ParentHasScalarParam(ShadowParent, FName(TEXT("Inset")));
     const bool bHasShadowSizeParam  = ParentHasVectorParam(ShadowParent, FName(TEXT("ShadowSize")));
 
-    UCanvasPanelSlot* TargetCanvasSlot = Cast<UCanvasPanelSlot>(Target->Slot);
+    UCanvasPanelSlot* TargetCanvasSlot = Cast<UCanvasPanelSlot>(VisualTarget->Slot);
     const bool bTargetOnCanvas = (TargetCanvasSlot != nullptr);
     FVector2D TargetPos(0.0f, 0.0f);
     FVector2D TargetSize(0.0f, 0.0f);
@@ -345,8 +361,8 @@ FMonolithActionResult MonolithUI::FShadowActions::HandleApplyBoxShadow(const TSh
         }
         if (TargetSize.X <= 0.0 || TargetSize.Y <= 0.0)
         {
-            Target->ForceLayoutPrepass();
-            const FVector2D Desired = Target->GetDesiredSize();
+            VisualTarget->ForceLayoutPrepass();
+            const FVector2D Desired = VisualTarget->GetDesiredSize();
             if (Desired.X > 0.0 && Desired.Y > 0.0)
             {
                 TargetSize = Desired;
@@ -580,6 +596,7 @@ void MonolithUI::FShadowActions::Register(FMonolithToolRegistry& Registry)
         TEXT("apply_box_shadow"),
         TEXT("Insert sibling UImage widget(s) behind a target widget in an authored WBP, each backed by a transient MID "
              "parented to a caller-supplied shadow material. "
+             "If the target is inside occupied single-child UMG wrappers, inserts beside the outermost wrapper in the nearest parent panel. "
              "Params: asset_path (string, required, WBP long path), widget_name (string, required, target widget name), "
              "shadow_material_path (string, required -- parent must expose at minimum ShadowColor vector + BlurRadius scalar; "
              "optionally Offset vector, Spread scalar, Inset scalar), "

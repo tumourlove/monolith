@@ -15,13 +15,17 @@
 
 // UMG -- build a throwaway WBP + probe the result
 #include "Tests/Hoisted/MonolithUITestFixtureUtils.h"
+#include "Components/Border.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Components/Image.h"
+#include "Components/SizeBox.h"
 
 // Asset / package
 #include "Editor.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
 
 // Materials -- read-back
 #include "Materials/MaterialInterface.h"
@@ -164,6 +168,246 @@ bool FMonolithUIApplyBoxShadowBasicTest::RunTest(const FString& Parameters)
                 Res != nullptr && Res->IsA<UMaterialInterface>());
         }
     }
+    return true;
+}
+
+/**
+ * MonolithUI.ApplyBoxShadow.SizeBoxParent
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMonolithUIApplyBoxShadowSizeBoxParentTest,
+    "MonolithUI.ApplyBoxShadow.SizeBoxParent",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMonolithUIApplyBoxShadowSizeBoxParentTest::RunTest(const FString& Parameters)
+{
+    using namespace MonolithUI::TestUtils;
+    using namespace MonolithUI::ApplyBoxShadowTests;
+
+    const FString ShadowMaterialPath = FindMaterialPathByAssetName(FName(TEXT("M_TokenShadow")));
+    UMaterialInterface* ShadowParent = LoadObject<UMaterialInterface>(nullptr, *ShadowMaterialPath);
+    if (!ShadowParent)
+    {
+        AddWarning(TEXT("Canonical shadow material not present -- skipping SizeBox-parent test."));
+        return true;
+    }
+
+    const FString WBPPath = TEXT("/Game/Tests/Monolith/UI/WBP_ShadowSizeBoxParentTest");
+    FString FixtureError;
+    if (!CreateOrReuseTestWidgetBlueprint(WBPPath, NAME_None, nullptr, FixtureError))
+    {
+        AddError(FString::Printf(TEXT("Fixture build failed: %s"), *FixtureError));
+        return false;
+    }
+
+    UWidgetBlueprint* WBP = LoadObject<UWidgetBlueprint>(nullptr, *WBPPath);
+    if (!WBP || !WBP->WidgetTree)
+    {
+        AddError(TEXT("Fixture WBP reload failed"));
+        return false;
+    }
+
+    UCanvasPanel* Root = Cast<UCanvasPanel>(WBP->WidgetTree->RootWidget);
+    if (!Root)
+    {
+        AddError(TEXT("Fixture root is not a CanvasPanel"));
+        return false;
+    }
+
+    USizeBox* Wrapper = WBP->WidgetTree->ConstructWidget<USizeBox>(
+        USizeBox::StaticClass(), FName(TEXT("Target_SizeBox")));
+    UImage* Target = WBP->WidgetTree->ConstructWidget<UImage>(
+        UImage::StaticClass(), FName(TEXT("Target")));
+    if (!Wrapper || !Target)
+    {
+        AddError(TEXT("Failed to construct SizeBox wrapper or target image"));
+        return false;
+    }
+
+    UPanelSlot* WrapperSlot = Root->AddChild(Wrapper);
+    Wrapper->SetContent(Target);
+    if (UCanvasPanelSlot* WrapperCanvasSlot = Cast<UCanvasPanelSlot>(WrapperSlot))
+    {
+        WrapperCanvasSlot->SetPosition(FVector2D(48.0f, 72.0f));
+        WrapperCanvasSlot->SetSize(FVector2D(160.0f, 96.0f));
+        WrapperCanvasSlot->SetZOrder(5);
+    }
+
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
+    FKismetEditorUtilities::CompileBlueprint(WBP);
+
+    TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+    Params->SetStringField(TEXT("asset_path"), WBPPath);
+    Params->SetStringField(TEXT("widget_name"), TEXT("Target"));
+    Params->SetStringField(TEXT("shadow_material_path"), ShadowMaterialPath);
+    {
+        TSharedPtr<FJsonObject> Shadow = MakeShared<FJsonObject>();
+        Shadow->SetNumberField(TEXT("x"), 2.0);
+        Shadow->SetNumberField(TEXT("y"), 6.0);
+        Shadow->SetNumberField(TEXT("blur"), 8.0);
+        Shadow->SetStringField(TEXT("color"), TEXT("#00000088"));
+        Params->SetObjectField(TEXT("shadow"), Shadow);
+    }
+    Params->SetBoolField(TEXT("compile"), false);
+
+    const FMonolithActionResult Result = FMonolithToolRegistry::Get().ExecuteAction(
+        TEXT("ui"), TEXT("apply_box_shadow"), Params);
+
+    TestTrue(TEXT("apply_box_shadow bSuccess with SizeBox parent"), Result.bSuccess);
+    if (!Result.bSuccess)
+    {
+        AddError(FString::Printf(TEXT("Action error: %s (code %d)"), *Result.ErrorMessage, Result.ErrorCode));
+        return false;
+    }
+
+    UWidget* Shadow = WBP->WidgetTree->FindWidget(FName(TEXT("Target_Shadow0")));
+    TestNotNull(TEXT("Target_Shadow0 exists in widget tree"), Shadow);
+    TestEqual(TEXT("Target remains inside SizeBox"), Target->GetParent(), Cast<UPanelWidget>(Wrapper));
+    TestEqual(TEXT("Shadow inserted into SizeBox grandparent"), Shadow ? Shadow->GetParent() : nullptr, Cast<UPanelWidget>(Root));
+    TestFalse(TEXT("Shadow was not inserted inside the SizeBox wrapper"),
+        Shadow != nullptr && Wrapper->GetChildIndex(Shadow) != INDEX_NONE);
+
+    if (Shadow)
+    {
+        const int32 ShadowIdx = Root->GetChildIndex(Shadow);
+        const int32 WrapperIdx = Root->GetChildIndex(Wrapper);
+        TestTrue(TEXT("Shadow inserted BEFORE SizeBox wrapper in grandparent child list"),
+            ShadowIdx >= 0 && WrapperIdx >= 0 && ShadowIdx < WrapperIdx);
+
+        if (UCanvasPanelSlot* ShadowCanvasSlot = Cast<UCanvasPanelSlot>(Shadow->Slot))
+        {
+            TestEqual(TEXT("Shadow inherits wrapper canvas z-order minus one"),
+                ShadowCanvasSlot->GetZOrder(), 4);
+        }
+        else
+        {
+            AddError(TEXT("Shadow slot is not a CanvasPanelSlot"));
+        }
+    }
+
+    return true;
+}
+
+/**
+ * MonolithUI.ApplyBoxShadow.NestedSingleChildWrappers
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMonolithUIApplyBoxShadowNestedSingleChildWrappersTest,
+    "MonolithUI.ApplyBoxShadow.NestedSingleChildWrappers",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMonolithUIApplyBoxShadowNestedSingleChildWrappersTest::RunTest(const FString& Parameters)
+{
+    using namespace MonolithUI::TestUtils;
+    using namespace MonolithUI::ApplyBoxShadowTests;
+
+    const FString ShadowMaterialPath = FindMaterialPathByAssetName(FName(TEXT("M_TokenShadow")));
+    UMaterialInterface* ShadowParent = LoadObject<UMaterialInterface>(nullptr, *ShadowMaterialPath);
+    if (!ShadowParent)
+    {
+        AddWarning(TEXT("Canonical shadow material not present -- skipping nested single-child-wrapper test."));
+        return true;
+    }
+
+    const FString WBPPath = TEXT("/Game/Tests/Monolith/UI/WBP_ShadowNestedSingleChildWrapperTest");
+    FString FixtureError;
+    if (!CreateOrReuseTestWidgetBlueprint(WBPPath, NAME_None, nullptr, FixtureError))
+    {
+        AddError(FString::Printf(TEXT("Fixture build failed: %s"), *FixtureError));
+        return false;
+    }
+
+    UWidgetBlueprint* WBP = LoadObject<UWidgetBlueprint>(nullptr, *WBPPath);
+    if (!WBP || !WBP->WidgetTree)
+    {
+        AddError(TEXT("Fixture WBP reload failed"));
+        return false;
+    }
+
+    UCanvasPanel* Root = Cast<UCanvasPanel>(WBP->WidgetTree->RootWidget);
+    if (!Root)
+    {
+        AddError(TEXT("Fixture root is not a CanvasPanel"));
+        return false;
+    }
+
+    UBorder* BorderWrapper = WBP->WidgetTree->ConstructWidget<UBorder>(
+        UBorder::StaticClass(), FName(TEXT("Target_Border")));
+    USizeBox* SizeBoxWrapper = WBP->WidgetTree->ConstructWidget<USizeBox>(
+        USizeBox::StaticClass(), FName(TEXT("Target_SizeBox")));
+    UImage* Target = WBP->WidgetTree->ConstructWidget<UImage>(
+        UImage::StaticClass(), FName(TEXT("Target")));
+    if (!BorderWrapper || !SizeBoxWrapper || !Target)
+    {
+        AddError(TEXT("Failed to construct nested wrapper test widgets"));
+        return false;
+    }
+
+    UPanelSlot* BorderSlot = Root->AddChild(BorderWrapper);
+    BorderWrapper->SetContent(SizeBoxWrapper);
+    SizeBoxWrapper->SetContent(Target);
+    if (UCanvasPanelSlot* BorderCanvasSlot = Cast<UCanvasPanelSlot>(BorderSlot))
+    {
+        BorderCanvasSlot->SetPosition(FVector2D(32.0f, 40.0f));
+        BorderCanvasSlot->SetSize(FVector2D(180.0f, 112.0f));
+        BorderCanvasSlot->SetZOrder(7);
+    }
+
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
+    FKismetEditorUtilities::CompileBlueprint(WBP);
+
+    TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+    Params->SetStringField(TEXT("asset_path"), WBPPath);
+    Params->SetStringField(TEXT("widget_name"), TEXT("Target"));
+    Params->SetStringField(TEXT("shadow_material_path"), ShadowMaterialPath);
+    {
+        TSharedPtr<FJsonObject> Shadow = MakeShared<FJsonObject>();
+        Shadow->SetNumberField(TEXT("x"), 1.0);
+        Shadow->SetNumberField(TEXT("y"), 5.0);
+        Shadow->SetNumberField(TEXT("blur"), 9.0);
+        Shadow->SetStringField(TEXT("color"), TEXT("#00000088"));
+        Params->SetObjectField(TEXT("shadow"), Shadow);
+    }
+    Params->SetBoolField(TEXT("compile"), false);
+
+    const FMonolithActionResult Result = FMonolithToolRegistry::Get().ExecuteAction(
+        TEXT("ui"), TEXT("apply_box_shadow"), Params);
+
+    TestTrue(TEXT("apply_box_shadow bSuccess with nested single-child wrappers"), Result.bSuccess);
+    if (!Result.bSuccess)
+    {
+        AddError(FString::Printf(TEXT("Action error: %s (code %d)"), *Result.ErrorMessage, Result.ErrorCode));
+        return false;
+    }
+
+    UWidget* Shadow = WBP->WidgetTree->FindWidget(FName(TEXT("Target_Shadow0")));
+    TestNotNull(TEXT("Target_Shadow0 exists in widget tree"), Shadow);
+    TestEqual(TEXT("Target remains inside SizeBox"), Target->GetParent(), Cast<UPanelWidget>(SizeBoxWrapper));
+    TestEqual(TEXT("SizeBox remains inside Border"), SizeBoxWrapper->GetParent(), Cast<UPanelWidget>(BorderWrapper));
+    TestEqual(TEXT("Shadow inserted into outer wrapper parent"), Shadow ? Shadow->GetParent() : nullptr, Cast<UPanelWidget>(Root));
+    TestFalse(TEXT("Shadow was not inserted inside Border"),
+        Shadow != nullptr && BorderWrapper->GetChildIndex(Shadow) != INDEX_NONE);
+    TestFalse(TEXT("Shadow was not inserted inside SizeBox"),
+        Shadow != nullptr && SizeBoxWrapper->GetChildIndex(Shadow) != INDEX_NONE);
+
+    if (Shadow)
+    {
+        const int32 ShadowIdx = Root->GetChildIndex(Shadow);
+        const int32 BorderIdx = Root->GetChildIndex(BorderWrapper);
+        TestTrue(TEXT("Shadow inserted BEFORE outermost wrapper in parent child list"),
+            ShadowIdx >= 0 && BorderIdx >= 0 && ShadowIdx < BorderIdx);
+
+        if (UCanvasPanelSlot* ShadowCanvasSlot = Cast<UCanvasPanelSlot>(Shadow->Slot))
+        {
+            TestEqual(TEXT("Shadow inherits outer wrapper canvas z-order minus one"),
+                ShadowCanvasSlot->GetZOrder(), 6);
+        }
+        else
+        {
+            AddError(TEXT("Shadow slot is not a CanvasPanelSlot"));
+        }
+    }
+
     return true;
 }
 
