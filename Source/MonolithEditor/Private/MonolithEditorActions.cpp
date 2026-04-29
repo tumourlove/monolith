@@ -2482,6 +2482,21 @@ namespace MonolithAutomationDetail
 		// Force-load latest test list (covers tests added since the editor started).
 		Framework.LoadTestModules();
 
+		// Default RequestedTestFilter is SmokeFilter only (UE constructor default), which
+		// excludes most game-module tests. Widen to all filter buckets so any registered
+		// test the caller's prefix points at is eligible. Restore on scope exit.
+		const EAutomationTestFlags AllFilters = static_cast<EAutomationTestFlags>(
+			static_cast<uint32>(EAutomationTestFlags::SmokeFilter) |
+			static_cast<uint32>(EAutomationTestFlags::EngineFilter) |
+			static_cast<uint32>(EAutomationTestFlags::ProductFilter) |
+			static_cast<uint32>(EAutomationTestFlags::PerfFilter) |
+			static_cast<uint32>(EAutomationTestFlags::StressFilter) |
+			static_cast<uint32>(EAutomationTestFlags::NegativeFilter));
+		// No public getter for the previous filter, so just set ours and leave it.
+		// Subsequent test runs in the same session pick up this widened filter, which
+		// is harmless (other tools will set their own when they need it).
+		Framework.SetRequestedTestFilter(AllFilters);
+
 		TArray<FAutomationTestInfo> AllTests;
 		Framework.GetValidTestNames(AllTests);
 
@@ -2574,11 +2589,26 @@ FMonolithActionResult FMonolithEditorActions::HandleRunAutomationTests(const TSh
 	{
 		const FAutomationTestInfo& Info = MatchingTests[i];
 		const FString FullPath = MonolithAutomationDetail::GetTestFullPath(Info);
+		// StartTestByName looks up by the class-name registry key (e.g. FBowDataAssetTest),
+		// NOT the human-readable full path. Passing FullPath fails silently and leaves
+		// GIsAutomationTesting=false, which trips an assertion when StopTest is called.
+		const FString TestKey = Info.GetTestName();
 
 		TSharedPtr<FJsonObject> TestResult = MakeShared<FJsonObject>();
 		TestResult->SetStringField(TEXT("full_path"), FullPath);
+		TestResult->SetStringField(TEXT("test_name"), TestKey);
 
-		Framework.StartTestByName(FullPath, /*RoleIndex=*/0);
+		if (!Framework.ContainsTest(TestKey))
+		{
+			TestResult->SetStringField(TEXT("status"), TEXT("skipped"));
+			TestResult->SetStringField(TEXT("reason"),
+				FString::Printf(TEXT("ContainsTest('%s') returned false (registry lookup failed)"), *TestKey));
+			Skipped++;
+			ResultsJson.Add(MakeShared<FJsonValueObject>(TestResult));
+			continue;
+		}
+
+		Framework.StartTestByName(TestKey, /*RoleIndex=*/0, FullPath);
 
 		FAutomationTestExecutionInfo ExecInfo;
 		const bool bCompleted = Framework.StopTest(ExecInfo);
