@@ -79,11 +79,12 @@ bool FMonolithMemoryHelper::TryUnloadPackage(UObject* Asset)
 		return false;
 	}
 
-	// Mark the package as pending kill so it gets cleaned up on next GC
+	// Clear RF_Standalone on the package and asset so they're GC-eligible.
+	// Do NOT SetFlags(RF_Transient) on the package — RF_Transient doesn't
+	// control GC, and it causes UObject::IsAsset() to return false on contained
+	// assets (Obj.cpp:2733), which silently strips cross-package TObjectPtr refs
+	// at save time ("target poisoning").
 	Package->ClearFlags(RF_Standalone);
-	Package->SetFlags(RF_Transient);
-
-	// Clear any references we might have
 	Asset->ClearFlags(RF_Standalone);
 
 	return true;
