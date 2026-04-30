@@ -27,6 +27,13 @@
 #include "Factories/FbxImportUI.h"
 #include "Factories/FbxFactory.h"
 
+// Asset export
+#include "AssetExportTask.h"
+#include "Exporters/Exporter.h"
+#include "Engine/SkeletalMesh.h"
+#include "HAL/FileManager.h"
+#include "Misc/Paths.h"
+
 // Package save
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
@@ -90,6 +97,16 @@ void FMonolithMeshTechArtActions::RegisterActions(FMonolithToolRegistry& Registr
 			.Optional(TEXT("auto_generate_collision"), TEXT("boolean"), TEXT("Generate collision on import"), TEXT("true"))
 			.Optional(TEXT("normal_import_method"), TEXT("string"), TEXT("Normal import: ImportNormals, ImportNormalsAndTangents, ComputeNormals"), TEXT("ImportNormalsAndTangents"))
 			.Optional(TEXT("material_import"), TEXT("string"), TEXT("Material import: create_new, find_existing, skip"), TEXT("create_new"))
+			.Build());
+
+	// 16.1b export_mesh
+	Registry.RegisterAction(TEXT("mesh"), TEXT("export_mesh"),
+		TEXT("Export a UStaticMesh or USkeletalMesh asset to FBX on disk via UAssetExportTask + the engine's built-in FBX exporter."),
+		FMonolithActionHandler::CreateStatic(&FMonolithMeshTechArtActions::ExportMesh),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path of the mesh to export (StaticMesh or SkeletalMesh)"))
+			.Required(TEXT("file_path"), TEXT("string"), TEXT("Absolute output file path (must end in .fbx)"))
+			.Optional(TEXT("replace_existing"), TEXT("boolean"), TEXT("Overwrite an existing file"), TEXT("true"))
 			.Build());
 
 	// 16.2 fix_mesh_quality
@@ -291,6 +308,88 @@ FMonolithActionResult FMonolithMeshTechArtActions::ImportMesh(const TSharedPtr<F
 		Result->SetArrayField(TEXT("warnings"), WarningArr);
 	}
 
+	return FMonolithActionResult::Success(Result);
+}
+
+// ============================================================================
+// 16.1b export_mesh
+// ============================================================================
+
+FMonolithActionResult FMonolithMeshTechArtActions::ExportMesh(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+	const FString FilePath = Params->GetStringField(TEXT("file_path"));
+	if (AssetPath.IsEmpty() || FilePath.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("'asset_path' and 'file_path' are required"));
+	}
+	if (!FilePath.EndsWith(TEXT(".fbx"), ESearchCase::IgnoreCase))
+	{
+		return FMonolithActionResult::Error(TEXT("'file_path' must end with .fbx"));
+	}
+
+	bool bReplaceExisting = true;
+	Params->TryGetBoolField(TEXT("replace_existing"), bReplaceExisting);
+
+	if (FPaths::FileExists(FilePath) && !bReplaceExisting)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("File already exists and replace_existing=false: %s"), *FilePath));
+	}
+
+	// Ensure output directory exists
+	const FString OutDir = FPaths::GetPath(FilePath);
+	if (!OutDir.IsEmpty() && !IFileManager::Get().DirectoryExists(*OutDir))
+	{
+		IFileManager::Get().MakeDirectory(*OutDir, /*Tree=*/true);
+	}
+
+	// Load the asset (StaticMesh or SkeletalMesh)
+	UObject* Asset = LoadObject<UObject>(nullptr, *AssetPath);
+	if (!Asset)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to load asset: %s"), *AssetPath));
+	}
+	if (!Asset->IsA(UStaticMesh::StaticClass()) && !Asset->IsA(USkeletalMesh::StaticClass()))
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Asset is not a StaticMesh or SkeletalMesh: %s (%s)"),
+			*AssetPath, *Asset->GetClass()->GetName()));
+	}
+
+	// Find an FBX exporter compatible with this asset
+	UExporter* Exporter = UExporter::FindExporter(Asset, TEXT("FBX"));
+	if (!Exporter)
+	{
+		return FMonolithActionResult::Error(TEXT("No FBX exporter found for this asset class — ensure the FBX import/export plugin is enabled"));
+	}
+
+	// Build and run the export task
+	UAssetExportTask* Task = NewObject<UAssetExportTask>();
+	Task->AddToRoot();
+	Task->Object = Asset;
+	Task->Filename = FilePath;
+	Task->bSelected = false;
+	Task->bReplaceIdentical = bReplaceExisting;
+	Task->bPrompt = false;
+	Task->bUseFileArchive = false;
+	Task->bWriteEmptyFiles = false;
+	Task->bAutomated = true;
+	Task->Exporter = Exporter;
+
+	const bool bSucceeded = UExporter::RunAssetExportTask(Task);
+	Task->RemoveFromRoot();
+
+	if (!bSucceeded)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Export failed for asset %s -> %s"), *AssetPath, *FilePath));
+	}
+
+	const int64 FileSize = IFileManager::Get().FileSize(*FilePath);
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("asset_path"), AssetPath);
+	Result->SetStringField(TEXT("file_path"), FilePath);
+	Result->SetStringField(TEXT("asset_class"), Asset->GetClass()->GetName());
+	Result->SetNumberField(TEXT("file_size_bytes"), static_cast<double>(FileSize));
 	return FMonolithActionResult::Success(Result);
 }
 

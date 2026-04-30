@@ -25,6 +25,9 @@ private:
 	/** Import FBX/glTF mesh via IAssetTools::ImportAssetsAutomated */
 	static FMonolithActionResult ImportMesh(const TSharedPtr<FJsonObject>& Params);
 
+	/** Export a UStaticMesh / USkeletalMesh asset to FBX file on disk via UAssetExportTask */
+	static FMonolithActionResult ExportMesh(const TSharedPtr<FJsonObject>& Params);
+
 	/** Auto-fix mesh quality: weld, degenerate removal, hole fill, normals (GeometryScript) */
 	static FMonolithActionResult FixMeshQuality(const TSharedPtr<FJsonObject>& Params);
 
