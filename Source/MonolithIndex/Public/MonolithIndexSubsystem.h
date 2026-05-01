@@ -28,8 +28,8 @@ struct FPendingIndexChange
 /** Info about an indexed plugin */
 struct FIndexedPluginInfo
 {
-    FString PluginName;     // Logical name (e.g., "InventorySystemX")
-    FString MountPath;      // AR virtual root (e.g., "/InventorySystemX/")
+    FString PluginName;     // Logical name (e.g., "ExampleInventory")
+    FString MountPath;      // AR virtual root (e.g., "/ExampleInventory/")
     FString ContentDir;     // Disk path to Content/
     FString FriendlyName;   // Display name from .uplugin
 };

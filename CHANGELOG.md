@@ -116,7 +116,7 @@ Full diff: [v0.14.2...v0.14.3](https://github.com/tumourlove/monolith/compare/v0
   - New `Scripts/monolith_proxy.sh` shell launcher with `python3`/`python` auto-detection and 3.8+ version gate (parity with `monolith_proxy.bat`).
   - `Scripts/monolith_proxy.py` now declares `from __future__ import annotations` so PEP 604 type syntax (`str | None`) works on Python 3.8+ — macOS ships 3.9 by default.
   - `MonolithNiagaraActions.cpp`: renamed local `NO` → `NodeObj` to dodge the `<objc/objc.h>` `#define NO __objc_no` macro leak that transitively reaches `ApplePlatformProcess.h` and broke compilation.
-  - `Monolith.uplugin`: dropped ghost `MonolithISX` module reference (source extracted to sibling plugin `Plugins/MonolithISX/` on 2026-04-21; sibling plugins live outside `Plugins/Monolith/` and are naturally excluded from release zips by `git ls-files` scope — no explicit stripping required).
+  - `Monolith.uplugin`: dropped a ghost private-integration module reference after the integration moved to a sibling plugin outside `Plugins/Monolith/`; sibling plugins are naturally excluded from release zips by `git ls-files` scope, so no explicit stripping is required.
   - README + CONTRIBUTING updated to document macOS/Linux support and `.sh` launcher.
   - PR by **@MaxenceEpitech**.
   - **Note for macOS users:** this release ships Windows binaries only. Please clone the repo and build from source per `CONTRIBUTING.md` — the macOS build path is proven (all 17 Monolith dylibs compile on UE 5.7 / Apple Silicon). Prebuilt macOS dylibs will follow once a GitHub Actions macOS runner is wired up.

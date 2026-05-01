@@ -8,18 +8,14 @@
 #   1. Sets MONOLITH_RELEASE_BUILD=1 (forces BA/GBA optional deps OFF in Build.cs)
 #   2. Runs UBT to produce clean release binaries
 #   3. Packages tracked files + binaries into a zip with Installed=true
-#   4. Strips non-redistributable modules (MonolithSteamBridge) from
-#      source, binaries, and the uplugin module list
+#   4. Strips accidentally re-merged non-redistributable modules from source,
+#      binaries, and the uplugin module list
 #   5. Unsets env var (your next dev build auto-detects deps normally)
 #
 # Source users (GitHub clones) are unaffected -- Build.cs auto-detects at compile time.
 #
-# Non-redistributable modules:
-#   - MonolithSteamBridge: solo-dev only, Steam Integration Kit bridge (not public)
-#
-# Note: MonolithISX was extracted to a sibling plugin at Plugins/MonolithISX/ on
-# 2026-04-21 -- it no longer lives in this repo, so release packaging does not need
-# to strip it here.
+# Non-redistributable sibling modules live outside this repo. The strip phase below
+# is defense-in-depth for accidental re-merges into Plugins/Monolith/.
 
 param(
     [Parameter(Mandatory=$true)]
@@ -66,12 +62,12 @@ finally {
 $ProjectDir = Split-Path -Parent (Split-Path -Parent $PluginDir)
 
 # --- $StrippedModules: defense-in-depth against accidental sibling-plugin re-merge ---
-# Sibling plugins (MonolithSteamBridge, MonolithISX, future siblings) live OUTSIDE
-# Plugins/Monolith/ at the project's Plugins/ level. They are naturally excluded from
-# the release zip by `git ls-files` scope (which only sees files inside Plugins/Monolith/).
-# This array exists purely as defense-in-depth: if someone ever accidentally re-merges
-# sibling source back into Plugins/Monolith/Source/ (refactor mistake, copy-paste, etc.),
-# the strip filter catches it before it ships.
+# Sibling plugins live outside Plugins/Monolith/ at the project's Plugins/ level.
+# They are naturally excluded from the release zip by `git ls-files` scope (which
+# only sees files inside Plugins/Monolith/). This array exists purely as
+# defense-in-depth: if someone ever accidentally re-merges sibling source back into
+# Plugins/Monolith/Source/ (refactor mistake, copy-paste, etc.), the strip filter
+# catches it before it ships.
 #
 # Auto-discover all "Monolith*" sibling folders alongside Plugins/Monolith/ -- every new
 # sibling gets protected automatically without script maintenance. Excludes Monolith
@@ -164,7 +160,7 @@ if (Test-Path $binDir) {
     New-Item -ItemType Directory -Path $destBin -Force | Out-Null
     $binCount = 0
     $binStripCount = 0
-    # Build a regex that matches any stripped module's binary (e.g. "UnrealEditor-MonolithSteamBridge.")
+    # Build a regex that matches any stripped module's binary.
     $stripModuleRegex = "(" + (($StrippedModules | ForEach-Object { [regex]::Escape($_) }) -join "|") + ")"
     Get-ChildItem $binDir -Recurse -File |
         Where-Object { $_.Extension -ne '.pdb' -and $_.Name -notmatch '\.patch_' } |
@@ -253,14 +249,14 @@ Write-Host "`n  [5/5] Post-build hard-link smoke (issue #30 defense)..." -Foregr
 # alongside the StructUtils-cleanup follow-up.
 #
 # External optional widget runtime sentinel: MonolithUI must stay decoupled from
-# provider plugins. Exact module-name sentinels below catch accidental hard DLL
-# imports before the public zip ships.
+# provider plugins. Exact public dependency sentinels below catch accidental hard
+# DLL imports before the public zip ships; downstream providers should extend
+# this list in their own release wrappers.
 $LeakSentinels = @(
     "GeometryScriptingCore", "CommonUI", "CommonInput", "BlueprintAssist",
     "GameplayBehaviorsModule", "MassEntity", "ZoneGraph",
     "StateTreeModule", "SmartObjectsModule", "ComboGraphRuntime", "LogicDriver",
-    "MetaSoundEngine", "MetaSoundFrontend",
-    "TokenforgeRuntime"
+    "MetaSoundEngine", "MetaSoundFrontend"
 )
 
 # Locate dumpbin.exe -- ships with Visual Studio Build Tools. Try common locations

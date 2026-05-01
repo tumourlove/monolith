@@ -66,7 +66,7 @@ TSharedPtr<FJsonObject> FProjectFindByTypeAction::GetSchema()
 {
 	return FParamSchemaBuilder()
 		.Required(TEXT("asset_type"), TEXT("string"), TEXT("Asset class name (e.g. Blueprint, Material, StaticMesh, Texture2D)"))
-		.Optional(TEXT("module"), TEXT("string"), TEXT("Filter by plugin/module name (e.g. InventorySystemX)"))
+		.Optional(TEXT("module"), TEXT("string"), TEXT("Filter by plugin/module name (e.g. ExampleInventory)"))
 		.Optional(TEXT("limit"), TEXT("integer"), TEXT("Maximum results"), TEXT("100"))
 		.Optional(TEXT("offset"), TEXT("integer"), TEXT("Pagination offset"), TEXT("0"))
 		.Build();

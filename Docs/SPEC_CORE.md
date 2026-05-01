@@ -54,16 +54,14 @@ Monolith.uplugin
   MonolithBABridge      — Optional IModularFeatures bridge for Blueprint Assist integration. Exposes IMonolithGraphFormatter; enables BA-powered auto_layout across blueprint, material, animation, and niagara modules when Blueprint Assist is present (0 MCP actions — integration only)
 ```
 
-**Custom sibling plugins (not inside core Monolith — source + per-module specs are private to their respective repos):**
-- **MonolithISX** — InventorySystemX integration, 158 actions, `inventory` namespace, conditional on InventorySystemX. Extracted 2026-04-21 to `Plugins/MonolithISX/`. Totals above do NOT include these 158 actions.
-- **MonolithSteamBridge** — Steam Integration Kit integration, 28 actions, `steam` namespace, conditional on SIK. Lives at `Plugins/MonolithSteamBridge/` (+ `Plugins/MonolithSteamBridgeLeaderboard/` for full-fidelity leaderboard fidelity). Totals above do NOT include these 28 actions.
+**Custom sibling plugins (not inside core Monolith; source + per-module specs are private to their respective repos):**
 Additional project-specific sibling plugins may register their own namespaces outside this repository. They are intentionally excluded from public Monolith action counts and release packages; their source, action rosters, and module specs belong in their own repos.
 
 **Optional widget runtime providers** (not bundled with the public Monolith release zip): MonolithUI can expose EffectSurface action handlers through a reflective UClass probe when an external provider supplies the expected widget classes. MonolithUI has zero compile-time dependency on that provider. When the provider is absent, EffectSurface actions return `-32010 ErrOptionalDepUnavailable` (see [`specs/SPEC_MonolithUI.md` § "Error Contract"](specs/SPEC_MonolithUI.md#error-contract--optional-effectsurface-provider-absence--32010)); the rest of `ui::` is fully functional. The `make_release.ps1` `$LeakSentinels` list defends against accidental optional-provider symbol leakage into public release DLLs.
 
 For the architectural pattern that lets you write your own sibling plugin and register actions into Monolith's MCP registry from outside the core repo, see [`SIBLING_PLUGIN_GUIDE.md`](SIBLING_PLUGIN_GUIDE.md).
 
-> **Live editor `monolith_status` will report a higher count than the in-tree total.** When sibling plugins are loaded the editor reports the union (e.g. with all 4 host-project siblings — `inventory` 158, `steam` 28, `substance` 26, `claudedesign` 11 — the live total reads `actions=1498, namespaces=20`; the +223 delta over the in-tree 1275 (1271 namespace actions + 4 `monolith_*` meta) is the siblings). This is expected. The numbers in §12 below are the **in-tree** ground truth — sibling totals are specced in their own repos.
+> **Live editor `monolith_status` will report a higher count than the in-tree total.** When sibling plugins are loaded the editor reports the union of in-tree and sibling actions. This is expected. The numbers in §12 below are the **in-tree** ground truth; sibling totals are specced in their own repos.
 
 ### Discovery/Dispatch Pattern
 
@@ -323,7 +321,7 @@ Setting names below match the actual `UMonolithSettings` UPROPERTY identifiers i
 | bEnableLogicDriver | True | Enable Logic Driver Pro module (no-op if `WITH_LOGICDRIVER=0`) |
 | bEnableAI | True | Enable AI module (Behavior Trees, Blackboards, State Trees, EQS, Smart Objects, Perception, Navigation) |
 | bEnableAudio | True | Enable Audio module (Sound Cues, MetaSounds, batch ops, AI Perception bind) |
-| bEnableInventorySystemX | True | Enable InventorySystemX integration (no-op if InventorySystemX not present; routed via the sibling `MonolithISX` plugin) |
+| bEnableExternalInventoryModule | True | Allow an external sibling plugin to register `inventory_query` actions |
 | bEnableProceduralTownGen | **False** | Enable Procedural Town Generator actions (45 actions). Requires `bEnableMesh`. **Work-in-progress** — known geometry issues, disabled by default. Unless you're willing to dig in and help improve it, best left alone |
 | bEnableBlueprintAssist | True | Allow MonolithBABridge to register IMonolithGraphFormatter when Blueprint Assist is present. Set false to force built-in layout for all auto_layout calls |
 | bDeferFirstTimeIndex | False | If true, first-time indexing won't run automatically. Use `Monolith.StartIndex` console command to trigger |

@@ -154,8 +154,8 @@ public:
 
     /**
      * Convenience: Dump a WBP that's already loaded (skips the asset-path
-     * resolve + load). Used by tests + the corpus harness so they can drive
-     * a known-good WBP without touching the asset registry.
+     * resolve + load). Used by tests and automation so they can drive a
+     * known-good WBP without touching the asset registry.
      */
     static FUISpecSerializerResult DumpFromWBP(
         UWidgetBlueprint* WBP,

@@ -645,7 +645,7 @@ Slot.* paths (`Slot.Padding`, `Slot.HAlign`, `Slot.VAlign`, `Slot.Anchors`, `Slo
 
 ## Effect Surface (M5 — Phase E + Optional Provider Decouple)
 
-**Status:** Phase E widget shipped 2026-04-26; **optional provider decouple Wave 1/2 + Final.1 shipped 2026-04-27**. `M_EffectSurface_Base` material asset still deferred (tracked in `Plugins/Monolith/Docs/ROADMAP.md`).
+**Status:** Phase E widget shipped 2026-04-26; **optional provider decouple Wave 1/2 + Final.1 shipped 2026-04-27**. The provider-owned material asset is still deferred (tracked in `Plugins/Monolith/Docs/ROADMAP.md`).
 
 `UEffectSurface` is the SDF-driven UMG widget that supersedes `URoundedBorder`. One Slate `FSlateDrawElement::MakeBox` per paint pass, all visual maths in the material domain (User Interface), MID-driven by a typed config struct. The widget lives in an optional provider plugin outside the public Monolith release. MonolithUI accesses it via reflective `UClass*` lookup only — there is no compile-time `#include` of any provider header from MonolithUI source. The curated mappings, allowlist coverage, and Phase F MCP action wrappers all live in MonolithUI; they reach `UEffectSurface` through `MonolithUI::GetEffectSurfaceClass()` + `FUIReflectionHelper::ApplyJsonPath` against the curated paths.
 
@@ -656,7 +656,7 @@ Slot.* paths (`Slot.Padding`, `Slot.HAlign`, `Slot.VAlign`, `Slot.Anchors`, `Slo
 | `UEffectSurface : public UContentWidget` | Optional provider module | UMG wrapper, single content child, exposes `Config` UPROPERTY, owns the MID, opt-in `SBackgroundBlur` wrap when `Config.BackdropBlur.Strength > 0`. |
 | `SEffectSurface : public SLeafWidget` | Optional provider module | Slate paint leaf, one `FSlateDrawElement::MakeBox` per `OnPaint`, brush `ResourceObject` points at the MID. |
 | `FEffectSurfaceConfig` USTRUCT cluster | Optional provider module | Typed config: Shape, Fill, Border, DropShadow stack (cap 4), InnerShadow stack (cap 4), Glow, Filter, BackdropBlur, InsetHighlight, ContentPadding, FeatureFlags bitmask. |
-| `M_EffectSurface_Base` content asset | **DEFERRED** — provider-specific material path | SDF material that consumes the MID parameters and renders the surface. Authored via Monolith `material_query` at edit time. Until landed, `BaseMaterial.LoadSynchronous()` returns nullptr and the SDF surface paints invisibly (widget still compiles + runs). |
+| Provider-owned content asset | **DEFERRED** — optional-provider material path | SDF material that consumes the MID parameters and renders the surface. Authored via Monolith `material_query` at edit time. Until landed, `BaseMaterial.LoadSynchronous()` returns nullptr and the SDF surface paints invisibly (widget still compiles + runs). |
 
 ### Hit-testing
 
@@ -692,7 +692,7 @@ Allowlist tokens registered for `EffectSurface` in `UMonolithUIRegistrySubsystem
 
 ### Material asset deferral
 
-`M_EffectSurface_Base` is the SDF material that turns the MID parameter set into pixels. Its authoring requires the editor (Monolith `material_query("build_material_graph", ...)` only works when the editor is running), and Phase E was implemented offline. Therefore: this phase ships the C++ widget code with `TSoftObjectPtr<UMaterialInterface> BaseMaterial` defaulted to the planned asset path, but **does NOT** include the material asset itself. The widget compiles, links, and runs; the SDF surface paints invisibly until the asset lands. Material authoring is tracked as a follow-up task in `Plugins/Monolith/Docs/ROADMAP.md`.
+The provider-owned SDF material turns the MID parameter set into pixels. Its authoring requires the editor (Monolith `material_query("build_material_graph", ...)` only works when the editor is running), and Phase E was implemented offline. Therefore: this phase ships the C++ widget code with `TSoftObjectPtr<UMaterialInterface> BaseMaterial` defaulted to a provider-supplied asset path, but **does NOT** include the material asset itself. The widget compiles, links, and runs; the SDF surface paints invisibly until the asset lands. Material authoring is tracked as a follow-up task in `Plugins/Monolith/Docs/ROADMAP.md`.
 
 ### Tests
 
@@ -1042,7 +1042,7 @@ These are tracked drift / deferred work that did not block Phase L closure:
 
 | # | Item | Notes |
 |---|------|-------|
-| 1 | `M_EffectSurface_Base` material asset (WISHLIST) | Phase E shipped the C++ widget against `TSoftObjectPtr<UMaterialInterface> BaseMaterial` defaulted to a provider-specific material path. Authoring requires editor + Monolith `material_query("build_material_graph", ...)`. Until the asset lands, the SDF surface paints invisibly (widget compiles + runs). Tracked in `Plugins/Monolith/Docs/ROADMAP.md`. |
+| 1 | Provider-owned material asset (WISHLIST) | Phase E shipped the C++ widget against `TSoftObjectPtr<UMaterialInterface> BaseMaterial` defaulted to a provider-supplied asset path. Authoring requires editor + Monolith `material_query("build_material_graph", ...)`. Until the asset lands, the SDF surface paints invisibly (widget compiles + runs). Tracked in `Plugins/Monolith/Docs/ROADMAP.md`. |
 | 2 | `URoundedBorder` removal | Marked `UCLASS(meta=(DeprecatedNode))` Phase E8. Not removed yet — existing WBPs continue to render unchanged. A future `ui::migrate_rounded_border_to_effect_surface(asset_path)` action will convert nodes in-place. |
 | 3 | ~~optional provider .uplugin dep declaration~~ | **RESOLVED 2026-04-27** — superseded by the optional provider decouple. The pragmatic fix landed: zero compile-time dep on the provider + reflective `MonolithUI::GetEffectSurfaceClass()` probe. The missing-plugin dependency warning no longer fires because there is no warrant for the dep — MonolithUI does not include any provider header. See § "Optional Dep Probe API" + § "Error Contract — Optional EffectSurface Provider Absence (-32010)". |
 | 4 | Legacy sibling UI alias removal | 10 aliases in a private bridge module re-dispatch into `ui::` and tag responses `{deprecated: true}`. Plan: keep one major release for downstream catch-up, then remove. Phase L marker present in code + spec. |

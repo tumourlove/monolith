@@ -356,90 +356,85 @@ Two distribution scenarios:
 
 ---
 
-## Examples in the wild
+## Private Examples
 
-| Plugin | Status | Bridges | Namespace | Notes |
-|---|---|---|---|---|
-| **MonolithISX** | private repo | InventorySystemX (paid Fab plugin) | `inventory` | 158 actions. Lives at `Plugins/MonolithISX/`. Source + per-module specs private; existence acknowledged in `SPEC_CORE.md`. |
-| **MonolithSteamBridge** | private repo | Steam Integration Kit (paid Fab plugin) | `steam` | 28 actions across 7 subsystems (Achievement, Cloud, Infra, Leaderboard, Overlay, Stat, UserAuth). Composed with `MonolithSteamBridgeLeaderboard` sibling for full-fidelity leaderboard upload/download (UHT + SIK USTRUCT workaround). Source + per-module specs private; existence acknowledged in `SPEC_CORE.md`. |
-| **MonolithSubstance** | private repo | Adobe Substance (Marketplace plugin) | `substance` | 26 actions. Build.cs uses **4-location detection** (`project_runtime`, `project_root`, `engine_marketplace` recursive scan, `engine_runtime`) with helper struct + console logging — see "Advanced detection variant" below. Marks Adobe Substance as `Optional: true` in .uplugin. |
-| Private UI bridge | private repo | External design/runtime stack | Custom namespace | Keep the action roster, provider names, and implementation spec out of public Monolith docs. Depend on Monolith privately; Monolith must not depend on the bridge. |
+Private sibling bridges can target marketplace plugins, project-only systems, or external tooling stacks. Keep those provider names, action rosters, and implementation specs in the sibling repo. Public Monolith should document the pattern, not a downstream project's private bridge inventory.
 
-### Advanced detection variant — `MonolithSubstance` template
+### Advanced Detection Variant
 
-The basic 3-location probe above (project Plugins/, engine Marketplace/, engine Plugins/) covers the common case. For sibling plugins where the third-party dep ships at unpredictable folder names (e.g. obfuscated Marketplace bundles) or in multiple legitimate engine locations, MonolithSubstance demonstrates a more robust pattern:
+The basic 3-location probe above (project Plugins/, engine Marketplace/, engine Plugins/) covers the common case. For sibling plugins where the third-party dependency ships at unpredictable folder names or in multiple legitimate engine locations, use a helper-struct pattern:
 
 ```csharp
-private sealed class SubstanceDetection
+private sealed class VendorPluginDetection
 {
     public bool bFound;
     public string Root = string.Empty;
     public string Source = "none";
 }
 
-private static SubstanceDetection DetectSubstance(ReadOnlyTargetRules Target, bool bReleaseBuild)
+private static VendorPluginDetection DetectVendorPlugin(ReadOnlyTargetRules Target, bool bReleaseBuild)
 {
-    if (bReleaseBuild) return new SubstanceDetection();
+    if (bReleaseBuild) return new VendorPluginDetection();
 
     static bool HasUplugin(string root) =>
-        Directory.Exists(root) && File.Exists(Path.Combine(root, "Substance.uplugin"));
+        Directory.Exists(root) && File.Exists(Path.Combine(root, "VendorPlugin.uplugin"));
 
-    SubstanceDetection Found(string root, string source) =>
-        new SubstanceDetection { bFound = true, Root = root, Source = source };
+    VendorPluginDetection Found(string root, string source) =>
+        new VendorPluginDetection { bFound = true, Root = root, Source = source };
 
-    // 1. Project Plugins/Runtime/Substance (canonical Substance install location)
+    // 1. Project Plugins/Runtime/VendorPlugin (canonical install location)
     if (Target.ProjectFile != null)
     {
         string projectRuntimeRoot = Path.Combine(
-            Target.ProjectFile.Directory.FullName, "Plugins", "Runtime", "Substance");
+            Target.ProjectFile.Directory.FullName, "Plugins", "Runtime", "VendorPlugin");
         if (HasUplugin(projectRuntimeRoot)) return Found(projectRuntimeRoot, "project_runtime");
 
         string projectRoot = Path.Combine(
-            Target.ProjectFile.Directory.FullName, "Plugins", "Substance");
+            Target.ProjectFile.Directory.FullName, "Plugins", "VendorPlugin");
         if (HasUplugin(projectRoot)) return Found(projectRoot, "project_root");
     }
 
-    // 2. Engine Plugins/Marketplace/ — recursive scan for ANY Substance.uplugin
+    // 2. Engine Plugins/Marketplace/ — recursive scan for ANY VendorPlugin.uplugin
     //    handles Fab/Marketplace folder name obfuscation
     string engineDir = Path.GetFullPath(Target.RelativeEnginePath);
     string marketplaceDir = Path.Combine(engineDir, "Plugins", "Marketplace");
     if (Directory.Exists(marketplaceDir))
     {
         string[] matches = Directory.GetFiles(
-            marketplaceDir, "Substance.uplugin", SearchOption.AllDirectories);
+            marketplaceDir, "VendorPlugin.uplugin", SearchOption.AllDirectories);
         string firstMatch = matches.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).FirstOrDefault();
         if (!string.IsNullOrEmpty(firstMatch))
             return Found(Path.GetDirectoryName(firstMatch), "engine_marketplace");
     }
 
-    // 3. Engine Plugins/Runtime/Substance (stock-engine fallback)
-    string engineRuntimeRoot = Path.Combine(engineDir, "Plugins", "Runtime", "Substance");
+    // 3. Engine Plugins/Runtime/VendorPlugin (stock-engine fallback)
+    string engineRuntimeRoot = Path.Combine(engineDir, "Plugins", "Runtime", "VendorPlugin");
     if (HasUplugin(engineRuntimeRoot)) return Found(engineRuntimeRoot, "engine_runtime");
 
-    return new SubstanceDetection();
+    return new VendorPluginDetection();
 }
 ```
 
 Then in the constructor:
 ```csharp
-SubstanceDetection Detection = DetectSubstance(Target, bReleaseBuild);
+VendorPluginDetection Detection = DetectVendorPlugin(Target, bReleaseBuild);
 if (Detection.bFound)
 {
-    PrivateDependencyModuleNames.AddRange(new[] { "SubstanceCore", "SubstanceEditor" });
-    PublicDefinitions.Add("WITH_SUBSTANCE=1");
-    Console.WriteLine($"MonolithSubstance: detected Substance at {Detection.Root} ({Detection.Source})");
+    PrivateDependencyModuleNames.AddRange(new[] { "VendorRuntime", "VendorEditor" });
+    PublicDefinitions.Add("WITH_VENDORPLUGIN=1");
+    Console.WriteLine($"MonolithVendorBridge: detected vendor plugin at {Detection.Root} ({Detection.Source})");
 }
 else
 {
-    PublicDefinitions.Add("WITH_SUBSTANCE=0");
-    Console.WriteLine("MonolithSubstance: Substance not detected or release stub forced; compiling stub mode");
+    PublicDefinitions.Add("WITH_VENDORPLUGIN=0");
+    Console.WriteLine("MonolithVendorBridge: vendor plugin not detected or release stub forced; compiling stub mode");
 }
 ```
 
 **Why this is better than the basic 3-location probe:**
 1. **Helper struct captures *where* the dep was found** — invaluable when debugging "WITH_X is unexpectedly 0/1 in this build" issues at UBT time
 2. **`HasUplugin` predicate** avoids false positives where the folder exists but the plugin doesn't
-3. **Recursive Marketplace scan** survives the random folder names Fab/Marketplace generates (vs hardcoding "Substance" as the subfolder name)
+3. **Recursive Marketplace scan** survives the random folder names Fab/Marketplace generates
 4. **Console.WriteLine at detection** surfaces the result in UBT output without needing to set verbose logging
 5. **Always guards `Target.ProjectFile != null`** — engine-only / Program targets can have null ProjectFile and would otherwise NRE
 

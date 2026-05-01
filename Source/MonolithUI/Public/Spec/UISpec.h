@@ -135,7 +135,7 @@ struct MONOLITHUI_API FUISpecMetadata
 {
     GENERATED_BODY()
 
-    /** Free-form authoring tool identifier (e.g. "TailwindBridge", "Figma"). */
+    /** Free-form authoring tool identifier (e.g. "DesignTool", "Figma"). */
     UPROPERTY(BlueprintReadWrite, Category = "MonolithUI|Spec")
     FString AuthoringTool;
 

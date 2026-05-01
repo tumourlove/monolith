@@ -243,9 +243,9 @@ public:
 	bool bEnableAI = true;
 
 	UPROPERTY(config, EditAnywhere, Category="Modules|Optional",
-		meta=(DisplayName="Enable Inventory System X Module",
-			  ToolTip="Registers inventory_query actions for InventorySystemX integration (items, equipment, storage, crafting, runtime PIE, AI, accessibility)."))
-	bool bEnableInventorySystemX = true;
+		meta=(DisplayName="Enable External Inventory Module",
+			  ToolTip="Allows an external sibling plugin to register inventory_query actions."))
+	bool bEnableExternalInventoryModule = true;
 
 	UPROPERTY(config, EditAnywhere, Category="Modules|Optional",
 		meta=(DisplayName="Enable Audio Module",

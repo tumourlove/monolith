@@ -847,9 +847,7 @@ If you're building a sibling plugin yourself, read `Plugins/Monolith/Docs/SIBLIN
 
 | Sibling plugin | Namespace | Actions | Status | Repo |
 |---|---|---|---|---|
-| **MonolithISX** | `inventory` | 158 | Bridges InventorySystemX (paid Fab plugin). Editor + runtime PIE actions. Conditional on the InventorySystemX dep. | Separate plugin, sits at `Plugins/MonolithISX/` |
-| **MonolithSteamBridge** | `steam` | 28 | Bridges Steam Integration Kit (paid Fab plugin). Solo-dev only — not in public Monolith releases. `MONOLITH_RELEASE_BUILD=1` strips it. | `Plugins/MonolithSteamBridge/` |
-| **MonolithSteamBridgeLeaderboard** | (folds into `steam`) | (subset) | Phase 2 sub-module that unlocks full-fidelity leaderboard upload/download by splitting from the gated USTRUCT-in-UFUNCTION block. | `Plugins/MonolithSteamBridgeLeaderboard/` |
+| External sibling plugin | Custom | Varies | Registers its own namespace at startup and ships through its own repo/channel. | Outside `Plugins/Monolith/` |
 
 **Why these aren't in the in-tree count:** the in-tree 1271/16 figure counts only modules shipped inside the public `Monolith-vX.Y.Z.zip` release. Sibling plugins live in their own folders, ship via their own channels (or stay private), and may or may not be installed in any given consumer's project. Their absence is not a degraded state — Monolith is fully functional without them.
 
