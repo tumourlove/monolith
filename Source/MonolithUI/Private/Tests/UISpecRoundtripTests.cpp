@@ -21,6 +21,10 @@
 //        ScrollBox/Grid/UniformGrid/SizeBox/ScaleBox/WrapBox/WidgetSwitcher/
 //        Border).
 //
+//   Plus: MonolithUI.SpecSerializer.PublicFields
+//        Verifies builder-supported public slot/content/style fields survive
+//        build -> dump, including every curated Canvas anchor preset.
+//
 // Throwaway WBPs land under /Game/Tests/Monolith/UI/Roundtrip/ per the
 // test-asset rule.
 
@@ -60,6 +64,22 @@ namespace MonolithUI::SpecRoundtripTests
         return FString::Printf(TEXT("/Game/Tests/Monolith/UI/Roundtrip/WBP_%s"), *Suffix);
     }
 
+    static bool NearlyEqualMargin(const FMargin& A, const FMargin& B, float Tolerance = 0.01f)
+    {
+        return FMath::Abs(A.Left - B.Left) <= Tolerance
+            && FMath::Abs(A.Top - B.Top) <= Tolerance
+            && FMath::Abs(A.Right - B.Right) <= Tolerance
+            && FMath::Abs(A.Bottom - B.Bottom) <= Tolerance;
+    }
+
+    static bool NearlyEqualColor(const FLinearColor& A, const FLinearColor& B, float Tolerance = 0.01f)
+    {
+        return FMath::Abs(A.R - B.R) <= Tolerance
+            && FMath::Abs(A.G - B.G) <= Tolerance
+            && FMath::Abs(A.B - B.B) <= Tolerance
+            && FMath::Abs(A.A - B.A) <= Tolerance;
+    }
+
     /** Build a minimal one-node spec: VerticalBox root with a single TextBlock child. */
     static FUISpecDocument MakeOneNodeDoc()
     {
@@ -89,7 +109,8 @@ namespace MonolithUI::SpecRoundtripTests
      * Per-property tolerance:
      *   * Type / Id / child count: exact match required
      *   * Content.Text: exact match required
-     *   * Content.FontSize: ~1.0 tolerance (font system rounds via integer FSlateFontInfo.Size)
+     *   * Content.FontSize: when the source specifies >0, ~1.0 tolerance
+     *     (font system rounds via integer FSlateFontInfo.Size)
      *   * Style.Opacity: 0.001 tolerance (float roundtrip)
      *   * All other fields: best-effort match logged but not asserted (the
      *     spec deliberately tolerates lossy default-vs-explicit divergence)
@@ -126,7 +147,8 @@ namespace MonolithUI::SpecRoundtripTests
                 *Path, *Lhs.Content.Text, *Rhs.Content.Text));
             ++Diffs;
         }
-        if (FMath::Abs(Lhs.Content.FontSize - Rhs.Content.FontSize) > 1.0f)
+        if (Lhs.Content.FontSize > 0.f
+            && FMath::Abs(Lhs.Content.FontSize - Rhs.Content.FontSize) > 1.0f)
         {
             OutDiffs.Add(FString::Printf(TEXT("%s font_size: %f vs %f"),
                 *Path, Lhs.Content.FontSize, Rhs.Content.FontSize));
@@ -153,7 +175,110 @@ namespace MonolithUI::SpecRoundtripTests
         }
         return Diffs;
     }
+
 } // namespace MonolithUI::SpecRoundtripTests
+
+
+// =============================================================================
+// J2 -- Supported slot/style/content fields survive Build -> Dump.
+// =============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMonolithUISpecSerializerSupportedFieldsTest,
+    "MonolithUI.SpecSerializer.SupportedFields",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMonolithUISpecSerializerSupportedFieldsTest::RunTest(const FString& /*Parameters*/)
+{
+    using namespace MonolithUI::SpecRoundtripTests;
+
+    FUISpecDocument Doc;
+    Doc.Version = 1;
+    Doc.Name = TEXT("Roundtrip_SupportedFields");
+    Doc.ParentClass = TEXT("UserWidget");
+
+    Doc.Root = MakeShared<FUISpecNode>();
+    Doc.Root->Type = FName(TEXT("VerticalBox"));
+    Doc.Root->Id = FName(TEXT("Root"));
+
+    TSharedPtr<FUISpecNode> Frame = MakeShared<FUISpecNode>();
+    Frame->Type = FName(TEXT("SizeBox"));
+    Frame->Id = FName(TEXT("Frame"));
+    Frame->Slot.HAlign = FName(TEXT("Center"));
+    Frame->Slot.VAlign = FName(TEXT("Center"));
+    Frame->Slot.Padding = FMargin(3.f, 5.f, 7.f, 11.f);
+    Frame->Style.Width = 320.f;
+    Frame->Style.Height = 96.f;
+    Frame->Style.bUseCustomSize = true;
+
+    TSharedPtr<FUISpecNode> Label = MakeShared<FUISpecNode>();
+    Label->Type = FName(TEXT("TextBlock"));
+    Label->Id = FName(TEXT("Label"));
+    Label->Content.Text = TEXT("Roundtrip supported fields");
+    Label->Content.FontSize = 24.f;
+    Label->Content.FontColor = FLinearColor(0.2f, 0.4f, 0.8f, 1.f);
+    Label->Content.WrapMode = FName(TEXT("Wrap"));
+
+    Frame->Children.Add(Label);
+    Doc.Root->Children.Add(Frame);
+
+    const FString AssetPath = MakeTestPath(TEXT("SupportedFields"));
+    FUISpecBuilderInputs BuildIn;
+    BuildIn.Document = &Doc;
+    BuildIn.AssetPath = AssetPath;
+    BuildIn.bOverwrite = true;
+
+    const FUISpecBuilderResult BuildR = FUISpecBuilder::Build(BuildIn);
+    TestTrue(TEXT("Supported-fields build succeeds"), BuildR.bSuccess);
+    if (!BuildR.bSuccess)
+    {
+        for (const FUISpecError& E : BuildR.Errors)
+        {
+            AddError(FString::Printf(TEXT("Build err [%s]: %s"), *E.Category.ToString(), *E.Message));
+        }
+        return false;
+    }
+
+    FUISpecSerializerInputs DumpIn;
+    DumpIn.AssetPath = AssetPath;
+    const FUISpecSerializerResult DumpR = FUISpecSerializer::Dump(DumpIn);
+    TestTrue(TEXT("Supported-fields dump succeeds"), DumpR.bSuccess);
+    TestTrue(TEXT("Dumped document has a root"), DumpR.Document.Root.IsValid());
+    if (!DumpR.bSuccess || !DumpR.Document.Root.IsValid())
+    {
+        return false;
+    }
+
+    TestEqual(TEXT("Root child count"), DumpR.Document.Root->Children.Num(), 1);
+    if (DumpR.Document.Root->Children.Num() != 1 || !DumpR.Document.Root->Children[0].IsValid())
+    {
+        return false;
+    }
+
+    const FUISpecNode& DumpedFrame = *DumpR.Document.Root->Children[0];
+    TestEqual(TEXT("Frame type"), DumpedFrame.Type, FName(TEXT("SizeBox")));
+    TestEqual(TEXT("Frame HAlign"), DumpedFrame.Slot.HAlign, FName(TEXT("Center")));
+    TestEqual(TEXT("Frame VAlign"), DumpedFrame.Slot.VAlign, FName(TEXT("Center")));
+    TestTrue(TEXT("Frame slot padding roundtrips"),
+        NearlyEqualMargin(DumpedFrame.Slot.Padding, Frame->Slot.Padding));
+    TestEqual(TEXT("Frame width"), DumpedFrame.Style.Width, 320.f);
+    TestEqual(TEXT("Frame height"), DumpedFrame.Style.Height, 96.f);
+    TestTrue(TEXT("Frame uses custom size"), DumpedFrame.Style.bUseCustomSize);
+
+    TestEqual(TEXT("Frame child count"), DumpedFrame.Children.Num(), 1);
+    if (DumpedFrame.Children.Num() != 1 || !DumpedFrame.Children[0].IsValid())
+    {
+        return false;
+    }
+
+    const FUISpecNode& DumpedLabel = *DumpedFrame.Children[0];
+    TestEqual(TEXT("Label text"), DumpedLabel.Content.Text, Label->Content.Text);
+    TestEqual(TEXT("Label font size"), DumpedLabel.Content.FontSize, 24.f);
+    TestEqual(TEXT("Label wrap mode"), DumpedLabel.Content.WrapMode, FName(TEXT("Wrap")));
+    TestTrue(TEXT("Label font color roundtrips"),
+        NearlyEqualColor(DumpedLabel.Content.FontColor, Label->Content.FontColor));
+
+    return true;
+}
 
 
 // =============================================================================
@@ -226,6 +351,148 @@ bool FMonolithUISpecRoundtripIdentityTest::RunTest(const FString& /*Parameters*/
     TestEqual(TEXT("Rebuild NodesCreated matches initial build"),
         BuildR2.NodesCreated, BuildR.NodesCreated);
 
+    return true;
+}
+
+
+// =============================================================================
+// Public slot/content/style fields supported by the builder survive dump.
+// =============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMonolithUISpecSerializerPublicFieldsTest,
+    "MonolithUI.SpecSerializer.PublicFields",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMonolithUISpecSerializerPublicFieldsTest::RunTest(const FString& /*Parameters*/)
+{
+    using namespace MonolithUI::SpecRoundtripTests;
+
+    const TArray<FName> AnchorPresets = {
+        FName(TEXT("top_left")),
+        FName(TEXT("top_center")),
+        FName(TEXT("top_right")),
+        FName(TEXT("center_left")),
+        FName(TEXT("center")),
+        FName(TEXT("center_right")),
+        FName(TEXT("bottom_left")),
+        FName(TEXT("bottom_center")),
+        FName(TEXT("bottom_right")),
+        FName(TEXT("stretch_top")),
+        FName(TEXT("stretch_bottom")),
+        FName(TEXT("stretch_left")),
+        FName(TEXT("stretch_right")),
+        FName(TEXT("stretch_horizontal")),
+        FName(TEXT("stretch_vertical")),
+        FName(TEXT("stretch_fill")),
+    };
+
+    const FVector2D ExpectedPosition(12.0, 34.0);
+    const FVector2D ExpectedSize(140.0, 48.0);
+    const FVector2D ExpectedAlignment(0.25, 0.75);
+    const FLinearColor ExpectedFontColor(0.25f, 0.5f, 0.75f, 0.9f);
+    const float ExpectedOpacity = 0.42f;
+
+    int32 Checked = 0;
+    for (const FName& Preset : AnchorPresets)
+    {
+        const FString PresetString = Preset.ToString();
+        const FString Label = FString::Printf(TEXT("[%s]"), *PresetString);
+        const FString AssetPath = MakeTestPath(FString::Printf(
+            TEXT("PublicFields_%s"), *PresetString));
+
+        FUISpecDocument Doc;
+        Doc.Version = 1;
+        Doc.Name = FString::Printf(TEXT("PublicFields_%s"), *PresetString);
+        Doc.ParentClass = TEXT("UserWidget");
+
+        Doc.Root = MakeShared<FUISpecNode>();
+        Doc.Root->Type = FName(TEXT("CanvasPanel"));
+        Doc.Root->Id = FName(TEXT("Canvas"));
+
+        TSharedPtr<FUISpecNode> Child = MakeShared<FUISpecNode>();
+        Child->Type = FName(TEXT("TextBlock"));
+        Child->Id = FName(TEXT("Label"));
+        Child->Slot.AnchorPreset = Preset;
+        const bool bCheckCanvasGeometry = (Preset == FName(TEXT("top_center")));
+        if (bCheckCanvasGeometry)
+        {
+            Child->Slot.Position = ExpectedPosition;
+            Child->Slot.Size = ExpectedSize;
+            Child->Slot.Alignment = ExpectedAlignment;
+            Child->Slot.bAutoSize = true;
+            Child->Slot.ZOrder = 7;
+        }
+        Child->Content.Text = FString::Printf(TEXT("Anchor %s"), *PresetString);
+        Child->Content.FontSize = 19.0f;
+        Child->Content.FontColor = ExpectedFontColor;
+        Child->Style.Opacity = ExpectedOpacity;
+        Child->Style.Visibility = FName(TEXT("Hidden"));
+        Doc.Root->Children.Add(Child);
+
+        FUISpecBuilderInputs BuildIn;
+        BuildIn.Document = &Doc;
+        BuildIn.AssetPath = AssetPath;
+        BuildIn.bOverwrite = true;
+
+        const FUISpecBuilderResult BuildR = FUISpecBuilder::Build(BuildIn);
+        if (!BuildR.bSuccess)
+        {
+            AddError(FString::Printf(TEXT("%s build failed"), *Label));
+            for (const FUISpecError& E : BuildR.Errors)
+            {
+                AddError(FString::Printf(TEXT("%s err [%s]: %s"),
+                    *Label, *E.Category.ToString(), *E.Message));
+            }
+            continue;
+        }
+
+        FUISpecSerializerInputs DumpIn;
+        DumpIn.AssetPath = AssetPath;
+        const FUISpecSerializerResult DumpR = FUISpecSerializer::Dump(DumpIn);
+        if (!DumpR.bSuccess || !DumpR.Document.Root.IsValid())
+        {
+            AddError(FString::Printf(TEXT("%s dump failed"), *Label));
+            continue;
+        }
+        if (DumpR.Document.Root->Children.Num() != 1
+            || !DumpR.Document.Root->Children[0].IsValid())
+        {
+            AddError(FString::Printf(TEXT("%s dumped root missing child"), *Label));
+            continue;
+        }
+
+        const FUISpecNode& DumpChild = *DumpR.Document.Root->Children[0];
+        TestEqual(Label + TEXT(" anchor preset"), DumpChild.Slot.AnchorPreset, Preset);
+        if (bCheckCanvasGeometry)
+        {
+            TestTrue(Label + TEXT(" position X"),
+                FMath::IsNearlyEqual(DumpChild.Slot.Position.X, ExpectedPosition.X));
+            TestTrue(Label + TEXT(" position Y"),
+                FMath::IsNearlyEqual(DumpChild.Slot.Position.Y, ExpectedPosition.Y));
+            TestTrue(Label + TEXT(" size X"),
+                FMath::IsNearlyEqual(DumpChild.Slot.Size.X, ExpectedSize.X));
+            TestTrue(Label + TEXT(" size Y"),
+                FMath::IsNearlyEqual(DumpChild.Slot.Size.Y, ExpectedSize.Y));
+            TestTrue(Label + TEXT(" alignment X"),
+                FMath::IsNearlyEqual(DumpChild.Slot.Alignment.X, ExpectedAlignment.X));
+            TestTrue(Label + TEXT(" alignment Y"),
+                FMath::IsNearlyEqual(DumpChild.Slot.Alignment.Y, ExpectedAlignment.Y));
+            TestTrue(Label + TEXT(" auto size"), DumpChild.Slot.bAutoSize);
+            TestEqual(Label + TEXT(" z order"), DumpChild.Slot.ZOrder, 7);
+        }
+        TestEqual(Label + TEXT(" text"), DumpChild.Content.Text, Child->Content.Text);
+        TestTrue(Label + TEXT(" font size"),
+            FMath::IsNearlyEqual(DumpChild.Content.FontSize, Child->Content.FontSize));
+        TestTrue(Label + TEXT(" font color"),
+            NearlyEqualColor(DumpChild.Content.FontColor, ExpectedFontColor));
+        TestTrue(Label + TEXT(" opacity"),
+            FMath::IsNearlyEqual(DumpChild.Style.Opacity, ExpectedOpacity));
+        TestEqual(Label + TEXT(" visibility"), DumpChild.Style.Visibility, FName(TEXT("Hidden")));
+
+        ++Checked;
+    }
+
+    TestEqual(TEXT("All curated anchor presets checked"), Checked, AnchorPresets.Num());
     return true;
 }
 

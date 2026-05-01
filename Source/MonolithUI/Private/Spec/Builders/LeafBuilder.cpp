@@ -20,6 +20,18 @@
 #include "Blueprint/WidgetTree.h"
 #include "Components/PanelWidget.h"
 #include "Components/PanelSlot.h"
+#include "Components/CanvasPanelSlot.h"
+#include "Components/VerticalBoxSlot.h"
+#include "Components/HorizontalBoxSlot.h"
+#include "Components/OverlaySlot.h"
+#include "Components/ScrollBoxSlot.h"
+#include "Components/GridSlot.h"
+#include "Components/UniformGridSlot.h"
+#include "Components/SizeBoxSlot.h"
+#include "Components/ScaleBoxSlot.h"
+#include "Components/WrapBoxSlot.h"
+#include "Components/WidgetSwitcherSlot.h"
+#include "Components/BorderSlot.h"
 #include "Components/Widget.h"
 #include "Components/TextBlock.h"
 #include "Components/RichTextBlock.h"
@@ -27,6 +39,9 @@
 #include "Components/Button.h"
 #include "Components/EditableText.h"
 #include "Components/EditableTextBox.h"
+#include "Components/SizeBox.h"
+#include "Components/Border.h"
+#include "Components/ProgressBar.h"
 #include "WidgetBlueprint.h"
 
 #include "Materials/MaterialInterface.h"
@@ -37,6 +52,64 @@
 
 namespace MonolithUI::LeafBuilderInternal
 {
+    static bool HasAnyPadding(const FMargin& Padding)
+    {
+        return Padding.GetTotalSpaceAlong<EOrientation::Orient_Horizontal>() != 0
+            || Padding.GetTotalSpaceAlong<EOrientation::Orient_Vertical>() != 0;
+    }
+
+    static bool HasAuthoredColor(const FLinearColor& Color)
+    {
+        return !Color.Equals(FLinearColor::Transparent);
+    }
+
+    static bool IsWrapModeEnabled(const FName& WrapMode)
+    {
+        if (WrapMode.IsNone())
+        {
+            return false;
+        }
+        const FString Token = WrapMode.ToString();
+        return Token == TEXT("Wrap") || Token == TEXT("WrapAtWordBoundary");
+    }
+
+    template <typename SlotType>
+    static void ApplyAlignmentAndPadding(const FUISpecSlot& S, SlotType* Slot)
+    {
+        if (!Slot)
+        {
+            return;
+        }
+        if (!S.HAlign.IsNone())
+        {
+            Slot->SetHorizontalAlignment(MonolithUI::ParseHAlign(S.HAlign.ToString()));
+        }
+        if (!S.VAlign.IsNone())
+        {
+            Slot->SetVerticalAlignment(MonolithUI::ParseVAlign(S.VAlign.ToString()));
+        }
+        if (HasAnyPadding(S.Padding))
+        {
+            Slot->SetPadding(S.Padding);
+        }
+    }
+
+    static void ApplyAlignmentOnly(const FUISpecSlot& S, UScaleBoxSlot* Slot)
+    {
+        if (!Slot)
+        {
+            return;
+        }
+        if (!S.HAlign.IsNone())
+        {
+            Slot->SetHorizontalAlignment(MonolithUI::ParseHAlign(S.HAlign.ToString()));
+        }
+        if (!S.VAlign.IsNone())
+        {
+            Slot->SetVerticalAlignment(MonolithUI::ParseVAlign(S.VAlign.ToString()));
+        }
+    }
+
     /**
      * Construct the widget + attach to parent. Mirrors the panel-builder
      * helper but tolerates content widgets (single-child slot semantics)
@@ -105,6 +178,118 @@ namespace MonolithUI::LeafBuilderInternal
         return Constructed;
     }
 
+    static void ApplySlotFields(const FUISpecNode& Node, UWidget* Widget)
+    {
+        if (!Widget || !Widget->Slot)
+        {
+            return;
+        }
+
+        UPanelSlot* Slot = Widget->Slot;
+        const FUISpecSlot& S = Node.Slot;
+
+        if (UCanvasPanelSlot* CSlot = Cast<UCanvasPanelSlot>(Slot))
+        {
+            if (!S.AnchorPreset.IsNone())
+            {
+                CSlot->SetAnchors(MonolithUI::GetAnchorPreset(S.AnchorPreset.ToString()));
+            }
+            if (!S.Position.IsNearlyZero())
+            {
+                CSlot->SetPosition(S.Position);
+            }
+            if (!S.Size.IsNearlyZero())
+            {
+                CSlot->SetSize(S.Size);
+            }
+            if (!S.Alignment.IsNearlyZero())
+            {
+                CSlot->SetAlignment(S.Alignment);
+            }
+            if (S.bAutoSize)
+            {
+                CSlot->SetAutoSize(true);
+            }
+            if (S.ZOrder != 0)
+            {
+                CSlot->SetZOrder(S.ZOrder);
+            }
+        }
+        else if (UVerticalBoxSlot* VSlot = Cast<UVerticalBoxSlot>(Slot))
+        {
+            ApplyAlignmentAndPadding(S, VSlot);
+        }
+        else if (UHorizontalBoxSlot* HSlot = Cast<UHorizontalBoxSlot>(Slot))
+        {
+            ApplyAlignmentAndPadding(S, HSlot);
+        }
+        else if (UOverlaySlot* OSlot = Cast<UOverlaySlot>(Slot))
+        {
+            ApplyAlignmentAndPadding(S, OSlot);
+        }
+        else if (UScrollBoxSlot* SSlot = Cast<UScrollBoxSlot>(Slot))
+        {
+            ApplyAlignmentAndPadding(S, SSlot);
+        }
+        else if (UGridSlot* GSlot = Cast<UGridSlot>(Slot))
+        {
+            ApplyAlignmentAndPadding(S, GSlot);
+            if (!S.Position.IsNearlyZero())
+            {
+                GSlot->SetColumn(FMath::RoundToInt(S.Position.X));
+                GSlot->SetRow(FMath::RoundToInt(S.Position.Y));
+            }
+            if (S.Size.X > 0.f)
+            {
+                GSlot->SetColumnSpan(FMath::RoundToInt(S.Size.X));
+            }
+            if (S.Size.Y > 0.f)
+            {
+                GSlot->SetRowSpan(FMath::RoundToInt(S.Size.Y));
+            }
+            if (S.ZOrder != 0)
+            {
+                GSlot->SetLayer(S.ZOrder);
+            }
+        }
+        else if (UUniformGridSlot* UGSlot = Cast<UUniformGridSlot>(Slot))
+        {
+            if (!S.HAlign.IsNone())
+            {
+                UGSlot->SetHorizontalAlignment(MonolithUI::ParseHAlign(S.HAlign.ToString()));
+            }
+            if (!S.VAlign.IsNone())
+            {
+                UGSlot->SetVerticalAlignment(MonolithUI::ParseVAlign(S.VAlign.ToString()));
+            }
+            if (!S.Position.IsNearlyZero())
+            {
+                UGSlot->SetColumn(FMath::RoundToInt(S.Position.X));
+                UGSlot->SetRow(FMath::RoundToInt(S.Position.Y));
+            }
+        }
+        else if (USizeBoxSlot* SZSlot = Cast<USizeBoxSlot>(Slot))
+        {
+            ApplyAlignmentAndPadding(S, SZSlot);
+        }
+        else if (UScaleBoxSlot* SCSlot = Cast<UScaleBoxSlot>(Slot))
+        {
+            ApplyAlignmentOnly(S, SCSlot);
+        }
+        else if (UWrapBoxSlot* WSlot = Cast<UWrapBoxSlot>(Slot))
+        {
+            ApplyAlignmentAndPadding(S, WSlot);
+        }
+        else if (UWidgetSwitcherSlot* WSSlot = Cast<UWidgetSwitcherSlot>(Slot))
+        {
+            ApplyAlignmentAndPadding(S, WSSlot);
+        }
+        else if (UBorderSlot* BSlot = Cast<UBorderSlot>(Slot))
+        {
+            ApplyAlignmentAndPadding(S, BSlot);
+        }
+    }
+
     /**
      * Apply FUISpecContent fields onto known leaf widget types. We dispatch
      * on Cast<> for the well-known ones (TextBlock, Image, Button,
@@ -133,6 +318,10 @@ namespace MonolithUI::LeafBuilderInternal
                 T->SetFont(F);
             }
             T->SetColorAndOpacity(FSlateColor(C.FontColor));
+            if (!C.WrapMode.IsNone())
+            {
+                T->SetAutoWrapText(IsWrapModeEnabled(C.WrapMode));
+            }
             return;
         }
         if (URichTextBlock* RT = Cast<URichTextBlock>(Widget))
@@ -140,6 +329,10 @@ namespace MonolithUI::LeafBuilderInternal
             if (!C.Text.IsEmpty())
             {
                 RT->SetText(FText::FromString(C.Text));
+            }
+            if (!C.WrapMode.IsNone())
+            {
+                RT->SetAutoWrapText(IsWrapModeEnabled(C.WrapMode));
             }
             return;
         }
@@ -226,6 +419,36 @@ namespace MonolithUI::LeafBuilderInternal
             else if (V == TEXT("HitTestInvisible"))       Widget->SetVisibility(ESlateVisibility::HitTestInvisible);
             else if (V == TEXT("SelfHitTestInvisible"))   Widget->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
         }
+
+        if (USizeBox* SizeBox = Cast<USizeBox>(Widget))
+        {
+            if (S.Width > 0.f)
+            {
+                SizeBox->SetWidthOverride(S.Width);
+            }
+            if (S.Height > 0.f)
+            {
+                SizeBox->SetHeightOverride(S.Height);
+            }
+        }
+        if (UBorder* Border = Cast<UBorder>(Widget))
+        {
+            if (HasAuthoredColor(S.Background))
+            {
+                Border->SetBrushColor(S.Background);
+            }
+            if (HasAnyPadding(S.Padding))
+            {
+                Border->SetPadding(S.Padding);
+            }
+        }
+        if (UProgressBar* ProgressBar = Cast<UProgressBar>(Widget))
+        {
+            if (HasAuthoredColor(S.Background))
+            {
+                ProgressBar->SetFillColorAndOpacity(S.Background);
+            }
+        }
     }
 } // namespace MonolithUI::LeafBuilderInternal
 
@@ -244,6 +467,7 @@ UWidget* MonolithUI::LeafBuilder::BuildLeafOrContent(
         return nullptr;
     }
 
+    ApplySlotFields(Node, Constructed);
     ApplyContent(Context, Node, Constructed);
     ApplyCommonStyle(Constructed, Node);
 

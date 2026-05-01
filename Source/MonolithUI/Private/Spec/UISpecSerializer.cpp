@@ -172,6 +172,42 @@ namespace MonolithUI::SpecSerializerInternal
         }
     }
 
+    /** Reverse-map FAnchors to the curated builder-side anchorPreset tokens. */
+    static FName AnchorPresetFromAnchors(const FAnchors& Anchors)
+    {
+        static const TCHAR* PresetNames[] =
+        {
+            TEXT("top_left"),
+            TEXT("top_center"),
+            TEXT("top_right"),
+            TEXT("center_left"),
+            TEXT("center"),
+            TEXT("center_right"),
+            TEXT("bottom_left"),
+            TEXT("bottom_center"),
+            TEXT("bottom_right"),
+            TEXT("stretch_top"),
+            TEXT("stretch_bottom"),
+            TEXT("stretch_left"),
+            TEXT("stretch_right"),
+            TEXT("stretch_horizontal"),
+            TEXT("stretch_vertical"),
+            TEXT("stretch_fill"),
+        };
+
+        for (const TCHAR* PresetName : PresetNames)
+        {
+            const FAnchors Candidate = MonolithUI::GetAnchorPreset(FString(PresetName));
+            if (Anchors.Minimum == Candidate.Minimum
+                && Anchors.Maximum == Candidate.Maximum)
+            {
+                return FName(PresetName);
+            }
+        }
+
+        return NAME_None;
+    }
+
     // -------------------------------------------------------------------------
     // SLOT SERIALIZATION
     // -------------------------------------------------------------------------
@@ -198,22 +234,9 @@ namespace MonolithUI::SpecSerializerInternal
             OutSlot.bAutoSize = CS->GetAutoSize();
             OutSlot.ZOrder    = CS->GetZOrder();
 
-            // AnchorPreset reverse-lookup: compare against the curated set.
-            // If no preset matches we leave AnchorPreset = NAME_None and rely
-            // on the builder honouring Position/Size as offsets.
-            const FAnchors& A = Layout.Anchors;
-            if (A.Minimum == FVector2D(0.f, 0.f) && A.Maximum == FVector2D(0.f, 0.f))
-            {
-                OutSlot.AnchorPreset = FName(TEXT("top_left"));
-            }
-            else if (A.Minimum == FVector2D(0.5f, 0.5f) && A.Maximum == FVector2D(0.5f, 0.5f))
-            {
-                OutSlot.AnchorPreset = FName(TEXT("center"));
-            }
-            else if (A.Minimum == FVector2D(0.f, 0.f) && A.Maximum == FVector2D(1.f, 1.f))
-            {
-                OutSlot.AnchorPreset = FName(TEXT("stretch_fill"));
-            }
+            // AnchorPreset reverse-lookup: compare against the same curated
+            // preset names accepted by FUISpecBuilder / GetAnchorPreset.
+            OutSlot.AnchorPreset = AnchorPresetFromAnchors(Layout.Anchors);
             return;
         }
 

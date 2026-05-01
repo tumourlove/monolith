@@ -250,7 +250,9 @@ bool FMonolithUISpecBuilderDryRunYieldsDiffNoCommitTest::RunTest(const FString& 
 {
     using namespace MonolithUI::SpecBuilderTests;
 
-    const FString AssetPath = MakeTestPath(TEXT("DryRun"));
+    const FString AssetPath = MakeTestPath(FString::Printf(
+        TEXT("DryRun_%s"),
+        *FGuid::NewGuid().ToString(EGuidFormats::Digits)));
 
     const FUISpecDocument Doc = MakeOneNodeDoc();
     FUISpecBuilderInputs In;

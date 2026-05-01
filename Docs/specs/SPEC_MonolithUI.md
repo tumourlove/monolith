@@ -313,13 +313,14 @@ The Spec System promotes MonolithUI from a flat action toolbox into a schema-dri
 2. Validate via `FUISpecValidator` (structural + animation/style ref checks).
 3. Resolve `parentClass` token -> `UClass*` (UserWidget, CommonActivatableWidget, CommonUserWidget, or full path).
 4. **Dry-walk** the spec tree: type-resolve every node, depth-check, cycle-detect (visited-set keyed by `FName` id). FAIL HERE means no asset mutation runs.
-5. Get-or-create `UWidgetBlueprint` at `asset_path`. Refuses on parent-class mismatch when `overwrite=true`.
-6. Open `FScopedTransaction` (in-place edit sub-case rolls back via Cancel).
-7. **Pre-create referenced styles** before any widget construction (closes recon takeaway §8 BP-recompile-invalidates-template trap).
-8. Walk the tree depth-first; dispatch per node to `PanelBuilder` / `LeafBuilder` / `CommonUIBuilder` / `EffectSurfaceBuilder` sub-builders.
-9. Compile the blueprint, then **rebuild widget-id -> UWidget* map** by walking the post-compile WidgetTree (closes recon takeaway §8 — pointers cached pre-compile go stale).
-10. Wire animations via `FUIAnimationMovieSceneBuilder::BuildSingle` (Phase I integration).
-11. Save (or cancel transaction + rollback created asset on `dry_run=true` / failure).
+5. If `dry_run=true`, inspect any existing target through AssetRegistry for overwrite/parent checks, count the proposed diff, and return before package creation, widget construction, transaction, compile, or save.
+6. Get-or-create `UWidgetBlueprint` at `asset_path`. Refuses on parent-class mismatch when `overwrite=true`.
+7. Open `FScopedTransaction` (in-place edit sub-case rolls back via Cancel).
+8. **Pre-create referenced styles** before any widget construction (closes recon takeaway §8 BP-recompile-invalidates-template trap).
+9. Walk the tree depth-first; dispatch per node to `PanelBuilder` / `LeafBuilder` / `CommonUIBuilder` / `EffectSurfaceBuilder` sub-builders.
+10. Compile the blueprint, then **rebuild widget-id -> UWidget* map** by walking the post-compile WidgetTree (closes recon takeaway §8 — pointers cached pre-compile go stale).
+11. Wire animations via `FUIAnimationMovieSceneBuilder::BuildSingle` (Phase I integration).
+12. Save (or cancel transaction + rollback created asset on failure).
 
 **Atomicity strategy (split per H2 + R3):** `FScopedTransaction` wraps property writes on existing WBPs (where `Modify()` calls undo cleanly). For NEW WBPs, the create-package + factory-create side effects survive transaction cancel — so we dry-walk first (validate every node, resolve every UClass) and only call `CreatePackage` after dry-walk passes. On post-create failure we manually `Package->MarkAsGarbage()` + `ObjectTools::DeleteSingleObject` to undo the disk artefact.
 
@@ -329,7 +330,7 @@ The Spec System promotes MonolithUI from a flat action toolbox into a schema-dri
 
 | Mode | Effect |
 |---|---|
-| `dry_run: true` | Validate + walk + report a diff; no asset mutation. Transaction cancelled at end. |
+| `dry_run: true` | Validate + walk + report a diff; no asset mutation. Returns before package creation, transaction, compile, or save. |
 | `treat_warnings_as_errors: true` | Validator warnings (missing styleRef / animationRef etc.) escalate to errors and abort the build. |
 | `raw_mode: true` | Bypass the per-write allowlist gate (legacy compat for callers that pre-date the gate). |
 | `overwrite: false` | Refuse if an asset already exists at `asset_path`. |
@@ -381,7 +382,7 @@ ui::build_ui_from_spec({
 2. Capture document-level metadata (`Name`, `ParentClass`, `Version`, `Metadata.AuthoringTool = "MonolithUI.SpecSerializer"`, `Metadata.SourceFile = AssetPath`).
 3. Walk the `WidgetTree->RootWidget` recursively, building `FUISpecNode` per widget with:
    - **Type token** -- registry-mapped via `FUITypeRegistry::FindByClass`, falling back to `MakeTokenFromClassName` (strips the engine `U` prefix) when the registry hasn't classified the type.
-   - **Slot** -- per-`UPanelSlot` derived class branch table covering ALL stock UMG slot types (Canvas / Vertical / Horizontal / Overlay / ScrollBox / Grid / UniformGrid / SizeBox / ScaleBox / WrapBox / WidgetSwitcher / Border). Closes the §6.3.3 surface-map gap (the legacy `SerializeSlotProperties` covered only Canvas/Vertical/Horizontal/Overlay -- 4 of 12+).
+   - **Slot** -- per-`UPanelSlot` derived class branch table covering ALL stock UMG slot types (Canvas / Vertical / Horizontal / Overlay / ScrollBox / Grid / UniformGrid / SizeBox / ScaleBox / WrapBox / WidgetSwitcher / Border). Canvas slots reverse-map every curated `anchorPreset` accepted by the builder. Closes the §6.3.3 surface-map gap (the legacy `SerializeSlotProperties` covered only Canvas/Vertical/Horizontal/Overlay -- 4 of 12+).
    - **Style** -- widget-level `RenderOpacity` + `Visibility` always, plus `SizeBox` width/height overrides, `Border` brush colour + padding, `ProgressBar` fill colour. Reads via the engine's public getters (`GetBrushColor`, `GetFillColorAndOpacity`, etc.) -- the deprecated direct UPROPERTY accessors are avoided.
    - **Content** -- per-widget-class branches for `UTextBlock` (text, font size, font color, AutoWrapText -> WrapMode token), `URichTextBlock`, `UImage` (BrushPath via `B.GetResourceObject()->GetPathName()`), `UEditableText` / `UEditableTextBox` (text + hint).
    - **Effect** (`bHasEffect`) -- when the widget IS-A `UEffectSurface`, capture the entire `FEffectSurfaceConfig`: corner radii, smoothness, solid colour, backdrop blur strength, and the **DropShadow / InnerShadow arrays** via a hand-rolled array path (the Phase H `ApplyJsonPath` helper deliberately does not navigate `TArray` container properties; Phase J implements both the symmetric read here AND the matching write).
@@ -427,7 +428,7 @@ ui::dump_ui_spec({
 
 | Slot Class | Phase J Coverage | Captured fields |
 |---|---|---|
-| `UCanvasPanelSlot` | Full | anchors (preset + raw min/max), offsets (Position, Size), alignment, autoSize, zOrder |
+| `UCanvasPanelSlot` | Full | anchorPreset when it matches a curated builder preset, offsets (Position, Size), alignment, autoSize, zOrder |
 | `UVerticalBoxSlot` | Full | hAlign, vAlign, padding |
 | `UHorizontalBoxSlot` | Full | hAlign, vAlign, padding |
 | `UOverlaySlot` | Full | hAlign, vAlign, padding |
@@ -447,7 +448,7 @@ ui::dump_ui_spec({
 - `Source/MonolithUI/Private/Spec/UISpecSerializer.cpp` -- per-slot/-content/-style/-effect/-commonui readers + recursive widget walker.
 - `Source/MonolithUI/Private/Actions/MonolithUISpecActions.cpp` -- `ui::dump_ui_spec` action handler + the inverse `NodeToJson` / `SlotToJson` / `EffectToJson` / `CommonUIToJson` packers.
 - `Source/MonolithUI/Public/Registry/UIReflectionHelper.h` (+ `.cpp`) -- new `ReadJsonPath` method (symmetric counterpart to `ApplyJsonPath`); read-side `ReadValueFromProperty` dispatch table mirrors the existing write-side `WriteValueToProperty`.
-- `Source/MonolithUI/Private/Tests/UISpecRoundtripTests.cpp` -- automation tests J1 (`MonolithUI.SpecSerializer.RoundtripIdentity`), J4 (`MonolithUI.SpecSerializer.RoundtripCorpus` -- 5 representative WBP shapes), and a per-slot-type coverage test (`MonolithUI.SpecSerializer.SlotCoverage`).
+- `Source/MonolithUI/Private/Tests/UISpecRoundtripTests.cpp` -- automation tests J1 (`MonolithUI.SpecSerializer.RoundtripIdentity`), supported slot/content/style coverage (`MonolithUI.SpecSerializer.SupportedFields`), curated anchor coverage (`MonolithUI.SpecSerializer.PublicFields`), J4 (`MonolithUI.SpecSerializer.RoundtripCorpus` -- 5 representative WBP shapes), and a per-slot-type coverage test (`MonolithUI.SpecSerializer.SlotCoverage`).
 
 ### LLM Error Reporting (M5 — Phase K, landed 2026-04-26)
 
@@ -485,8 +486,8 @@ JSON-RPC error code: `-32602` (invalid-params) for caller-input issues, `-32603`
 
 | Builder | Handles | Notes |
 |---|---|---|
-| `PanelBuilder` | UVerticalBox / UHorizontalBox / UCanvasPanel / UOverlay / UWrapBox / UScrollBox / UGridPanel / UUniformGridPanel | Slot writes via typed casts (CanvasPanelSlot / VerticalBoxSlot / etc.). |
-| `LeafBuilder` | UTextBlock / UImage / UButton / URichTextBlock / UEditableText / UEditableTextBox / USpacer / single-child content widgets (UBorder / USizeBox / UScaleBox) | FUISpecContent text/font/brush. |
+| `PanelBuilder` | UVerticalBox / UHorizontalBox / UCanvasPanel / UOverlay / UWrapBox / UScrollBox / UGridPanel / UUniformGridPanel | Slot writes via typed casts across stock UMG slots; applies common style fields shared by panels. |
+| `LeafBuilder` | UTextBlock / UImage / UButton / URichTextBlock / UEditableText / UEditableTextBox / USpacer / single-child content widgets (UBorder / USizeBox / UScaleBox) | Applies parent slot fields for leaf/content widgets, FUISpecContent text/font/brush/wrap, and common style fields for SizeBox/Border/ProgressBar. |
 | `CommonUIBuilder` | Any widget with `bHasCommonUI` set | Wires StyleRef -> pre-created style class. WITH_COMMONUI gated; stub-warns when CommonUI absent. |
 | `EffectSurfaceBuilder` | UEffectSurface (optional provider) | Routes Effect.* JSON paths through `FUIReflectionHelper::ApplyJsonPath` (the Phase H hoist of the per-handler translation). |
 

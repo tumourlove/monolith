@@ -336,6 +336,23 @@ namespace MonolithUI::SpecBuilderInternal
         }
     }
 
+    static void CountDryRunNodesRecurse(const FUISpecNode& Node, FUIBuildContext& Context)
+    {
+        ++Context.NodesCreated;
+        Context.DiffLines.Add(FString::Printf(
+            TEXT("create: %s (%s)"),
+            *Node.Id.ToString(),
+            *Node.Type.ToString()));
+
+        for (const TSharedPtr<FUISpecNode>& Child : Node.Children)
+        {
+            if (Child.IsValid())
+            {
+                CountDryRunNodesRecurse(*Child, Context);
+            }
+        }
+    }
+
     /**
      * Construct a single node's widget + recurse its children. Dispatches on
      * container kind (Panel / Content / Leaf) — the type registry classifies
@@ -787,6 +804,115 @@ FUISpecBuilderResult FUISpecBuilder::Build(const FUISpecBuilderInputs& Inputs)
         Context.PathCache = RegistrySub->GetPathCache();
     }
 
+    if (Inputs.bDryRun)
+    {
+        FString PackagePath, AssetName;
+        if (!SplitAssetPath(Inputs.AssetPath, PackagePath, AssetName))
+        {
+            FUISpecError E;
+            E.Severity = EUISpecErrorSeverity::Error;
+            E.Category = TEXT("AssetCreate");
+            E.JsonPath = TEXT("/assetPath");
+            E.Message = FString::Printf(
+                TEXT("Invalid asset_path '%s' — must be /Game/Path/Name."),
+                *Inputs.AssetPath);
+            Result.Errors.Add(MoveTemp(E));
+            return Result;
+        }
+
+        const FString FullObjectPath = FString::Printf(TEXT("%s.%s"), *Inputs.AssetPath, *AssetName);
+        FAssetRegistryModule& ARM =
+            FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+        const FAssetData ExistingAsset = ARM.Get().GetAssetByObjectPath(FSoftObjectPath(FullObjectPath));
+        if (ExistingAsset.IsValid())
+        {
+            UWidgetBlueprint* Existing = Cast<UWidgetBlueprint>(ExistingAsset.GetAsset());
+            if (!Existing)
+            {
+                FUISpecError E;
+                E.Severity = EUISpecErrorSeverity::Error;
+                E.Category = TEXT("Asset");
+                E.JsonPath = TEXT("/assetPath");
+                E.Message = FString::Printf(
+                    TEXT("Asset at '%s' exists but is not a UWidgetBlueprint."),
+                    *Inputs.AssetPath);
+                Result.Errors.Add(MoveTemp(E));
+                return Result;
+            }
+            if (!Inputs.bOverwrite)
+            {
+                FUISpecError E;
+                E.Severity = EUISpecErrorSeverity::Error;
+                E.Category = TEXT("Asset");
+                E.JsonPath = TEXT("/assetPath");
+                E.Message = FString::Printf(
+                    TEXT("Asset already exists at '%s' and overwrite=false."),
+                    *Inputs.AssetPath);
+                Result.Errors.Add(MoveTemp(E));
+                return Result;
+            }
+            if (Existing->ParentClass != ParentClass)
+            {
+                FUISpecError E;
+                E.Severity = EUISpecErrorSeverity::Error;
+                E.Category = TEXT("Asset");
+                E.JsonPath = TEXT("/assetPath");
+                E.Message = FString::Printf(
+                    TEXT("Existing WBP '%s' has parent '%s'; spec requested '%s'. Refusing to rebase."),
+                    *Inputs.AssetPath,
+                    Existing->ParentClass ? *Existing->ParentClass->GetName() : TEXT("None"),
+                    ParentClass ? *ParentClass->GetName() : TEXT("None"));
+                Result.Errors.Add(MoveTemp(E));
+                return Result;
+            }
+            if (Inputs.bOverwrite && Existing->WidgetTree)
+            {
+                TArray<UWidget*> ExistingWidgets;
+                Existing->WidgetTree->GetAllWidgets(ExistingWidgets);
+                Context.NodesRemoved = ExistingWidgets.Num();
+            }
+        }
+
+        TSet<FName> SeenNamedRefs;
+        if (Doc.Root.IsValid())
+        {
+            PreCreateStylesRecurse(*Doc.Root, Context, SeenNamedRefs);
+            CountDryRunNodesRecurse(*Doc.Root, Context);
+        }
+        for (const TPair<FName, FUISpecStyle>& Pair : Doc.Styles)
+        {
+            if (!SeenNamedRefs.Contains(Pair.Key))
+            {
+                ++Context.StyleHookCalls;
+                SeenNamedRefs.Add(Pair.Key);
+                Context.PreCreatedStyles.Add(
+                    FString::Printf(TEXT("name:%s"), *Pair.Key.ToString()),
+                    nullptr);
+            }
+        }
+
+        EscalateWarningsIfRequested(Context);
+        if (Context.Errors.Num() > 0)
+        {
+            Result.Errors = MoveTemp(Context.Errors);
+            Result.Warnings = MoveTemp(Context.Warnings);
+            Result.NodesCreated = Context.NodesCreated;
+            Result.NodesModified = Context.NodesModified;
+            Result.NodesRemoved = Context.NodesRemoved;
+            Result.DiffLines = MoveTemp(Context.DiffLines);
+            return Result;
+        }
+
+        Result.bSuccess = true;
+        Result.Errors = MoveTemp(Context.Errors);
+        Result.Warnings = MoveTemp(Context.Warnings);
+        Result.NodesCreated = Context.NodesCreated;
+        Result.NodesModified = Context.NodesModified;
+        Result.NodesRemoved = Context.NodesRemoved;
+        Result.DiffLines = MoveTemp(Context.DiffLines);
+        return Result;
+    }
+
     // ---------- 6. Get-or-create WBP ------------------------------------
     bool bPreExisting = false;
     UPackage* Package = nullptr;
@@ -891,56 +1017,30 @@ FUISpecBuilderResult FUISpecBuilder::Build(const FUISpecBuilderInputs& Inputs)
     // ---------- 9. Walk the tree ----------------------------------------
     if (Doc.Root.IsValid() && WBP->WidgetTree)
     {
-        if (Inputs.bDryRun)
+        // Real build. The root node has no parent panel — pass nullptr
+        // and let the dispatcher set it as WidgetTree::RootWidget.
+        UWidget* RootWidget = BuildNodeRecurse(Context, *Doc.Root, /*ParentPanel=*/nullptr);
+        if (RootWidget)
         {
-            // Dry-run: don't construct widgets — just trace what we WOULD
-            // have built so the diff is meaningful. We still recurse so the
-            // counters reflect tree shape.
-            TFunction<void(const FUISpecNode&)> CountRecurse;
-            CountRecurse = [&Context, &CountRecurse](const FUISpecNode& N)
-            {
-                ++Context.NodesCreated;
-                Context.DiffLines.Add(FString::Printf(
-                    TEXT("create: %s (%s)"),
-                    *N.Id.ToString(),
-                    *N.Type.ToString()));
-                for (const TSharedPtr<FUISpecNode>& Child : N.Children)
-                {
-                    if (Child.IsValid())
-                    {
-                        CountRecurse(*Child);
-                    }
-                }
-            };
-            CountRecurse(*Doc.Root);
+            WBP->WidgetTree->RootWidget = RootWidget;
+            MonolithUI::RegisterCreatedWidget(WBP, RootWidget);
         }
         else
         {
-            // Real build. The root node has no parent panel — pass nullptr
-            // and let the dispatcher set it as WidgetTree::RootWidget.
-            UWidget* RootWidget = BuildNodeRecurse(Context, *Doc.Root, /*ParentPanel=*/nullptr);
-            if (RootWidget)
+            // Root failed to build — sub-builders pushed errors. Bail.
+            EscalateWarningsIfRequested(Context);
+            Result.Errors      = MoveTemp(Context.Errors);
+            Result.Warnings    = MoveTemp(Context.Warnings);
+            Result.NodesCreated   = Context.NodesCreated;
+            Result.NodesModified  = Context.NodesModified;
+            Result.NodesRemoved   = Context.NodesRemoved;
+            Result.DiffLines      = MoveTemp(Context.DiffLines);
+            Transaction.Cancel();
+            if (!bPreExisting)
             {
-                WBP->WidgetTree->RootWidget = RootWidget;
-                MonolithUI::RegisterCreatedWidget(WBP, RootWidget);
+                RollbackCreatedAsset(WBP, Package);
             }
-            else
-            {
-                // Root failed to build — sub-builders pushed errors. Bail.
-                EscalateWarningsIfRequested(Context);
-                Result.Errors      = MoveTemp(Context.Errors);
-                Result.Warnings    = MoveTemp(Context.Warnings);
-                Result.NodesCreated   = Context.NodesCreated;
-                Result.NodesModified  = Context.NodesModified;
-                Result.NodesRemoved   = Context.NodesRemoved;
-                Result.DiffLines      = MoveTemp(Context.DiffLines);
-                Transaction.Cancel();
-                if (!bPreExisting)
-                {
-                    RollbackCreatedAsset(WBP, Package);
-                }
-                return Result;
-            }
+            return Result;
         }
     }
 
@@ -1052,13 +1152,6 @@ FUISpecBuilderResult FUISpecBuilder::Build(const FUISpecBuilderInputs& Inputs)
             return Result;
         }
     }
-    else
-    {
-        // Dry-run: cancel the transaction explicitly so it shows up as a
-        // no-op in the editor's undo stack rather than a phantom entry.
-        Transaction.Cancel();
-    }
-
     // ---------- 15. Pack the response ----------------------------------
     Result.bSuccess       = true;
     Result.Errors         = MoveTemp(Context.Errors);
