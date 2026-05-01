@@ -40,6 +40,12 @@
 #include "PixelFormat.h"
 #include "ObjectTools.h"
 
+// Scripting action includes (HOFF 7)
+#include "IPythonScriptPlugin.h"
+#include "PythonScriptTypes.h"
+#include "LevelEditorSubsystem.h"
+#include "Editor.h"
+
 // --- Compile state ---
 
 FMonolithLogCapture* FMonolithEditorActions::CachedLogCapture = nullptr;
@@ -448,6 +454,25 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 		FParamSchemaBuilder()
 			.Required(TEXT("prefix"), TEXT("string"), TEXT("Run tests whose full path starts with this prefix (e.g. 'MazeLegends.Bow')"))
 			.Optional(TEXT("max_tests"), TEXT("integer"), TEXT("Hard cap on number of tests to run (default: 200)"))
+			.Build());
+
+	// --- Scripting actions (HOFF 7) ---
+
+	Registry.RegisterAction(TEXT("editor"), TEXT("run_python"),
+		TEXT("Execute a Python command, statement, or file via IPythonScriptPlugin::ExecPythonCommandEx. Returns success, stdout/stderr captured by Python, and (for evaluate_statement mode) the evaluated result."),
+		FMonolithActionHandler::CreateStatic(&HandleRunPython),
+		FParamSchemaBuilder()
+			.Required(TEXT("command"), TEXT("string"), TEXT("Python source. May be inline code, a single statement, or a file path with optional space-separated args (when mode=execute_file)."))
+			.Optional(TEXT("mode"), TEXT("string"), TEXT("Execution mode: execute_file (default — multi-statement script or file with args), execute_statement (single stmt, prints result), evaluate_statement (single expr, returns result in 'result')."), TEXT("execute_file"))
+			.Optional(TEXT("unattended"), TEXT("bool"), TEXT("Set GIsRunningUnattendedScript=true to suppress UI dialogs."), TEXT("false"))
+			.Optional(TEXT("file_scope"), TEXT("string"), TEXT("Scope for execute_file: private (isolated locals/globals — default), public (shared with REPL console)."), TEXT("private"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("editor"), TEXT("load_level"),
+		TEXT("Close the current persistent level (without saving) and load the specified level by /Game/... asset path. Wraps ULevelEditorSubsystem::LoadLevel."),
+		FMonolithActionHandler::CreateStatic(&HandleLoadLevel),
+		FParamSchemaBuilder()
+			.Required(TEXT("path"), TEXT("string"), TEXT("Asset path of the level to load (e.g. /Game/Maps/L_Backyard). Must exist."))
 			.Build());
 
 	InitLiveCodingDelegate();
@@ -2511,6 +2536,22 @@ namespace MonolithAutomationDetail
 	}
 }
 
+// --- Scripting actions (HOFF 7) ---
+
+namespace
+{
+	const TCHAR* PythonLogTypeToString(EPythonLogOutputType T)
+	{
+		switch (T)
+		{
+		case EPythonLogOutputType::Info:    return TEXT("info");
+		case EPythonLogOutputType::Warning: return TEXT("warning");
+		case EPythonLogOutputType::Error:   return TEXT("error");
+		default:                            return TEXT("info");
+		}
+	}
+}
+
 FMonolithActionResult FMonolithEditorActions::HandleListAutomationTests(const TSharedPtr<FJsonObject>& Params)
 {
 	FString Prefix;
@@ -2648,6 +2689,141 @@ FMonolithActionResult FMonolithEditorActions::HandleRunAutomationTests(const TSh
 	{
 		Result->SetNumberField(TEXT("truncated_remaining"), MatchingTests.Num() - TestsToRun);
 	}
+
+	return FMonolithActionResult::Success(Result);
+}
+
+FMonolithActionResult FMonolithEditorActions::HandleRunPython(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Command;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("command"), Command) || Command.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: command"));
+	}
+
+	FString ModeStr = TEXT("execute_file");
+	Params->TryGetStringField(TEXT("mode"), ModeStr);
+	EPythonCommandExecutionMode Mode = EPythonCommandExecutionMode::ExecuteFile;
+	if (ModeStr.Equals(TEXT("execute_file"), ESearchCase::IgnoreCase))
+	{
+		Mode = EPythonCommandExecutionMode::ExecuteFile;
+	}
+	else if (ModeStr.Equals(TEXT("execute_statement"), ESearchCase::IgnoreCase))
+	{
+		Mode = EPythonCommandExecutionMode::ExecuteStatement;
+	}
+	else if (ModeStr.Equals(TEXT("evaluate_statement"), ESearchCase::IgnoreCase))
+	{
+		Mode = EPythonCommandExecutionMode::EvaluateStatement;
+	}
+	else
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Invalid mode '%s'. Valid: execute_file, execute_statement, evaluate_statement."), *ModeStr));
+	}
+
+	bool bUnattended = false;
+	Params->TryGetBoolField(TEXT("unattended"), bUnattended);
+
+	FString ScopeStr = TEXT("private");
+	Params->TryGetStringField(TEXT("file_scope"), ScopeStr);
+	EPythonFileExecutionScope FileScope = EPythonFileExecutionScope::Private;
+	if (ScopeStr.Equals(TEXT("private"), ESearchCase::IgnoreCase))
+	{
+		FileScope = EPythonFileExecutionScope::Private;
+	}
+	else if (ScopeStr.Equals(TEXT("public"), ESearchCase::IgnoreCase))
+	{
+		FileScope = EPythonFileExecutionScope::Public;
+	}
+	else
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Invalid file_scope '%s'. Valid: private, public."), *ScopeStr));
+	}
+
+	IPythonScriptPlugin* Python = IPythonScriptPlugin::Get();
+	if (!Python)
+	{
+		// Fallback: load PythonScriptPlugin if it has not been brought up yet.
+		FModuleManager::Get().LoadModule(TEXT("PythonScriptPlugin"));
+		Python = IPythonScriptPlugin::Get();
+	}
+	if (!Python)
+	{
+		return FMonolithActionResult::Error(
+			TEXT("PythonScriptPlugin module is not available. Enable PythonScriptPlugin in the project's plugins list."));
+	}
+	if (!Python->IsPythonAvailable())
+	{
+		return FMonolithActionResult::Error(
+			TEXT("Python is not available in this build (IPythonScriptPlugin::IsPythonAvailable() returned false)."));
+	}
+
+	FPythonCommandEx Cmd;
+	Cmd.Command = Command;
+	Cmd.ExecutionMode = Mode;
+	Cmd.FileExecutionScope = FileScope;
+	Cmd.Flags = bUnattended ? EPythonCommandFlags::Unattended : EPythonCommandFlags::None;
+
+	const bool bOk = Python->ExecPythonCommandEx(Cmd);
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("ok"), bOk);
+	Result->SetBoolField(TEXT("success"), bOk);
+	Result->SetStringField(TEXT("mode"), ModeStr);
+	Result->SetStringField(TEXT("result"), Cmd.CommandResult);
+
+	TArray<TSharedPtr<FJsonValue>> OutputRows;
+	OutputRows.Reserve(Cmd.LogOutput.Num());
+	for (const FPythonLogOutputEntry& Entry : Cmd.LogOutput)
+	{
+		TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+		Row->SetStringField(TEXT("type"), PythonLogTypeToString(Entry.Type));
+		Row->SetStringField(TEXT("output"), Entry.Output);
+		OutputRows.Add(MakeShared<FJsonValueObject>(Row));
+	}
+	Result->SetArrayField(TEXT("output"), OutputRows);
+
+	if (!bOk)
+	{
+		// On failure CommandResult typically holds the Python exception trace.
+		// Surface as message so callers don't have to special-case it.
+		Result->SetStringField(TEXT("message"), Cmd.CommandResult);
+	}
+
+	return FMonolithActionResult::Success(Result);
+}
+
+FMonolithActionResult FMonolithEditorActions::HandleLoadLevel(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Path;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("path"), Path) || Path.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: path"));
+	}
+
+	if (!GEditor)
+	{
+		return FMonolithActionResult::Error(TEXT("GEditor is null — load_level requires editor context."));
+	}
+
+	ULevelEditorSubsystem* LevelEd = GEditor->GetEditorSubsystem<ULevelEditorSubsystem>();
+	if (!LevelEd)
+	{
+		return FMonolithActionResult::Error(TEXT("ULevelEditorSubsystem is unavailable."));
+	}
+
+	const bool bLoaded = LevelEd->LoadLevel(Path);
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("ok"), bLoaded);
+	Result->SetBoolField(TEXT("loaded"), bLoaded);
+	Result->SetStringField(TEXT("path"), Path);
+	Result->SetStringField(TEXT("message"),
+		bLoaded
+			? FString::Printf(TEXT("Loaded level '%s'."), *Path)
+			: FString::Printf(TEXT("ULevelEditorSubsystem::LoadLevel returned false for '%s'. Verify the asset exists and is a UWorld."), *Path));
 
 	return FMonolithActionResult::Success(Result);
 }

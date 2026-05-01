@@ -37,7 +37,10 @@ public class MonolithEditor : ModuleRules
 			"AdvancedPreviewScene",
 			"ImageCore",
 			"Projects",
-			"ProceduralMeshComponent"
+			"ProceduralMeshComponent",
+			// editor.run_python + editor.load_level (HOFF 7)
+			"PythonScriptPlugin",
+			"LevelEditor"
 		});
 
 		if (Target.Platform == UnrealTargetPlatform.Win64)

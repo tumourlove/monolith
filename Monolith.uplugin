@@ -119,6 +119,10 @@
 			"Name": "Metasound",
 			"Enabled": true,
 			"Optional": true
+		},
+		{
+			"Name": "PythonScriptPlugin",
+			"Enabled": true
 		}
 	],
 	"Modules": [
