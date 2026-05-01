@@ -435,18 +435,19 @@ FMonolithActionResult FMonolithBlueprintCompileActions::HandleCreateBlueprint(co
 	}
 
 	// Create the package — use the full save path as package name.
-	// CreatePackage returns an existing in-memory package if one exists at
-	// this path (e.g. leftover from a prior crashed attempt).
+	// CreatePackage returns either the existing in-memory UPackage at this
+	// path or a fresh RF_Public one (UObjectGlobals.cpp:1040-1050); it does
+	// not touch disk. Canonical asset-create at AssetTools.cpp:1755-1772
+	// uses CreatePackage's return value directly with no FullyLoad — calling
+	// FullyLoad on the in-memory hit path forces a serialization read that
+	// can pull stale RF_Transient flags from a leftover .uasset into the
+	// in-memory package, then the subsequent SaveLoadedAsset writes the
+	// transient state back to disk as partial bytes.
 	UPackage* Package = CreatePackage(*SavePath);
 	if (!Package)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create package at path: %s"), *SavePath));
 	}
-
-	// Ensure the package is fully loaded — if a prior crash left a .uasset
-	// on disk, CreatePackage returns a partially-loaded stub.  SavePackage
-	// asserts on partial packages.
-	Package->FullyLoad();
 
 	UBlueprint* NewBP = FKismetEditorUtilities::CreateBlueprint(
 		ParentClass,
@@ -468,10 +469,15 @@ FMonolithActionResult FMonolithBlueprintCompileActions::HandleCreateBlueprint(co
 		bSkipSave = Params->GetBoolField(TEXT("skip_save"));
 	}
 
-	// Compile before save — CreateBlueprint leaves the GeneratedClass in a
-	// partially initialized state.  Serialization walks every sub-object
-	// through IsValidChecked() which asserts if any inner UObject is null.
-	FKismetEditorUtilities::CompileBlueprint(NewBP, EBlueprintCompileOptions::SkipGarbageCollection);
+	// CreateBlueprint already calls FBlueprintCompilationManager::CompileSynchronously
+	// before returning (Kismet2.cpp:514-516), so the GeneratedClass and CDO are
+	// fully initialized at this point. A second compile here triggers a
+	// redundant reinstance pass which can carry RF_Transient onto the BPGC
+	// when stale package state is involved (the HOFF 6 leak path observed
+	// in the SquirrelTamagotchi 2026-04-30 session — four BPs created with
+	// stale .uasset paths + multi-step set_cdo_property + overlapping prior
+	// deletes returned saved:false; subsequent loads crashed at
+	// LinkerLoad.cpp:5032 on serial-size-mismatch).
 
 	// Fire edit cradle on CDO properties after compile (#29).
 	// Uses FireFullCradle so root property is included in notification chain.
