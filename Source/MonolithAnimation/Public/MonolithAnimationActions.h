@@ -49,6 +49,15 @@ public:
 	static FMonolithActionResult HandleAddBoneTrack(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleRemoveBoneTrack(const TSharedPtr<FJsonObject>& Params);
 
+	// --- Bone Pose Copy (1) ---
+	// Reads the evaluated pose (raw track + ref pose fallback) for a list of
+	// bones at a given time on the source AnimSequence, then writes those
+	// transforms as keys to the destination AnimSequence. Useful when a target
+	// anim has T-pose / wrong values on a subset of bones (e.g. left arm) and
+	// you want to import a clean pose from a working anim without touching
+	// the rest of the target.
+	static FMonolithActionResult HandleCopyBonePoseBetweenSequences(const TSharedPtr<FJsonObject>& Params);
+
 	// --- Virtual Bones (2) ---
 	static FMonolithActionResult HandleAddVirtualBone(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleRemoveVirtualBones(const TSharedPtr<FJsonObject>& Params);
