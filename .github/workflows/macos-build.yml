@@ -1,0 +1,287 @@
+# ==============================================================================
+# Monolith — macOS Prebuilt Binaries CI (Issue #25)
+# Authored: 2026-05-02
+# ==============================================================================
+#
+# PURPOSE
+#   Produce prebuilt macOS dylibs for the Monolith plugin and attach them to
+#   the GitHub release matching the pushed tag. Mirrors the Windows release
+#   path encoded in Plugins/Monolith/Scripts/make_release.ps1.
+#
+# CANONICAL RELEASE PATH
+#   Windows builds (via make_release.ps1, Lucas's local box) remain the
+#   primary release artefact. This workflow ships a *supplementary* macOS zip
+#   so Apple Silicon users on UE 5.7 do not have to clone + build from source.
+#
+# PROVISIONING GAP — SELF-HOSTED RUNNER REQUIRED
+#   GitHub-hosted macOS runners do not have Unreal Engine 5.7 preinstalled,
+#   and licensing prevents shipping the engine in CI cache. A self-hosted Mac
+#   runner with the labels [self-hosted, macOS, monolith] is REQUIRED.
+#
+#   Runner prerequisites:
+#     - Apple Silicon (arm64) recommended; Intel Macs untested for UE 5.7.
+#     - macOS 13+ (Ventura) or newer per UE 5.7 official support matrix.
+#     - Xcode Command Line Tools installed (xcode-select --install).
+#     - Full Xcode (15.x) installed and selected via `xcode-select -s`.
+#     - Unreal Engine 5.7 installed locally; engine root path exported as
+#       env var UE_57 in the runner's environment (e.g. via launchctl or
+#       ~/.zshenv): `export UE_57="/Users/Shared/Epic Games/UE_5.7"`.
+#     - ~150 GB free disk for engine + Intermediate/ + DerivedDataCache/.
+#     - GitHub Actions runner application registered with this repo and the
+#       labels: self-hosted, macOS, monolith.
+#
+#   Alternative paid runners (commented out below) exist but are not
+#   currently configured.
+#
+# LEVIATHAN-PROJECT-SHELL GAP — UBT NEEDS A TARGET
+#   UBT compiles plugins through a host *project*. The Monolith plugin repo
+#   does NOT carry a .uproject or any *.Target.cs — confirmed by inspection
+#   of Source/ on 2026-05-02 (only Build.cs files for runtime modules, no
+#   editor Target). Two ways to resolve before this workflow can produce a
+#   valid artefact end-to-end:
+#
+#     OPTION A: Author a minimal MonolithEditor.Target.cs + thin .uproject
+#               shell inside the plugin repo (or a CI-only sibling repo)
+#               that references only the Monolith plugin. Simplest for CI;
+#               keeps the plugin repo self-contained.
+#
+#     OPTION B: Have the runner check out the parent Leviathan project
+#               separately (private repo) and overlay this Monolith working
+#               copy into Plugins/Monolith. More faithful to the local dev
+#               build path but requires runner access to the private
+#               Leviathan repo.
+#
+#   Until one of these is wired, the build step below intentionally fails
+#   with an actionable error message rather than producing garbage.
+# ==============================================================================
+
+name: macOS Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    name: Build macOS dylibs
+    runs-on: [self-hosted, macOS, monolith]
+
+    # Alternative runner options (NOT currently configured — for reference):
+    #
+    # GitHub-hosted (no UE preinstalled — would need to download + install
+    # the engine every run; ~30 min + bandwidth + Epic SSO):
+    #   runs-on: macos-14   # Apple Silicon, macOS 14
+    #   runs-on: macos-13   # Apple Silicon, macOS 13
+    #
+    # Community workflows that bundle UE install steps:
+    #   - game-ci/unity-builder style: no first-class UE 5.7 equivalent.
+    #   - epicgames/unreal-engine container: Linux only, not macOS.
+    #
+    # Hosted Mac CI providers with persistent caches (paid):
+    #   - MacStadium dedicated host
+    #   - AWS EC2 Mac instances (mac1.metal / mac2.metal)
+    # These would still need a custom AMI with UE 5.7 preinstalled.
+
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout Monolith plugin
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Verify Unreal Engine 5.7 install
+        shell: sh
+        run: |
+          # Self-hosted runner MUST export UE_57 (preferred) or UE_ROOT to
+          # the engine root, e.g. /Users/Shared/Epic Games/UE_5.7
+          UE_DIR="${UE_57:-${UE_ROOT:-}}"
+          if [ -z "$UE_DIR" ]; then
+            echo "::error::Neither UE_57 nor UE_ROOT env var is set on this runner."
+            echo "::error::Set one to your UE 5.7 engine root, e.g.:"
+            echo "::error::  export UE_57=\"/Users/Shared/Epic Games/UE_5.7\""
+            exit 1
+          fi
+          if [ ! -x "$UE_DIR/Engine/Build/BatchFiles/RunUBT.sh" ]; then
+            echo "::error::RunUBT.sh not found at $UE_DIR/Engine/Build/BatchFiles/RunUBT.sh"
+            echo "::error::UE_57/UE_ROOT does not point at a valid UE 5.7 install."
+            exit 1
+          fi
+          echo "UE_DIR=$UE_DIR" >> "$GITHUB_ENV"
+          echo "Using engine at: $UE_DIR"
+
+      - name: Verify Xcode Command Line Tools
+        shell: sh
+        run: |
+          if ! xcode-select -p >/dev/null 2>&1; then
+            echo "::error::Xcode Command Line Tools are not installed."
+            echo "::error::Run: xcode-select --install"
+            exit 1
+          fi
+          echo "Xcode CLT path: $(xcode-select -p)"
+          echo "Xcode version:"
+          xcodebuild -version || true
+
+      - name: Verify project shell exists
+        shell: sh
+        run: |
+          # See "LEVIATHAN-PROJECT-SHELL GAP" in header. UBT cannot compile a
+          # plugin in isolation — it needs a host .uproject + Editor target.
+          # As of 2026-05-02 the Monolith plugin repo carries neither.
+          #
+          # Option A (preferred for self-contained CI): a CI-only project
+          # shell at $GITHUB_WORKSPACE/CI/Leviathan.uproject pointing at the
+          # Monolith plugin, plus CI/Source/LeviathanEditor.Target.cs.
+          #
+          # Option B: clone the parent Leviathan project into a sibling
+          # workspace dir and overlay Plugins/Monolith from this checkout.
+          PROJECT_FILE=""
+          if [ -f "$GITHUB_WORKSPACE/CI/Leviathan.uproject" ]; then
+            PROJECT_FILE="$GITHUB_WORKSPACE/CI/Leviathan.uproject"
+            TARGET_NAME="LeviathanEditor"
+          elif [ -n "${LEVIATHAN_PROJECT:-}" ] && [ -f "$LEVIATHAN_PROJECT" ]; then
+            PROJECT_FILE="$LEVIATHAN_PROJECT"
+            TARGET_NAME="LeviathanEditor"
+          else
+            echo "::error::No project shell found. Resolve Option A or Option B."
+            echo "::error::Option A: commit CI/Leviathan.uproject + CI/Source/LeviathanEditor.Target.cs to this repo."
+            echo "::error::Option B: export LEVIATHAN_PROJECT=/path/to/parent/Leviathan.uproject on the runner."
+            exit 1
+          fi
+          echo "PROJECT_FILE=$PROJECT_FILE" >> "$GITHUB_ENV"
+          echo "TARGET_NAME=$TARGET_NAME" >> "$GITHUB_ENV"
+          echo "Using project: $PROJECT_FILE (target: $TARGET_NAME)"
+
+      - name: Build editor target (Mac)
+        shell: sh
+        env:
+          MONOLITH_RELEASE_BUILD: '1'
+        run: |
+          # Mirrors make_release.ps1's UBT invocation (Win64 -> Mac).
+          # MONOLITH_RELEASE_BUILD=1 forces optional deps OFF (BA, GBA,
+          # ComboGraph, GeometryScripting, CommonUI, etc.) and is read by
+          # the per-module Build.cs probes.
+          # -DisableUnity catches missing includes + symbol collisions, same
+          # discipline as the canonical Windows release build.
+          "$UE_DIR/Engine/Build/BatchFiles/RunUBT.sh" \
+            "$TARGET_NAME" Mac Development \
+            -Project="$PROJECT_FILE" \
+            -waitmutex \
+            -DisableUnity
+
+      - name: Stage release tree
+        shell: sh
+        run: |
+          STAGE="$GITHUB_WORKSPACE/_stage/Monolith"
+          mkdir -p "$STAGE"
+          # Copy all git-tracked files in the Monolith plugin repo.
+          # Mirrors make_release.ps1 line: $files = git ls-files
+          # Sibling plugins (Plugins/Monolith*/ besides Monolith itself) live
+          # outside this repo so they cannot be picked up by ls-files —
+          # nothing to strip at this layer.
+          cd "$GITHUB_WORKSPACE"
+          git ls-files | while IFS= read -r f; do
+            mkdir -p "$STAGE/$(dirname "$f")"
+            cp -p "$f" "$STAGE/$f"
+          done
+          # Copy compiled binaries for Mac.
+          if [ -d "$GITHUB_WORKSPACE/Binaries/Mac" ]; then
+            mkdir -p "$STAGE/Binaries/Mac"
+            cp -R "$GITHUB_WORKSPACE/Binaries/Mac/." "$STAGE/Binaries/Mac/"
+          else
+            echo "::error::No Binaries/Mac/ output found after UBT run."
+            exit 1
+          fi
+
+      - name: Strip non-redistributable artefacts
+        shell: sh
+        run: |
+          STAGE="$GITHUB_WORKSPACE/_stage/Monolith"
+          # Strip .dSYM directories (macOS debug symbol bundles — analogue
+          # of Windows .pdb files which make_release.ps1 strips).
+          find "$STAGE/Binaries/Mac" -type d -name "*.dSYM" -prune -exec rm -rf {} +
+          # Strip patch / hot-reload artefacts (analogue of Windows
+          # .patch_* and $StrippedModules cleanup in make_release.ps1).
+          find "$STAGE/Binaries/Mac" -type f -name "*.patch_*" -delete || true
+
+      - name: Patch Monolith.uplugin (Installed=true, strip sibling modules)
+        shell: sh
+        run: |
+          STAGE="$GITHUB_WORKSPACE/_stage/Monolith"
+          UPLUGIN="$STAGE/Monolith.uplugin"
+          if [ ! -f "$UPLUGIN" ]; then
+            echo "::error::Monolith.uplugin missing from staging tree."
+            exit 1
+          fi
+          # Use python (always present on macOS runners) to do precise JSON
+          # surgery — sed regex over JSON is fragile.
+          python3 - "$UPLUGIN" <<'PY'
+          import json, sys
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8") as fh:
+              data = json.load(fh)
+          # Mark as Installed for Blueprint-only consumers.
+          data["Installed"] = True
+          # Strip sibling-plugin module entries that should not ship.
+          # Mirrors make_release.ps1 $StrippedModules behaviour.
+          stripped = {
+              "MonolithSteamBridge",
+              "MonolithISX",
+              "MonolithSubstance",
+              "MonolithClaudeDesignBridge",
+          }
+          if "Modules" in data and isinstance(data["Modules"], list):
+              data["Modules"] = [m for m in data["Modules"]
+                                 if m.get("Name") not in stripped]
+          with open(path, "w", encoding="utf-8") as fh:
+              json.dump(data, fh, indent=2)
+              fh.write("\n")
+          PY
+
+      - name: Create release zip
+        id: zip
+        shell: sh
+        run: |
+          STAGE_ROOT="$GITHUB_WORKSPACE/_stage"
+          ZIP_NAME="Monolith-${GITHUB_REF_NAME}-macOS.zip"
+          ZIP_PATH="$GITHUB_WORKSPACE/$ZIP_NAME"
+          cd "$STAGE_ROOT"
+          # ditto preserves resource forks + symlinks better than zip(1);
+          # standard for distributing compiled macOS artefacts.
+          ditto -c -k --sequesterRsrc --keepParent Monolith "$ZIP_PATH"
+          SHA=$(shasum -a 256 "$ZIP_PATH" | awk '{print $1}')
+          echo "zip_path=$ZIP_PATH" >> "$GITHUB_OUTPUT"
+          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Monolith macOS Build"
+            echo ""
+            echo "**File:** $ZIP_NAME"
+            echo ""
+            echo "**Monolith-macOS-SHA256:** $SHA"
+            echo ""
+            echo "_Auto-updater currently anchors on the Windows zip's"
+            echo "Monolith-SHA256 marker. The macOS marker above is emitted"
+            echo "for transparency; Lucas curates the GitHub release body"
+            echo "manually if the macOS hash should be added._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact (workflow run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.zip.outputs.zip_name }}
+          path: ${{ steps.zip.outputs.zip_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.zip.outputs.zip_path }}
+          # Do not overwrite the curated release body — only append the file.
+          append_body: false
+          fail_on_unmatched_files: true
