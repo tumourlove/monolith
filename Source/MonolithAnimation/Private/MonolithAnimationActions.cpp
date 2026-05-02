@@ -4,6 +4,7 @@
 
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimSequence.h"
+#include "Animation/AnimationAsset.h"
 #include "Animation/BlendSpace.h"
 #include "Animation/BlendSpace1D.h"
 #include "Animation/AnimBlueprint.h"
@@ -7206,6 +7207,21 @@ FMonolithActionResult FMonolithAnimationActions::HandleCopyBonePoseBetweenSequen
 	UAnimSequence* DestSeq = FMonolithAssetUtils::LoadAssetByPath<UAnimSequence>(DestPath);
 	if (!DestSeq) return FMonolithActionResult::Error(FString::Printf(TEXT("Dest AnimSequence not found: %s"), *DestPath));
 
+	// Clamp SourceTime to the source sequence's playable range. Out-of-range
+	// values (negative, or beyond GetPlayLength()) produce undefined sampling
+	// in UAnimSequence::GetBoneTransform — clamp-and-report keeps callers
+	// productive without surprising silent extrapolation.
+	const double OriginalSourceTime = SourceTime;
+	const double SourcePlayLength = static_cast<double>(SourceSeq->GetPlayLength());
+	SourceTime = FMath::Clamp(SourceTime, 0.0, SourcePlayLength);
+	const bool bSourceTimeClamped = !FMath::IsNearlyEqual(SourceTime, OriginalSourceTime);
+	if (bSourceTimeClamped)
+	{
+		UE_LOG(LogTemp, Verbose,
+			TEXT("copy_bone_pose_between_sequences: source_time clamped from %f to %f (play_length=%f)"),
+			OriginalSourceTime, SourceTime, SourcePlayLength);
+	}
+
 	USkeleton* SourceSkel = SourceSeq->GetSkeleton();
 	USkeleton* DestSkel = DestSeq->GetSkeleton();
 	if (!SourceSkel || !DestSkel) return FMonolithActionResult::Error(TEXT("Source or destination has no skeleton assigned"));
@@ -7226,8 +7242,19 @@ FMonolithActionResult FMonolithAnimationActions::HandleCopyBonePoseBetweenSequen
 	const FReferenceSkeleton& SourceRefSkel = SourceSkel->GetReferenceSkeleton();
 	const FReferenceSkeleton& DestRefSkel = DestSkel->GetReferenceSkeleton();
 
-	for (const TSharedPtr<FJsonValue>& Val : *BoneNamesArr)
+	for (int32 Idx = 0; Idx < BoneNamesArr->Num(); ++Idx)
 	{
+		const TSharedPtr<FJsonValue>& Val = (*BoneNamesArr)[Idx];
+		// Element-type guard: FJsonValue::AsString() silently returns "" for
+		// non-string values (numbers, objects, null, bools), which would
+		// otherwise be skipped without surfacing the bad input to the caller.
+		if (!Val.IsValid() || Val->Type != EJson::String)
+		{
+			Controller.CloseBracket(false);
+			return FMonolithActionResult::Error(
+				FString::Printf(TEXT("bone_names[%d] is not a string"), Idx),
+				-32602);
+		}
 		const FString BoneNameStr = Val->AsString();
 		const FName BoneName(*BoneNameStr);
 
@@ -7248,9 +7275,8 @@ FMonolithActionResult FMonolithAnimationActions::HandleCopyBonePoseBetweenSequen
 		// uses the raw track if present and falls back to the skeleton's ref pose
 		// if the bone has no track — which is exactly what we want.
 		FTransform BoneXform = FTransform::Identity;
-		PRAGMA_DISABLE_DEPRECATION_WARNINGS
-		SourceSeq->GetBoneTransform(BoneXform, FSkeletonPoseBoneIndex(SourceBoneIdx), SourceTime, /*bUseRawData=*/true);
-		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+		SourceSeq->GetBoneTransform(BoneXform, FSkeletonPoseBoneIndex(SourceBoneIdx),
+		                            FAnimExtractContext(SourceTime), /*bUseRawData=*/true);
 
 		// Build per-frame arrays for dest. For a static pose, all frames share
 		// the same value; otherwise only frame 0 is set.
@@ -7284,6 +7310,11 @@ FMonolithActionResult FMonolithAnimationActions::HandleCopyBonePoseBetweenSequen
 	Root->SetStringField(TEXT("source_path"), SourcePath);
 	Root->SetStringField(TEXT("dest_path"), DestPath);
 	Root->SetNumberField(TEXT("source_time"), SourceTime);
+	if (bSourceTimeClamped)
+	{
+		Root->SetNumberField(TEXT("original_source_time"), OriginalSourceTime);
+		Root->SetNumberField(TEXT("clamped_source_time"), SourceTime);
+	}
 	Root->SetBoolField(TEXT("apply_to_all_dest_frames"), bApplyToAllFrames);
 	Root->SetNumberField(TEXT("keys_written_per_bone"), KeysToWrite);
 
