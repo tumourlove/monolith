@@ -78,7 +78,7 @@
 | `remove_node` | `asset_path`, `graph_name`, `node_id` | Remove a node by ID |
 | `connect_pins` | `asset_path`, `graph_name`, `source_node`, `source_pin`, `target_node`, `target_pin` | Connect two pins |
 | `disconnect_pins` | `asset_path`, `graph_name`, `source_node`, `source_pin`, `target_node`, `target_pin` | Disconnect two pins |
-| `set_pin_default` | `asset_path`, `graph_name`, `node_id`, `pin_name`, `default_value` | Set a pin's default value |
+| `set_pin_default` | `asset_path`, `graph_name`, `node_id`, `pin_name`, `value` | Set a pin's default value. For PC_Class / PC_Object pins, `value` is resolved to `Pin->DefaultObject`: accepts native class names, object/class paths, or Blueprint class paths (with or without `_C` suffix). Type-checked against `PinSubCategoryObject`. |
 | `set_node_position` | `asset_path`, `graph_name`, `node_id`, `x`, `y` | Set a node's position in the graph |
 
 **Compile & Create (5)**

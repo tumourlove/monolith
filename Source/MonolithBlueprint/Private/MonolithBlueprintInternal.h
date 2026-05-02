@@ -229,6 +229,168 @@ namespace MonolithBlueprintInternal
 		return PinObj;
 	}
 
+	// ============================================================
+	//  ResolveDefaultObjectForPin
+	//
+	//  Resolves the Value string to a UObject* / UClass* appropriate for
+	//  a class-typed (PC_Class) or object-typed (PC_Object) pin's
+	//  Pin->DefaultObject field. Performs cross-category check (class pin
+	//  rejects instance, object pin rejects UClass) and type-constraint
+	//  check against Pin->PinType.PinSubCategoryObject.
+	//
+	//  Returns nullptr and populates OutError on any failure. Does not
+	//  mutate the pin.
+	// ============================================================
+
+	inline UObject* ResolveDefaultObjectForPin(UEdGraphPin* Pin, const FString& Value, FString& OutError)
+	{
+		if (!Pin)
+		{
+			OutError = TEXT("ResolveDefaultObjectForPin: null pin");
+			return nullptr;
+		}
+
+		const FString PinPath = FString::Printf(TEXT("%s:%s"),
+			Pin->GetOwningNode() ? *Pin->GetOwningNode()->GetName() : TEXT("?"),
+			*Pin->PinName.ToString());
+
+		const bool bIsClassPin  = (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Class);
+		const bool bIsObjectPin = (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Object);
+
+		if (!bIsClassPin && !bIsObjectPin)
+		{
+			OutError = FString::Printf(TEXT("Pin '%s' is not class- or object-typed (category=%s)"),
+				*PinPath, *Pin->PinType.PinCategory.ToString());
+			return nullptr;
+		}
+
+		UObject* Resolved = nullptr;
+
+		if (Value.Contains(TEXT("/")))
+		{
+			// Path resolution.
+			Resolved = StaticLoadObject(UObject::StaticClass(), nullptr, *Value);
+
+			// BP class path retry: PC_Class needs a UClass (the GeneratedClass), not a UBlueprint asset.
+			// Fire the retry when value lacks _C AND (load failed OR loaded object isn't a UClass).
+			// '/Game/Foo/BP_Bar' loads the UBlueprint successfully — wrong kind for a class pin —
+			// so the bare-null check alone misses this case.
+			const bool bNeedsClassRetry = bIsClassPin && !Value.EndsWith(TEXT("_C")) &&
+				(!Resolved || !Resolved->IsA(UClass::StaticClass()));
+			if (bNeedsClassRetry)
+			{
+				int32 LastSlash = INDEX_NONE;
+				if (Value.FindLastChar(TEXT('/'), LastSlash))
+				{
+					const FString Leaf = Value.Mid(LastSlash + 1);
+					const FString RetryPath = FString::Printf(TEXT("%s.%s_C"), *Value, *Leaf);
+					if (UObject* Retry = StaticLoadObject(UObject::StaticClass(), nullptr, *RetryPath))
+					{
+						if (Retry->IsA(UClass::StaticClass()))
+						{
+							Resolved = Retry;
+						}
+					}
+				}
+			}
+
+			if (!Resolved)
+			{
+				OutError = FString::Printf(
+					TEXT("Failed to resolve '%s' as object/class for pin '%s'. Path did not load."),
+					*Value, *PinPath);
+				return nullptr;
+			}
+		}
+		else
+		{
+			// Bare-name resolution — PC_Class only.
+			if (!bIsClassPin)
+			{
+				OutError = FString::Printf(
+					TEXT("Pin '%s' is object-typed; bare name '%s' not accepted. Use an asset path."),
+					*PinPath, *Value);
+				return nullptr;
+			}
+
+			// UE stores class names without the C++ source-code prefix (APawn → "Pawn",
+			// USelectableComponent → "SelectableComponent"). Try four forms in order:
+			// (1) value as-is, (2) strip leading A/U, (3) add A prefix, (4) add U prefix.
+			// This makes the resolver tolerant of either the C++ identifier form or the
+			// engine-internal name. Prefix is invariably uppercase A/U per UE C++ naming
+			// discipline, so case-sensitive StartsWith is correct here.
+			UClass* ResolvedClass = FindFirstObject<UClass>(*Value, EFindFirstObjectOptions::NativeFirst);
+			if (!ResolvedClass && Value.Len() > 1 && (Value.StartsWith(TEXT("A")) || Value.StartsWith(TEXT("U"))))
+			{
+				const FString Stripped = Value.Mid(1);
+				ResolvedClass = FindFirstObject<UClass>(*Stripped, EFindFirstObjectOptions::NativeFirst);
+			}
+			if (!ResolvedClass && !Value.StartsWith(TEXT("A")))
+			{
+				ResolvedClass = FindFirstObject<UClass>(
+					*FString::Printf(TEXT("A%s"), *Value), EFindFirstObjectOptions::NativeFirst);
+			}
+			if (!ResolvedClass && !Value.StartsWith(TEXT("U")))
+			{
+				ResolvedClass = FindFirstObject<UClass>(
+					*FString::Printf(TEXT("U%s"), *Value), EFindFirstObjectOptions::NativeFirst);
+			}
+			if (!ResolvedClass)
+			{
+				OutError = FString::Printf(
+					TEXT("Class '%s' not found (tried as-is, with A/U prefix stripped, and with A/U prefix added). Use a full path for BP classes."),
+					*Value);
+				return nullptr;
+			}
+			Resolved = ResolvedClass;
+		}
+
+		// Cross-category mismatch — class pin must hold a UClass; object pin must hold an instance.
+		if (bIsClassPin && !Resolved->IsA(UClass::StaticClass()))
+		{
+			OutError = FString::Printf(
+				TEXT("Pin '%s' expects a class, got instance '%s'. Use a class path or name instead."),
+				*PinPath, *Value);
+			return nullptr;
+		}
+		if (bIsObjectPin && Resolved->IsA(UClass::StaticClass()))
+		{
+			OutError = FString::Printf(
+				TEXT("Pin '%s' expects an instance, got class '%s'. Use an asset path instead."),
+				*PinPath, *Value);
+			return nullptr;
+		}
+
+		// Type-constraint enforcement against PinSubCategoryObject (the pin's declared base type).
+		UClass* PinBase = Cast<UClass>(Pin->PinType.PinSubCategoryObject.Get());
+		if (PinBase)
+		{
+			if (bIsClassPin)
+			{
+				UClass* ResolvedClass = Cast<UClass>(Resolved);
+				if (!ResolvedClass->IsChildOf(PinBase))
+				{
+					OutError = FString::Printf(
+						TEXT("Resolved '%s' is not a subclass of '%s' required by pin '%s'."),
+						*ResolvedClass->GetName(), *PinBase->GetName(), *PinPath);
+					return nullptr;
+				}
+			}
+			else // bIsObjectPin
+			{
+				if (!Resolved->IsA(PinBase))
+				{
+					OutError = FString::Printf(
+						TEXT("Resolved '%s' is not an instance of '%s' required by pin '%s'."),
+						*Resolved->GetName(), *PinBase->GetName(), *PinPath);
+					return nullptr;
+				}
+			}
+		}
+
+		return Resolved;
+	}
+
 	inline TSharedPtr<FJsonObject> SerializeNode(UEdGraphNode* Node)
 	{
 		TSharedPtr<FJsonObject> NObj = MakeShared<FJsonObject>();

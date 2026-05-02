@@ -244,7 +244,11 @@ void FMonolithBlueprintNodeActions::RegisterActions(FMonolithToolRegistry& Regis
 			.Required(TEXT("asset_path"),  TEXT("string"), TEXT("Blueprint asset path"))
 			.Required(TEXT("node_id"),     TEXT("string"), TEXT("Node ID"))
 			.Required(TEXT("pin_name"),    TEXT("string"), TEXT("Pin name"))
-			.Required(TEXT("value"),       TEXT("string"), TEXT("Default value as string"))
+			.Required(TEXT("value"),       TEXT("string"),
+				TEXT("Default value as string. For class-typed (PC_Class) and object-typed (PC_Object) pins, "
+				     "accepts native class names ('APawn'), object/class paths ('/Script/Engine.Pawn'), "
+				     "or Blueprint class paths ('/Game/Foo/BP_Bar.BP_Bar_C', or '/Game/Foo/BP_Bar' — "
+				     "auto-retries with '_C' suffix). Type-constraint-checked against the pin's declared base type."))
 			.Optional(TEXT("graph_name"),  TEXT("string"), TEXT("Graph name (searches all graphs if omitted)"))
 			.Build());
 
@@ -1428,7 +1432,25 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleSetPinDefault(const T
 			TEXT("Pin '%s' has active connections — disconnect it first before setting a default value"), *PinName));
 	}
 
-	Pin->DefaultValue = Value;
+	const bool bIsRefPin =
+		(Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Class) ||
+		(Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Object);
+
+	if (bIsRefPin)
+	{
+		FString ResolveError;
+		UObject* Resolved = MonolithBlueprintInternal::ResolveDefaultObjectForPin(Pin, Value, ResolveError);
+		if (!Resolved)
+		{
+			return FMonolithActionResult::Error(ResolveError);
+		}
+		Pin->DefaultObject = Resolved;
+		Pin->DefaultValue.Reset();
+	}
+	else
+	{
+		Pin->DefaultValue = Value;
+	}
 	Node->PinDefaultValueChanged(Pin);
 	FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
 
