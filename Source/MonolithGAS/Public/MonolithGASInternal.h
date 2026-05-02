@@ -107,4 +107,35 @@ namespace MonolithGAS
 
 	// Get the project Source directory path (e.g. "<ProjectDir>/Source/<ProjectName>")
 	FString GetProjectSourceDir();
+
+	// ---------------------------------------------------------------------------
+	// AbilityTags Reflection Future-Proofing (Issue #31)
+	// ---------------------------------------------------------------------------
+
+	// Returns the FProperty for the GAS ability's tag-set property,
+	// trying the modern (UE 5.8+) name 'AssetTags' first, then falling back
+	// to the legacy 'AbilityTags'. Logs a one-time warning the first time
+	// neither is found, so a future engine version that completes the rename
+	// produces a single actionable log line rather than silent no-ops scattered
+	// across action sites.
+	//
+	// Pass the ability class (typically UGameplayAbility-derived). Returns nullptr
+	// if neither property exists.
+	inline FProperty* FindAbilityAssetTagsProperty(UClass* AbilityClass)
+	{
+		if (!AbilityClass) return nullptr;
+		if (FProperty* P = AbilityClass->FindPropertyByName(TEXT("AssetTags"))) return P;
+		if (FProperty* P = AbilityClass->FindPropertyByName(TEXT("AbilityTags"))) return P;
+
+		static bool bWarnedOnce = false;
+		if (!bWarnedOnce)
+		{
+			bWarnedOnce = true;
+			UE_LOG(LogMonolithGAS, Warning,
+				TEXT("Monolith GAS: neither 'AssetTags' nor 'AbilityTags' found on %s. ")
+				TEXT("Engine version may have completed the rename — this needs an update."),
+				*AbilityClass->GetName());
+		}
+		return nullptr;
+	}
 }

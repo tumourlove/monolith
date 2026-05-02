@@ -1466,7 +1466,7 @@ FMonolithActionResult FMonolithGASScaffoldActions::HandleScaffoldWeaponAbility(c
 		FGameplayTag AbilityTag = FGameplayTag::RequestGameplayTag(FName(*AbilityTagStr), false);
 		if (AbilityTag.IsValid())
 		{
-			FProperty* Prop = AbilityCDO->GetClass()->FindPropertyByName(TEXT("AbilityTags"));
+			FProperty* Prop = MonolithGAS::FindAbilityAssetTagsProperty(AbilityCDO->GetClass());
 			if (Prop)
 			{
 				FGameplayTagContainer* Tags = Prop->ContainerPtrToValuePtr<FGameplayTagContainer>(AbilityCDO);

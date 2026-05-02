@@ -1224,7 +1224,7 @@ FMonolithActionResult FMonolithGASInspectActions::HandleTraceAbilityActivation(c
 		FGameplayTagContainer BlockedTags;
 		ASC->GetBlockedAbilityTags(BlockedTags);
 
-		FProperty* AbilityTagsProp = AbilityCDO->GetClass()->FindPropertyByName(TEXT("AbilityTags"));
+		FProperty* AbilityTagsProp = MonolithGAS::FindAbilityAssetTagsProperty(AbilityCDO->GetClass());
 		if (AbilityTagsProp && BlockedTags.Num() > 0)
 		{
 			FGameplayTagContainer* AbilityTags = AbilityTagsProp->ContainerPtrToValuePtr<FGameplayTagContainer>(AbilityCDO);
