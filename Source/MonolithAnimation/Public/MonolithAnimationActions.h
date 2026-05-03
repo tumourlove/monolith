@@ -70,6 +70,7 @@ public:
 	static FMonolithActionResult HandleGetSequenceInfo(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetSequenceNotifies(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetBoneTrackKeys(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleListBoneTracks(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetSequenceCurves(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetMontageInfo(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetBlendSpaceInfo(const TSharedPtr<FJsonObject>& Params);
