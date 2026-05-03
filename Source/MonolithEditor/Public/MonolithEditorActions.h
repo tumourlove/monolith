@@ -78,6 +78,19 @@ public:
 	static FMonolithActionResult HandleRunPython(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleLoadLevel(const TSharedPtr<FJsonObject>& Params);
 
+	// --- Runtime / PIE control ---
+	// Execute a console command in the active PIE world. Lets external tooling
+	// drive in-game testing (toggle exec cmds, view modes, debug commands).
+	static FMonolithActionResult HandleRunConsoleCommand(const TSharedPtr<FJsonObject>& Params);
+
+	// Start a Play-In-Editor session. Equivalent to pressing Cmd/Ctrl+P in the
+	// editor. Returns immediately after queuing the session — actual world spawn
+	// happens on the next editor tick.
+	static FMonolithActionResult HandleStartPIE(const TSharedPtr<FJsonObject>& Params);
+
+	// Stop the active Play-In-Editor session.
+	static FMonolithActionResult HandleStopPIE(const TSharedPtr<FJsonObject>& Params);
+
 	static void OnLiveCodingPatchComplete();
 
 private:
