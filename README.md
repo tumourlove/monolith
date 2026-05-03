@@ -18,7 +18,7 @@ It works with **Claude Code**, **Cursor**, or any MCP-compatible client. If your
 
 ## Why Monolith?
 
-Most MCP integrations register every action as a separate tool, which floods the AI's context window and buries the actually useful stuff. Monolith uses a **namespace dispatch pattern** instead: each domain exposes a single `{namespace}_query(action, params)` tool, and a central `monolith_discover()` call lists everything available. Small tool list (20 tools), massive capability (1271 actions across 16 in-tree namespaces; sibling plugins add their own and push the live registry higher when loaded). The AI gets oriented fast and spends its context on your actual problem.
+Most MCP integrations register every action as a separate tool, which floods the AI's context window and buries the actually useful stuff. Monolith uses a **namespace dispatch pattern** instead: each domain exposes a single `{namespace}_query(action, params)` tool, and a central `monolith_discover()` call lists everything available. Small tool list (20 tools), massive capability (1274 actions across 16 in-tree namespaces; sibling plugins add their own and push the live registry higher when loaded). The AI gets oriented fast and spends its context on your actual problem.
 
 ## What Can It Actually Do?
 
@@ -224,7 +224,7 @@ Different AI coding assistants use different conventions for project-instruction
 
 Practical prompt to feed your assistant once Monolith is installed and running:
 
-> *"I've installed the Monolith Unreal plugin. It exposes ~1239 actions across 16 namespaces (`blueprint`, `material`, `animation`, `niagara`, `mesh`, `ui`, `gas`, `ai`, `audio`, etc.) over an in-process MCP HTTP listener at `http://localhost:9316/mcp`. What's the best-practice format for a project-instructions file for [your assistant — e.g. `CLAUDE.md`, `AGENTS.md`, `.cursorrules`]? It should help with action discovery via `monolith_discover()`, asset-path conventions like `/Game/Path/Asset`, and verifying UE 5.7 APIs via `source_query` before writing code."*
+> *"I've installed the Monolith Unreal plugin. It exposes ~1274 actions across 16 namespaces (`blueprint`, `material`, `animation`, `niagara`, `mesh`, `ui`, `gas`, `ai`, `audio`, etc.) over an in-process MCP HTTP listener at `http://localhost:9316/mcp`. What's the best-practice format for a project-instructions file for [your assistant — e.g. `CLAUDE.md`, `AGENTS.md`, `.cursorrules`]? It should help with action discovery via `monolith_discover()`, asset-path conventions like `/Game/Path/Asset`, and verifying UE 5.7 APIs via `source_query` before writing code."*
 
 Whatever your AI generates, drop it at the appropriate path for your toolchain. The action counts and workflow notes from this README's earlier sections are usable input.
 
@@ -290,7 +290,7 @@ Standalone Tools (in Binaries/)
   monolith_query.exe    — Offline DB query tool (zero UE dependency, sqlite3 amalgamation)
 ```
 
-**1271 actions across 16 in-tree namespaces, exposed through 20 MCP tools (16 namespace dispatchers + 4 `monolith_*` meta-tools). Distinct handlers: 1267 — the `ui` namespace double-counts 4 aliased GAS attribute-binding actions. 45 town-gen experimental actions are disabled by default (`bEnableProceduralTownGen=false`); enabling them brings the in-tree registry to 1316.** Live editors with sibling plugins loaded report higher counts (sibling plugins are documented in their own repos).
+**1274 actions across 16 in-tree namespaces, exposed through 20 MCP tools (16 namespace dispatchers + 4 `monolith_*` meta-tools). Distinct handlers: 1270 — the `ui` namespace double-counts 4 aliased GAS attribute-binding actions. 45 town-gen experimental actions are disabled by default (`bEnableProceduralTownGen=false`); enabling them brings the in-tree registry to 1319.** Live editors with sibling plugins loaded report higher counts (sibling plugins are documented in their own repos).
 
 ### Tool Reference
 
