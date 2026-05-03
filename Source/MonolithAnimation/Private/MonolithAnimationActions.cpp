@@ -291,6 +291,12 @@ void FMonolithAnimationActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("start_frame"), TEXT("integer"), TEXT("Start frame (default 0)"), TEXT("0"))
 			.Optional(TEXT("end_frame"), TEXT("integer"), TEXT("End frame (default -1 = all)"), TEXT("-1"))
 			.Build());
+	Registry.RegisterAction(TEXT("animation"), TEXT("list_bone_tracks"),
+		TEXT("List all bone names that have tracks (animated bones) in an AnimSequence"),
+		FMonolithActionHandler::CreateStatic(&HandleListBoneTracks),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
+			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("get_sequence_curves"),
 		TEXT("Get float and transform curves on an animation sequence"),
 		FMonolithActionHandler::CreateStatic(&HandleGetSequenceCurves),
@@ -2169,31 +2175,21 @@ FMonolithActionResult FMonolithAnimationActions::HandleGetBoneTrackKeys(const TS
 	const IAnimationDataModel* DataModel = Seq->GetDataModel();
 	if (!DataModel) return FMonolithActionResult::Error(TEXT("No animation data model"));
 
-	const FRawAnimSequenceTrack* RawTrackPtr = nullptr;
-PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	const TArray<FBoneAnimationTrack>& BoneTracks = DataModel->GetBoneAnimationTracks();
-PRAGMA_ENABLE_DEPRECATION_WARNINGS
-	for (const FBoneAnimationTrack& Track : BoneTracks)
-	{
-		if (Track.Name == FName(*BoneName))
-		{
-			RawTrackPtr = &Track.InternalTrackData;
-			break;
-		}
-	}
-	if (!RawTrackPtr)
+	const FName BoneFName(*BoneName);
+	if (!DataModel->IsValidBoneTrackName(BoneFName))
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Bone track not found: %s"), *BoneName));
 
-	const FRawAnimSequenceTrack& RawTrack = *RawTrackPtr;
-
-	int32 NumPosKeys = RawTrack.PosKeys.Num();
-	int32 NumRotKeys = RawTrack.RotKeys.Num();
-	int32 NumScaleKeys = RawTrack.ScaleKeys.Num();
-	int32 MaxKeys = FMath::Max3(NumPosKeys, NumRotKeys, NumScaleKeys);
+	// Use non-deprecated API: evaluate the bone track at every keyframe via
+	// GetBoneTrackTransforms. Works regardless of underlying compressed storage.
+	TArray<FTransform> AllTransforms;
+	DataModel->GetBoneTrackTransforms(BoneFName, AllTransforms);
+	const int32 MaxKeys = AllTransforms.Num();
 
 	if (EndFrame < 0 || EndFrame >= MaxKeys)
 		EndFrame = MaxKeys - 1;
 	if (StartFrame < 0) StartFrame = 0;
+	if (MaxKeys == 0)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Bone track has no keys: %s"), *BoneName));
 	if (StartFrame > EndFrame)
 		return FMonolithActionResult::Error(FString::Printf(TEXT("start_frame (%d) > end_frame (%d)"), StartFrame, EndFrame));
 
@@ -2201,43 +2197,63 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	Root->SetStringField(TEXT("bone_name"), BoneName);
 	Root->SetNumberField(TEXT("num_keys"), MaxKeys);
 
-	// Positions
 	TArray<TSharedPtr<FJsonValue>> PosArr;
-	for (int32 i = StartFrame; i <= EndFrame && i < NumPosKeys; ++i)
+	TArray<TSharedPtr<FJsonValue>> RotArr;
+	TArray<TSharedPtr<FJsonValue>> ScaleArr;
+	for (int32 i = StartFrame; i <= EndFrame; ++i)
 	{
-		TArray<TSharedPtr<FJsonValue>> Vec;
-		Vec.Add(MakeShared<FJsonValueNumber>(RawTrack.PosKeys[i].X));
-		Vec.Add(MakeShared<FJsonValueNumber>(RawTrack.PosKeys[i].Y));
-		Vec.Add(MakeShared<FJsonValueNumber>(RawTrack.PosKeys[i].Z));
-		PosArr.Add(MakeShared<FJsonValueArray>(Vec));
+		const FTransform& Xf = AllTransforms[i];
+		const FVector& Pos = Xf.GetLocation();
+		const FQuat& Rot = Xf.GetRotation();
+		const FVector& Scl = Xf.GetScale3D();
+
+		TArray<TSharedPtr<FJsonValue>> P;
+		P.Add(MakeShared<FJsonValueNumber>(Pos.X));
+		P.Add(MakeShared<FJsonValueNumber>(Pos.Y));
+		P.Add(MakeShared<FJsonValueNumber>(Pos.Z));
+		PosArr.Add(MakeShared<FJsonValueArray>(P));
+
+		TArray<TSharedPtr<FJsonValue>> Q;
+		Q.Add(MakeShared<FJsonValueNumber>(Rot.X));
+		Q.Add(MakeShared<FJsonValueNumber>(Rot.Y));
+		Q.Add(MakeShared<FJsonValueNumber>(Rot.Z));
+		Q.Add(MakeShared<FJsonValueNumber>(Rot.W));
+		RotArr.Add(MakeShared<FJsonValueArray>(Q));
+
+		TArray<TSharedPtr<FJsonValue>> S;
+		S.Add(MakeShared<FJsonValueNumber>(Scl.X));
+		S.Add(MakeShared<FJsonValueNumber>(Scl.Y));
+		S.Add(MakeShared<FJsonValueNumber>(Scl.Z));
+		ScaleArr.Add(MakeShared<FJsonValueArray>(S));
 	}
 	Root->SetArrayField(TEXT("positions"), PosArr);
-
-	// Rotations
-	TArray<TSharedPtr<FJsonValue>> RotArr;
-	for (int32 i = StartFrame; i <= EndFrame && i < NumRotKeys; ++i)
-	{
-		TArray<TSharedPtr<FJsonValue>> Quat;
-		Quat.Add(MakeShared<FJsonValueNumber>(RawTrack.RotKeys[i].X));
-		Quat.Add(MakeShared<FJsonValueNumber>(RawTrack.RotKeys[i].Y));
-		Quat.Add(MakeShared<FJsonValueNumber>(RawTrack.RotKeys[i].Z));
-		Quat.Add(MakeShared<FJsonValueNumber>(RawTrack.RotKeys[i].W));
-		RotArr.Add(MakeShared<FJsonValueArray>(Quat));
-	}
 	Root->SetArrayField(TEXT("rotations"), RotArr);
-
-	// Scales
-	TArray<TSharedPtr<FJsonValue>> ScaleArr;
-	for (int32 i = StartFrame; i <= EndFrame && i < NumScaleKeys; ++i)
-	{
-		TArray<TSharedPtr<FJsonValue>> Vec;
-		Vec.Add(MakeShared<FJsonValueNumber>(RawTrack.ScaleKeys[i].X));
-		Vec.Add(MakeShared<FJsonValueNumber>(RawTrack.ScaleKeys[i].Y));
-		Vec.Add(MakeShared<FJsonValueNumber>(RawTrack.ScaleKeys[i].Z));
-		ScaleArr.Add(MakeShared<FJsonValueArray>(Vec));
-	}
 	Root->SetArrayField(TEXT("scales"), ScaleArr);
 
+	return FMonolithActionResult::Success(Root);
+}
+
+FMonolithActionResult FMonolithAnimationActions::HandleListBoneTracks(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+
+	UAnimSequence* Seq = FMonolithAssetUtils::LoadAssetByPath<UAnimSequence>(AssetPath);
+	if (!Seq) return FMonolithActionResult::Error(FString::Printf(TEXT("AnimSequence not found: %s"), *AssetPath));
+
+	const IAnimationDataModel* DataModel = Seq->GetDataModel();
+	if (!DataModel) return FMonolithActionResult::Error(TEXT("No animation data model"));
+
+	TArray<FName> BoneNames;
+	DataModel->GetBoneTrackNames(BoneNames);
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetNumberField(TEXT("count"), BoneNames.Num());
+	TArray<TSharedPtr<FJsonValue>> NameArr;
+	for (const FName& N : BoneNames)
+	{
+		NameArr.Add(MakeShared<FJsonValueString>(N.ToString()));
+	}
+	Root->SetArrayField(TEXT("bone_names"), NameArr);
 	return FMonolithActionResult::Success(Root);
 }
 
@@ -5781,6 +5797,7 @@ FMonolithActionResult FMonolithAnimationActions::HandleBatchExecute(const TShare
 		else if (OpName == TEXT("get_blend_space_info"))      SubResult = HandleGetBlendSpaceInfo(SubParams);
 		else if (OpName == TEXT("get_sequence_curves"))       SubResult = HandleGetSequenceCurves(SubParams);
 		else if (OpName == TEXT("get_bone_track_keys"))       SubResult = HandleGetBoneTrackKeys(SubParams);
+		else if (OpName == TEXT("list_bone_tracks"))          SubResult = HandleListBoneTracks(SubParams);
 		else if (OpName == TEXT("get_curve_keys"))            SubResult = HandleGetCurveKeys(SubParams);
 		else if (OpName == TEXT("list_curves"))               SubResult = HandleListCurves(SubParams);
 		else if (OpName == TEXT("get_sync_markers"))          SubResult = HandleGetSyncMarkers(SubParams);
