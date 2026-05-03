@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.14.9] - 2026-05-03
+
 ### Added
 
 - **`editor.run_python` + `editor.load_level` actions** — Issue [#50](https://github.com/tumourlove/monolith/issues/50), ported from @JCSopko's fork. `run_python` wraps `IPythonScriptPlugin::Get()->ExecPythonCommandEx(FPythonCommandEx&)`, supporting all three execution modes (`execute_file`, `execute_statement`, `evaluate_statement`) and the `EPythonFileExecutionScope` Private/Public split. Returns success status, captured Python log output (typed: info/warning/error), and the evaluated result for `evaluate_statement` mode. `load_level` wraps `ULevelEditorSubsystem::LoadLevel(AssetPath)` — single-arg map swap with native semantics (closes current persistent level without saving). Together these replace common fallback-to-other-MCP patterns; agents now stay inside Monolith for Python escape-hatch + map swapping in integration tests / automation flows. `Monolith.uplugin` enables `PythonScriptPlugin` (engine-shipped Experimental plugin requires explicit enable). By **@JCSopko**.
