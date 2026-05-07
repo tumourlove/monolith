@@ -649,6 +649,30 @@ void FMonolithAnimationActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Animation Blueprint asset path"))
 			.Build());
 
+	// Skeleton Compatibility — required for legacy UE4 anims on UE5 mannequin etc.
+	Registry.RegisterAction(TEXT("animation"), TEXT("get_compatible_skeletons"),
+		TEXT("List skeletons declared compatible with the given Skeleton (USkeleton::CompatibleSkeletons)"),
+		FMonolithActionHandler::CreateStatic(&HandleGetCompatibleSkeletons),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Skeleton asset path"))
+			.Build());
+	Registry.RegisterAction(TEXT("animation"), TEXT("add_compatible_skeleton"),
+		TEXT("Declare another Skeleton as compatible — lets anims authored on the other skeleton play on this one without retargeting"),
+		FMonolithActionHandler::CreateStatic(&HandleAddCompatibleSkeleton),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Skeleton asset path (the one being declared compatible)"))
+			.Required(TEXT("compatible_with"), TEXT("string"), TEXT("Skeleton asset path to add to the compatibility list"))
+			.Optional(TEXT("save"), TEXT("bool"), TEXT("Save the modified skeleton asset (default true)"), TEXT("true"))
+			.Build());
+	Registry.RegisterAction(TEXT("animation"), TEXT("remove_compatible_skeleton"),
+		TEXT("Remove a skeleton from another's CompatibleSkeletons array"),
+		FMonolithActionHandler::CreateStatic(&HandleRemoveCompatibleSkeleton),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Skeleton asset path"))
+			.Required(TEXT("compatible_with"), TEXT("string"), TEXT("Skeleton asset path to remove from the compatibility list"))
+			.Optional(TEXT("save"), TEXT("bool"), TEXT("Save the modified skeleton asset (default true)"), TEXT("true"))
+			.Build());
+
 	// Wave 11 — Asset Creation + Setup
 	Registry.RegisterAction(TEXT("animation"), TEXT("create_blend_space"),
 		TEXT("Create a new 2D BlendSpace asset with skeleton and optional axis config"),
@@ -3797,6 +3821,129 @@ FMonolithActionResult FMonolithAnimationActions::HandleGetAbpLinkedAssets(const 
 	Root->SetArrayField(TEXT("composites"), CompositesArr);
 	Root->SetArrayField(TEXT("linked_anim_blueprints"), LinkedAbpArr);
 	Root->SetNumberField(TEXT("total_dependencies"), Deps.Num());
+	return FMonolithActionResult::Success(Root);
+}
+
+// ---------------------------------------------------------------------------
+// Skeleton Compatibility — wraps USkeleton::CompatibleSkeletons
+// ---------------------------------------------------------------------------
+
+FMonolithActionResult FMonolithAnimationActions::HandleGetCompatibleSkeletons(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+
+	USkeleton* Skeleton = FMonolithAssetUtils::LoadAssetByPath<USkeleton>(AssetPath);
+	if (!Skeleton)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Skeleton not found: %s"), *AssetPath));
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+
+	TArray<TSharedPtr<FJsonValue>> CompatArr;
+	for (const TSoftObjectPtr<USkeleton>& Compat : Skeleton->GetCompatibleSkeletons())
+	{
+		const FString CompatPath = Compat.ToSoftObjectPath().ToString();
+		if (!CompatPath.IsEmpty())
+			CompatArr.Add(MakeShared<FJsonValueString>(CompatPath));
+	}
+
+	Root->SetArrayField(TEXT("compatible_skeletons"), CompatArr);
+	Root->SetNumberField(TEXT("count"), CompatArr.Num());
+	return FMonolithActionResult::Success(Root);
+}
+
+FMonolithActionResult FMonolithAnimationActions::HandleAddCompatibleSkeleton(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+	const FString CompatPath = Params->GetStringField(TEXT("compatible_with"));
+	bool bSave = true;
+	Params->TryGetBoolField(TEXT("save"), bSave);
+
+	USkeleton* Skeleton = FMonolithAssetUtils::LoadAssetByPath<USkeleton>(AssetPath);
+	if (!Skeleton)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Skeleton not found: %s"), *AssetPath));
+
+	USkeleton* Compat = FMonolithAssetUtils::LoadAssetByPath<USkeleton>(CompatPath);
+	if (!Compat)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Compatible Skeleton not found: %s"), *CompatPath));
+
+	if (Skeleton == Compat)
+		return FMonolithActionResult::Error(TEXT("Cannot mark a skeleton compatible with itself"));
+
+	// Idempotency: skip if already present.
+	bool bAlreadyCompatible = false;
+	for (const TSoftObjectPtr<USkeleton>& Existing : Skeleton->GetCompatibleSkeletons())
+	{
+		if (Existing.Get() == Compat)
+		{
+			bAlreadyCompatible = true;
+			break;
+		}
+	}
+
+	if (!bAlreadyCompatible)
+	{
+		Skeleton->AddCompatibleSkeleton(Compat);
+		Skeleton->MarkPackageDirty();
+		if (bSave)
+		{
+			UEditorAssetLibrary::SaveAsset(AssetPath, /*bOnlyIfIsDirty*/ false);
+		}
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+	Root->SetStringField(TEXT("compatible_with"), CompatPath);
+	Root->SetBoolField(TEXT("added"), !bAlreadyCompatible);
+	Root->SetBoolField(TEXT("already_compatible"), bAlreadyCompatible);
+	Root->SetNumberField(TEXT("count"), Skeleton->GetCompatibleSkeletons().Num());
+	return FMonolithActionResult::Success(Root);
+}
+
+FMonolithActionResult FMonolithAnimationActions::HandleRemoveCompatibleSkeleton(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+	const FString CompatPath = Params->GetStringField(TEXT("compatible_with"));
+	bool bSave = true;
+	Params->TryGetBoolField(TEXT("save"), bSave);
+
+	USkeleton* Skeleton = FMonolithAssetUtils::LoadAssetByPath<USkeleton>(AssetPath);
+	if (!Skeleton)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Skeleton not found: %s"), *AssetPath));
+
+	// USkeleton::RemoveCompatibleSkeleton() exists in 5.7+.
+	USkeleton* Compat = FMonolithAssetUtils::LoadAssetByPath<USkeleton>(CompatPath);
+	if (!Compat)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Compatible Skeleton not found: %s"), *CompatPath));
+
+	bool bWasCompatible = false;
+	for (const TSoftObjectPtr<USkeleton>& Existing : Skeleton->GetCompatibleSkeletons())
+	{
+		if (Existing.Get() == Compat)
+		{
+			bWasCompatible = true;
+			break;
+		}
+	}
+
+	bool bRemoved = false;
+	if (bWasCompatible)
+	{
+		Skeleton->RemoveCompatibleSkeleton(Compat);
+		Skeleton->MarkPackageDirty();
+		bRemoved = true;
+		if (bSave)
+		{
+			UEditorAssetLibrary::SaveAsset(AssetPath, /*bOnlyIfIsDirty*/ false);
+		}
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+	Root->SetStringField(TEXT("compatible_with"), CompatPath);
+	Root->SetBoolField(TEXT("removed"), bRemoved);
+	Root->SetBoolField(TEXT("was_compatible"), bWasCompatible);
+	Root->SetNumberField(TEXT("count"), Skeleton->GetCompatibleSkeletons().Num());
 	return FMonolithActionResult::Success(Root);
 }
 

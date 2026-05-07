@@ -129,6 +129,14 @@ public:
 	static FMonolithActionResult HandleGetAbpVariables(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetAbpLinkedAssets(const TSharedPtr<FJsonObject>& Params);
 
+	// --- Skeleton Compatibility (3) ---
+	// Wraps USkeleton::CompatibleSkeletons — required for playing UE4 mannequin
+	// anims on UE5 SK_Mannequin meshes (and similar legacy/cross-skeleton flows)
+	// without manual run_python boilerplate.
+	static FMonolithActionResult HandleGetCompatibleSkeletons(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleAddCompatibleSkeleton(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleRemoveCompatibleSkeleton(const TSharedPtr<FJsonObject>& Params);
+
 	// --- Wave 10: ABP Write Experimental (3) ---
 	static FMonolithActionResult HandleAddStateToMachine(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleAddTransition(const TSharedPtr<FJsonObject>& Params);
