@@ -26,6 +26,9 @@ void FMonolithBlueprintCDOActions::RegisterActions(FMonolithToolRegistry& Regist
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path (e.g. /Game/Blueprints/BP_MyActor or /Game/Data/DA_MyData)"))
 			.Optional(TEXT("category_filter"), TEXT("string"), TEXT("Only include properties whose category contains this string"))
 			.Optional(TEXT("include_parent_defaults"), TEXT("boolean"), TEXT("If true, include properties inherited from native parent class (default: true)"))
+			.Optional(TEXT("owner_class_filter"), TEXT("string"), TEXT("Only include properties whose owner_class name contains this string (case-insensitive). Lets you skip everything inherited from AActor/APawn/ACharacter when only project-level props matter."))
+			.Optional(TEXT("name_pattern"), TEXT("string"), TEXT("Only include properties whose name contains this substring (case-insensitive)"))
+			.Optional(TEXT("exclude_categories"), TEXT("array"), TEXT("List of category names to skip entirely (case-insensitive exact match — e.g. [\"Replication\", \"Cooking\", \"HLOD\", \"Lighting\"])"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("set_cdo_property"),
@@ -244,6 +247,29 @@ FMonolithActionResult FMonolithBlueprintCDOActions::HandleGetCDOProperties(const
 		bIncludeParentDefaults = Params->GetBoolField(TEXT("include_parent_defaults"));
 	}
 
+	FString OwnerClassFilter;
+	if (Params->HasField(TEXT("owner_class_filter")))
+	{
+		OwnerClassFilter = Params->GetStringField(TEXT("owner_class_filter"));
+	}
+
+	FString NamePattern;
+	if (Params->HasField(TEXT("name_pattern")))
+	{
+		NamePattern = Params->GetStringField(TEXT("name_pattern"));
+	}
+
+	TArray<FString> ExcludeCategories;
+	const TArray<TSharedPtr<FJsonValue>>* ExcludeCatArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("exclude_categories"), ExcludeCatArr) && ExcludeCatArr)
+	{
+		for (const TSharedPtr<FJsonValue>& Val : *ExcludeCatArr)
+		{
+			if (Val.IsValid())
+				ExcludeCategories.Add(Val->AsString().ToLower());
+		}
+	}
+
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetStringField(TEXT("asset_path"), AssetPath);
 	Root->SetStringField(TEXT("native_class"), NativeParent ? NativeParent->GetName() : TEXT("Unknown"));
@@ -261,7 +287,24 @@ FMonolithActionResult FMonolithBlueprintCDOActions::HandleGetCDOProperties(const
 
 		if (!bIncludeParentDefaults && OwnerClass != TargetClass) continue;
 
+		// owner_class_filter — case-insensitive substring match on owner class name
+		if (!OwnerClassFilter.IsEmpty())
+		{
+			const FString OwnerName = OwnerClass ? OwnerClass->GetName() : FString();
+			if (!OwnerName.Contains(OwnerClassFilter, ESearchCase::IgnoreCase))
+				continue;
+		}
+
+		// name_pattern — case-insensitive substring match on property name
+		if (!NamePattern.IsEmpty() && !Prop->GetName().Contains(NamePattern, ESearchCase::IgnoreCase))
+			continue;
+
 		FString Category = Prop->GetMetaData(TEXT("Category"));
+
+		// exclude_categories — case-insensitive exact match on the property's category
+		if (ExcludeCategories.Num() > 0 && ExcludeCategories.Contains(Category.ToLower()))
+			continue;
+
 		if (!CategoryFilter.IsEmpty() && !Category.Contains(CategoryFilter)) continue;
 
 		if (Prop->HasAnyPropertyFlags(CPF_Transient | CPF_DuplicateTransient)) continue;
