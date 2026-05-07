@@ -10,7 +10,7 @@
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimBlueprintGeneratedClass.h"
 #include "Animation/Skeleton.h"
-#include "PreviewAssetAttachComponent.h"
+#include "Animation/PreviewAssetAttachComponent.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/SkeletalMeshSocket.h"
 #include "Rendering/SkeletalMeshRenderData.h"
@@ -2472,7 +2472,7 @@ FMonolithActionResult FMonolithAnimationActions::HandleGetSkeletonPreviewAttache
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Skeleton not found: %s"), *AssetPath));
 
 	const FPreviewAssetAttachContainer& Container = Skeleton->PreviewAttachedAssetContainer;
-	const int32 NumAttached = Container.GetNumAttachedObjects();
+	const int32 NumAttached = Container.Num();
 
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetStringField(TEXT("asset_path"), AssetPath);
@@ -2480,8 +2480,9 @@ FMonolithActionResult FMonolithAnimationActions::HandleGetSkeletonPreviewAttache
 	TArray<TSharedPtr<FJsonValue>> AttachedArr;
 	for (int32 i = 0; i < NumAttached; ++i)
 	{
-		UObject* AttachedObject = Container.GetAttachedObjectByIndex(i);
-		const FName AttachPoint = Container.GetAttachNameByIndex(i);
+		const FPreviewAttachedObjectPair& Pair = Container[i];
+		UObject* AttachedObject = Pair.GetAttachedObject();
+		const FName AttachPoint = Pair.AttachedTo;
 
 		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
 		Entry->SetStringField(TEXT("attach_point"), AttachPoint.ToString());
