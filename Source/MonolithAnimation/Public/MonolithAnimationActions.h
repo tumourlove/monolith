@@ -74,6 +74,8 @@ public:
 	static FMonolithActionResult HandleGetMontageInfo(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetBlendSpaceInfo(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetSkeletonSockets(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleGetSkeletonPreviewAttachedAssets(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleGetBoneRefPose(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetAbpInfo(const TSharedPtr<FJsonObject>& Params);
 
 	// --- Wave 2: Notify CRUD (4) ---
