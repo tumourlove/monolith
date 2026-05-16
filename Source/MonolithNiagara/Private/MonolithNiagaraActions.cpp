@@ -704,6 +704,600 @@ static FString GetAssetPath(const TSharedPtr<FJsonObject>& Params)
 	return Path;
 }
 
+namespace
+{
+	enum class EMonolithSemanticDetailLevel
+	{
+		Compact,
+		Full
+	};
+
+	static bool TryParseSemanticDetailLevel(
+		const TSharedPtr<FJsonObject>& Params,
+		EMonolithSemanticDetailLevel& OutDetailLevel,
+		FString& OutError)
+	{
+		const FString DetailLevel = Params->HasField(TEXT("detail_level"))
+			? Params->GetStringField(TEXT("detail_level")).ToLower()
+			: TEXT("compact");
+
+		if (DetailLevel.IsEmpty() || DetailLevel == TEXT("compact"))
+		{
+			OutDetailLevel = EMonolithSemanticDetailLevel::Compact;
+			return true;
+		}
+
+		if (DetailLevel == TEXT("full"))
+		{
+			OutDetailLevel = EMonolithSemanticDetailLevel::Full;
+			return true;
+		}
+
+		OutError = FString::Printf(TEXT("Invalid detail_level '%s'. Valid values: compact, full"), *DetailLevel);
+		return false;
+	}
+
+	struct FMonolithNiagaraStageModule
+	{
+		FString StageName;
+		FString ModuleName;
+		FString ModuleGuid;
+	};
+
+	struct FMonolithNiagaraEventGeneratorInfo
+	{
+		FString EventName;
+		FString ModuleName;
+		FString ModuleGuid;
+		FString StageName;
+	};
+
+	struct FMonolithNiagaraTopologyEdge
+	{
+		FString SourceEmitterId;
+		FString SourceEmitterName;
+		FString TargetEmitterId;
+		FString TargetEmitterName;
+		FString EventName;
+		FString ExecutionMode;
+		int32 SpawnNumber = 0;
+		int32 MaxEventsPerFrame = 0;
+		bool bRandomSpawnNumber = false;
+		int32 MinSpawnNumber = 0;
+		bool bUpdateAttributeInitialValues = false;
+		FString UsageId;
+		bool bSourceEmitterResolved = false;
+	};
+
+	struct FMonolithNiagaraEmitterSemantic
+	{
+		FString Name;
+		FString Guid;
+		int32 Index = INDEX_NONE;
+		bool bEnabled = false;
+		bool bLocalSpace = false;
+		bool bDeterminism = false;
+		bool bRequiresPersistentIDs = false;
+		FString CalculateBoundsMode;
+		bool bHasSpriteRenderer = false;
+		bool bHasRibbonRenderer = false;
+		bool bHasMeshRenderer = false;
+		bool bHasLocalSpawnLocationModule = false;
+		bool bHasAnyLocationModule = false;
+		FString SpawnLocationMode;
+		FString RoleHint;
+		TArray<FMonolithNiagaraStageModule> LocationModules;
+		TArray<FMonolithNiagaraEventGeneratorInfo> EventGenerators;
+		TArray<FMonolithNiagaraTopologyEdge> IncomingEvents;
+		TArray<FMonolithNiagaraTopologyEdge> OutgoingLinks;
+		TArray<FString> SemanticNotes;
+	};
+
+	static void AddUniqueString(TArray<FString>& Values, const FString& Value)
+	{
+		if (!Value.IsEmpty() && !Values.Contains(Value))
+		{
+			Values.Add(Value);
+		}
+	}
+
+	static FString BoundsModeToString(const ENiagaraEmitterCalculateBoundMode Mode)
+	{
+		switch (Mode)
+		{
+		case ENiagaraEmitterCalculateBoundMode::Dynamic: return TEXT("Dynamic");
+		case ENiagaraEmitterCalculateBoundMode::Fixed: return TEXT("Fixed");
+		case ENiagaraEmitterCalculateBoundMode::Programmable: return TEXT("Programmable");
+		default: return TEXT("Unknown");
+		}
+	}
+
+	static FString ExecutionModeToString(const EScriptExecutionMode Mode)
+	{
+		switch (Mode)
+		{
+		case EScriptExecutionMode::EveryParticle: return TEXT("EveryParticle");
+		case EScriptExecutionMode::SpawnedParticles: return TEXT("SpawnedParticles");
+		case EScriptExecutionMode::SingleParticle: return TEXT("SingleParticle");
+		default: return TEXT("Unknown");
+		}
+	}
+
+	static FString CanonicalizeEventName(const FString& EventName)
+	{
+		const FString Lower = EventName.ToLower();
+		if (Lower.Contains(TEXT("death"))) return TEXT("DeathEvent");
+		if (Lower.Contains(TEXT("location"))) return TEXT("LocationEvent");
+		if (Lower.Contains(TEXT("collision"))) return TEXT("CollisionEvent");
+		return EventName;
+	}
+
+	static bool TryGetGeneratedEventName(const FString& ModuleName, FString& OutEventName)
+	{
+		const FString Lower = ModuleName.ToLower();
+		if (Lower.Contains(TEXT("generatedeathevent")))
+		{
+			OutEventName = TEXT("DeathEvent");
+			return true;
+		}
+		if (Lower.Contains(TEXT("generatelocationevent")))
+		{
+			OutEventName = TEXT("LocationEvent");
+			return true;
+		}
+		if (Lower.Contains(TEXT("generatecollisionevent")))
+		{
+			OutEventName = TEXT("CollisionEvent");
+			return true;
+		}
+		return false;
+	}
+
+	static bool IsLocalSpawnLocationModule(const FString& ModuleName)
+	{
+		const FString Lower = ModuleName.ToLower();
+		if (!Lower.Contains(TEXT("location")))
+		{
+			return false;
+		}
+		if (Lower.Contains(TEXT("event")))
+		{
+			return false;
+		}
+		return true;
+	}
+
+	static bool NameSuggestsBurst(const FString& LowerName)
+	{
+		return LowerName.Contains(TEXT("burst"))
+			|| LowerName.Contains(TEXT("explosion"))
+			|| LowerName.Contains(TEXT("explode"))
+			|| LowerName.Contains(TEXT("impact"));
+	}
+
+	static bool NameSuggestsTrail(const FString& LowerName)
+	{
+		return LowerName.Contains(TEXT("trail")) || LowerName.Contains(TEXT("ribbon"));
+	}
+
+	static bool NameSuggestsShell(const FString& LowerName)
+	{
+		return LowerName.Contains(TEXT("shell"))
+			|| LowerName.Contains(TEXT("leader"))
+			|| LowerName.Contains(TEXT("rocket"))
+			|| LowerName.Contains(TEXT("projectile"));
+	}
+
+	static UNiagaraGraph* GetGraphForHandleUsage(UNiagaraSystem* System, const FNiagaraEmitterHandle& Handle, const ENiagaraScriptUsage Usage)
+	{
+		if (!System)
+		{
+			return nullptr;
+		}
+
+		if (Usage == ENiagaraScriptUsage::SystemSpawnScript || Usage == ENiagaraScriptUsage::SystemUpdateScript)
+		{
+			UNiagaraScript* Script = System->GetSystemSpawnScript();
+			UNiagaraScriptSource* Source = Script ? Cast<UNiagaraScriptSource>(Script->GetLatestSource()) : nullptr;
+			return Source ? Source->NodeGraph : nullptr;
+		}
+
+		FVersionedNiagaraEmitterData* EmitterData = Handle.GetEmitterData();
+		UNiagaraScriptSource* Source = EmitterData ? Cast<UNiagaraScriptSource>(EmitterData->GraphSource) : nullptr;
+		return Source ? Source->NodeGraph : nullptr;
+	}
+
+	static void CollectEmitterModules(UNiagaraSystem* System, const FNiagaraEmitterHandle& Handle, TArray<FMonolithNiagaraStageModule>& OutModules)
+	{
+		OutModules.Reset();
+
+		static const TPair<ENiagaraScriptUsage, const TCHAR*> StageUsages[] = {
+			{ENiagaraScriptUsage::EmitterSpawnScript, TEXT("emitter_spawn")},
+			{ENiagaraScriptUsage::EmitterUpdateScript, TEXT("emitter_update")},
+			{ENiagaraScriptUsage::ParticleSpawnScript, TEXT("particle_spawn")},
+			{ENiagaraScriptUsage::ParticleUpdateScript, TEXT("particle_update")},
+		};
+
+		for (const auto& [Usage, StageName] : StageUsages)
+		{
+			UNiagaraGraph* Graph = GetGraphForHandleUsage(System, Handle, Usage);
+			UNiagaraNodeOutput* OutputNode = Graph ? Graph->FindEquivalentOutputNode(Usage, FGuid()) : nullptr;
+			if (!OutputNode)
+			{
+				continue;
+			}
+
+			TArray<UNiagaraNodeFunctionCall*> Modules;
+			MonolithNiagaraHelpers::GetOrderedModuleNodes(*OutputNode, Modules);
+			for (UNiagaraNodeFunctionCall* ModuleNode : Modules)
+			{
+				if (!ModuleNode)
+				{
+					continue;
+				}
+
+				FMonolithNiagaraStageModule Module;
+				Module.StageName = StageName;
+				Module.ModuleName = ModuleNode->GetFunctionName();
+				Module.ModuleGuid = ModuleNode->NodeGuid.ToString();
+				OutModules.Add(MoveTemp(Module));
+			}
+		}
+	}
+
+	static void CollectTopologyEdges(UNiagaraSystem* System, TArray<FMonolithNiagaraTopologyEdge>& OutEdges)
+	{
+		OutEdges.Reset();
+		if (!System)
+		{
+			return;
+		}
+
+		const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+		for (const FNiagaraEmitterHandle& TargetHandle : Handles)
+		{
+			FVersionedNiagaraEmitterData* EmitterData = TargetHandle.GetEmitterData();
+			if (!EmitterData)
+			{
+				continue;
+			}
+
+			for (const FNiagaraEventScriptProperties& EventProps : EmitterData->GetEventHandlers())
+			{
+				FMonolithNiagaraTopologyEdge Edge;
+				Edge.TargetEmitterId = TargetHandle.GetId().ToString();
+				Edge.TargetEmitterName = TargetHandle.GetName().ToString();
+				Edge.SourceEmitterId = EventProps.SourceEmitterID.ToString();
+				Edge.EventName = CanonicalizeEventName(EventProps.SourceEventName.ToString());
+				Edge.ExecutionMode = ExecutionModeToString(EventProps.ExecutionMode);
+				Edge.SpawnNumber = static_cast<int32>(EventProps.SpawnNumber);
+				Edge.MaxEventsPerFrame = static_cast<int32>(EventProps.MaxEventsPerFrame);
+				Edge.bRandomSpawnNumber = EventProps.bRandomSpawnNumber;
+				Edge.MinSpawnNumber = static_cast<int32>(EventProps.MinSpawnNumber);
+				Edge.bUpdateAttributeInitialValues = EventProps.UpdateAttributeInitialValues;
+				if (EventProps.Script)
+				{
+					Edge.UsageId = EventProps.Script->GetUsageId().ToString();
+				}
+
+				if (EventProps.SourceEmitterID.IsValid())
+				{
+					for (const FNiagaraEmitterHandle& SourceHandle : Handles)
+					{
+						if (SourceHandle.GetId() == EventProps.SourceEmitterID)
+						{
+							Edge.SourceEmitterName = SourceHandle.GetName().ToString();
+							Edge.bSourceEmitterResolved = true;
+							break;
+						}
+					}
+				}
+
+				OutEdges.Add(MoveTemp(Edge));
+			}
+		}
+	}
+
+	static FMonolithNiagaraEmitterSemantic AnalyzeEmitterSemantic(
+		UNiagaraSystem* System,
+		const FNiagaraEmitterHandle& Handle,
+		const int32 EmitterIndex,
+		const TArray<FMonolithNiagaraTopologyEdge>& TopologyEdges)
+	{
+		FMonolithNiagaraEmitterSemantic Semantic;
+		Semantic.Name = Handle.GetName().ToString();
+		Semantic.Guid = Handle.GetId().ToString();
+		Semantic.Index = EmitterIndex;
+		Semantic.bEnabled = Handle.GetIsEnabled();
+
+		FVersionedNiagaraEmitterData* EmitterData = Handle.GetEmitterData();
+		if (EmitterData)
+		{
+			Semantic.bLocalSpace = EmitterData->bLocalSpace != 0;
+			Semantic.bDeterminism = EmitterData->bDeterminism != 0;
+			Semantic.bRequiresPersistentIDs = EmitterData->bRequiresPersistentIDs != 0;
+			Semantic.CalculateBoundsMode = BoundsModeToString(EmitterData->CalculateBoundsMode);
+
+			for (UNiagaraRendererProperties* Renderer : EmitterData->GetRenderers())
+			{
+				Semantic.bHasSpriteRenderer |= Renderer && Renderer->IsA<UNiagaraSpriteRendererProperties>();
+				Semantic.bHasRibbonRenderer |= Renderer && Renderer->IsA<UNiagaraRibbonRendererProperties>();
+				Semantic.bHasMeshRenderer |= Renderer && Renderer->IsA<UNiagaraMeshRendererProperties>();
+			}
+		}
+
+		TArray<FMonolithNiagaraStageModule> Modules;
+		CollectEmitterModules(System, Handle, Modules);
+		for (const FMonolithNiagaraStageModule& Module : Modules)
+		{
+			FString EventName;
+			if (TryGetGeneratedEventName(Module.ModuleName, EventName))
+			{
+				FMonolithNiagaraEventGeneratorInfo Generator;
+				Generator.EventName = EventName;
+				Generator.ModuleName = Module.ModuleName;
+				Generator.ModuleGuid = Module.ModuleGuid;
+				Generator.StageName = Module.StageName;
+				Semantic.EventGenerators.Add(MoveTemp(Generator));
+			}
+
+			if (IsLocalSpawnLocationModule(Module.ModuleName))
+			{
+				Semantic.bHasAnyLocationModule = true;
+				if (Module.StageName == TEXT("particle_spawn"))
+				{
+					Semantic.bHasLocalSpawnLocationModule = true;
+				}
+
+				Semantic.LocationModules.Add(Module);
+			}
+		}
+
+		for (const FMonolithNiagaraTopologyEdge& Edge : TopologyEdges)
+		{
+			if (Edge.TargetEmitterId == Semantic.Guid)
+			{
+				Semantic.IncomingEvents.Add(Edge);
+			}
+			if (Edge.SourceEmitterId == Semantic.Guid)
+			{
+				Semantic.OutgoingLinks.Add(Edge);
+			}
+		}
+
+		if (Semantic.IncomingEvents.Num() > 0 && Semantic.bHasLocalSpawnLocationModule)
+		{
+			Semantic.SpawnLocationMode = TEXT("mixed_event_and_local_shape");
+		}
+		else if (Semantic.IncomingEvents.Num() > 0)
+		{
+			Semantic.SpawnLocationMode = TEXT("event_driven");
+		}
+		else if (Semantic.bHasLocalSpawnLocationModule)
+		{
+			Semantic.SpawnLocationMode = TEXT("local_shape");
+		}
+		else if (Semantic.bHasAnyLocationModule)
+		{
+			Semantic.SpawnLocationMode = TEXT("module_location");
+		}
+		else
+		{
+			Semantic.SpawnLocationMode = TEXT("default_or_unknown");
+		}
+
+		const FString LowerName = Semantic.Name.ToLower();
+		if (NameSuggestsTrail(LowerName) && Semantic.IncomingEvents.Num() > 0)
+		{
+			Semantic.RoleHint = TEXT("trail_follower");
+		}
+		else if (NameSuggestsShell(LowerName) && Semantic.EventGenerators.Num() > 0)
+		{
+			Semantic.RoleHint = TEXT("shell_event_source");
+		}
+		else if (NameSuggestsBurst(LowerName) && Semantic.IncomingEvents.Num() > 0)
+		{
+			Semantic.RoleHint = TEXT("burst_receiver");
+		}
+		else if (NameSuggestsBurst(LowerName)
+			&& (Semantic.SpawnLocationMode == TEXT("local_shape")
+				|| Semantic.SpawnLocationMode == TEXT("module_location")
+				|| Semantic.SpawnLocationMode == TEXT("default_or_unknown")))
+		{
+			Semantic.RoleHint = TEXT("independent_burst");
+		}
+		else if (Semantic.IncomingEvents.Num() > 0)
+		{
+			Semantic.RoleHint = TEXT("event_receiver");
+		}
+		else if (Semantic.EventGenerators.Num() > 0)
+		{
+			Semantic.RoleHint = TEXT("event_source");
+		}
+		else if (NameSuggestsTrail(LowerName))
+		{
+			Semantic.RoleHint = TEXT("trail_or_ribbon");
+		}
+		else
+		{
+			Semantic.RoleHint = TEXT("independent_emitter");
+		}
+
+		for (const FMonolithNiagaraTopologyEdge& Edge : Semantic.IncomingEvents)
+		{
+			const FString SourceName = Edge.SourceEmitterName.IsEmpty() ? TEXT("<unresolved>") : Edge.SourceEmitterName;
+			Semantic.SemanticNotes.Add(FString::Printf(TEXT("Consumes %s from %s."), *Edge.EventName, *SourceName));
+		}
+
+		TArray<FString> GeneratedEvents;
+		for (const FMonolithNiagaraEventGeneratorInfo& Generator : Semantic.EventGenerators)
+		{
+			AddUniqueString(GeneratedEvents, Generator.EventName);
+		}
+		for (const FString& EventName : GeneratedEvents)
+		{
+			Semantic.SemanticNotes.Add(FString::Printf(TEXT("Generates %s for downstream emitters."), *EventName));
+		}
+
+		if (Semantic.SpawnLocationMode == TEXT("local_shape"))
+		{
+			Semantic.SemanticNotes.Add(TEXT("Spawns from local shape/location modules, so without an incoming event it appears at its own origin or shape."));
+		}
+		else if (Semantic.SpawnLocationMode == TEXT("event_driven"))
+		{
+			Semantic.SemanticNotes.Add(TEXT("Spawn placement is event-driven rather than local-shape-driven."));
+		}
+		else if (Semantic.SpawnLocationMode == TEXT("mixed_event_and_local_shape"))
+		{
+			Semantic.SemanticNotes.Add(TEXT("Consumes incoming events but also has local location modules; verify whether placement should be event-driven or independent."));
+		}
+
+		if (Semantic.RoleHint == TEXT("independent_burst"))
+		{
+			Semantic.SemanticNotes.Add(TEXT("Name suggests a burst/explosion, but no incoming event handler exists; it behaves as an independent burst."));
+		}
+
+		if ((Semantic.EventGenerators.Num() > 0 || Semantic.IncomingEvents.Num() > 0) && !Semantic.bRequiresPersistentIDs)
+		{
+			Semantic.SemanticNotes.Add(TEXT("Participates in inter-emitter event flow while requires_persistent_ids is false; verify whether stable source particle identity is needed."));
+		}
+
+		return Semantic;
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> BuildStringArray(const TArray<FString>& Values)
+	{
+		TArray<TSharedPtr<FJsonValue>> Result;
+		for (const FString& Value : Values)
+		{
+			Result.Add(MakeShared<FJsonValueString>(Value));
+		}
+		return Result;
+	}
+
+	static TSharedRef<FJsonObject> MakeStageModuleJson(const FMonolithNiagaraStageModule& Module)
+	{
+		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("module_name"), Module.ModuleName);
+		Obj->SetStringField(TEXT("module_guid"), Module.ModuleGuid);
+		Obj->SetStringField(TEXT("stage"), Module.StageName);
+		return Obj;
+	}
+
+	static TSharedRef<FJsonObject> MakeEventGeneratorJson(const FMonolithNiagaraEventGeneratorInfo& Generator)
+	{
+		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("event_name"), Generator.EventName);
+		Obj->SetStringField(TEXT("module_name"), Generator.ModuleName);
+		Obj->SetStringField(TEXT("module_guid"), Generator.ModuleGuid);
+		Obj->SetStringField(TEXT("stage"), Generator.StageName);
+		return Obj;
+	}
+
+	static TSharedRef<FJsonObject> MakeTopologyEdgeJson(
+		const FMonolithNiagaraTopologyEdge& Edge,
+		const EMonolithSemanticDetailLevel DetailLevel)
+	{
+		const bool bFull = DetailLevel == EMonolithSemanticDetailLevel::Full;
+		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("source_emitter_name"), Edge.SourceEmitterName);
+		Obj->SetStringField(TEXT("target_emitter_name"), Edge.TargetEmitterName);
+		Obj->SetStringField(TEXT("event_name"), Edge.EventName);
+		Obj->SetStringField(TEXT("execution_mode"), Edge.ExecutionMode);
+		Obj->SetBoolField(TEXT("source_emitter_resolved"), Edge.bSourceEmitterResolved);
+
+		if (bFull || !Edge.bSourceEmitterResolved)
+		{
+			Obj->SetStringField(TEXT("source_emitter_id"), Edge.SourceEmitterId);
+		}
+
+		if (bFull)
+		{
+			Obj->SetStringField(TEXT("target_emitter_id"), Edge.TargetEmitterId);
+			Obj->SetNumberField(TEXT("spawn_number"), Edge.SpawnNumber);
+			Obj->SetNumberField(TEXT("max_events_per_frame"), Edge.MaxEventsPerFrame);
+			Obj->SetBoolField(TEXT("random_spawn_number"), Edge.bRandomSpawnNumber);
+			Obj->SetNumberField(TEXT("min_spawn_number"), Edge.MinSpawnNumber);
+			Obj->SetBoolField(TEXT("update_attribute_initial_values"), Edge.bUpdateAttributeInitialValues);
+			Obj->SetStringField(TEXT("usage_id"), Edge.UsageId);
+		}
+
+		return Obj;
+	}
+
+	static void AppendEmitterSemanticJson(
+		TSharedRef<FJsonObject> Obj,
+		const FMonolithNiagaraEmitterSemantic& Semantic,
+		const EMonolithSemanticDetailLevel DetailLevel)
+	{
+		const bool bFull = DetailLevel == EMonolithSemanticDetailLevel::Full;
+		Obj->SetStringField(TEXT("guid"), Semantic.Guid);
+		Obj->SetNumberField(TEXT("index"), Semantic.Index);
+		Obj->SetBoolField(TEXT("enabled"), Semantic.bEnabled);
+		Obj->SetBoolField(TEXT("requires_persistent_ids"), Semantic.bRequiresPersistentIDs);
+		Obj->SetStringField(TEXT("calculate_bounds_mode"), Semantic.CalculateBoundsMode);
+		Obj->SetStringField(TEXT("spawn_location_mode"), Semantic.SpawnLocationMode);
+		Obj->SetStringField(TEXT("role_hint"), Semantic.RoleHint);
+		Obj->SetBoolField(TEXT("has_local_spawn_location_module"), Semantic.bHasLocalSpawnLocationModule);
+		Obj->SetBoolField(TEXT("has_any_location_module"), Semantic.bHasAnyLocationModule);
+		Obj->SetBoolField(TEXT("has_sprite_renderer"), Semantic.bHasSpriteRenderer);
+		Obj->SetBoolField(TEXT("has_ribbon_renderer"), Semantic.bHasRibbonRenderer);
+		Obj->SetBoolField(TEXT("has_mesh_renderer"), Semantic.bHasMeshRenderer);
+		Obj->SetNumberField(TEXT("incoming_event_count"), Semantic.IncomingEvents.Num());
+		Obj->SetNumberField(TEXT("outgoing_link_count"), Semantic.OutgoingLinks.Num());
+		Obj->SetNumberField(TEXT("event_generator_count"), Semantic.EventGenerators.Num());
+		Obj->SetNumberField(TEXT("location_module_count"), Semantic.LocationModules.Num());
+
+		TArray<FString> GeneratedEvents;
+		for (const FMonolithNiagaraEventGeneratorInfo& Generator : Semantic.EventGenerators)
+		{
+			AddUniqueString(GeneratedEvents, Generator.EventName);
+		}
+		Obj->SetArrayField(TEXT("generated_events"), BuildStringArray(GeneratedEvents));
+
+		TArray<FString> ConsumedEvents;
+		for (const FMonolithNiagaraTopologyEdge& Incoming : Semantic.IncomingEvents)
+		{
+			AddUniqueString(ConsumedEvents, Incoming.EventName);
+		}
+		Obj->SetArrayField(TEXT("consumed_events"), BuildStringArray(ConsumedEvents));
+
+		if (!bFull)
+		{
+			return;
+		}
+
+		TArray<TSharedPtr<FJsonValue>> EventGeneratorsArr;
+		for (const FMonolithNiagaraEventGeneratorInfo& Generator : Semantic.EventGenerators)
+		{
+			EventGeneratorsArr.Add(MakeShared<FJsonValueObject>(MakeEventGeneratorJson(Generator)));
+		}
+		Obj->SetArrayField(TEXT("event_generators"), EventGeneratorsArr);
+
+		TArray<TSharedPtr<FJsonValue>> IncomingEventsArr;
+		for (const FMonolithNiagaraTopologyEdge& Incoming : Semantic.IncomingEvents)
+		{
+			IncomingEventsArr.Add(MakeShared<FJsonValueObject>(MakeTopologyEdgeJson(Incoming, DetailLevel)));
+		}
+		Obj->SetArrayField(TEXT("incoming_events"), IncomingEventsArr);
+
+		TArray<TSharedPtr<FJsonValue>> OutgoingLinksArr;
+		for (const FMonolithNiagaraTopologyEdge& Outgoing : Semantic.OutgoingLinks)
+		{
+			OutgoingLinksArr.Add(MakeShared<FJsonValueObject>(MakeTopologyEdgeJson(Outgoing, DetailLevel)));
+		}
+		Obj->SetArrayField(TEXT("outgoing_links"), OutgoingLinksArr);
+
+		TArray<TSharedPtr<FJsonValue>> LocationModulesArr;
+		for (const FMonolithNiagaraStageModule& Module : Semantic.LocationModules)
+		{
+			LocationModulesArr.Add(MakeShared<FJsonValueObject>(MakeStageModuleJson(Module)));
+		}
+		Obj->SetArrayField(TEXT("location_modules"), LocationModulesArr);
+		Obj->SetArrayField(TEXT("semantic_notes"), BuildStringArray(Semantic.SemanticNotes));
+	}
+}
+
 // ============================================================================
 // JSON Helpers
 // ============================================================================
@@ -1535,16 +2129,18 @@ void FMonolithNiagaraActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Build());
 
 	// --- Wave 2: Summary & Discovery (4 new) ---
-	Registry.RegisterAction(TEXT("niagara"), TEXT("get_system_summary"), TEXT("One-call overview of an entire Niagara system (emitters, params, renderers, module counts)"),
+	Registry.RegisterAction(TEXT("niagara"), TEXT("get_system_summary"), TEXT("One-call overview of an entire Niagara system, including emitter topology, event flow, location semantics, role hints, params, renderers, and module counts. AI guidance: start with compact for orientation; if emitters may be linked by events, switch to full before reasoning about where particles spawn or explode."),
 		FMonolithActionHandler::CreateStatic(&HandleGetSystemSummary),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Optional(TEXT("detail_level"), TEXT("string"), TEXT("Response verbosity: compact (default) or full. Compact returns topology and role hints without deep per-edge semantic payloads. If emitter-to-emitter event links may matter, prefer full."))
 			.Build());
-	Registry.RegisterAction(TEXT("niagara"), TEXT("get_emitter_summary"), TEXT("Deep view of a single emitter (modules per stage, renderers, properties)"),
+	Registry.RegisterAction(TEXT("niagara"), TEXT("get_emitter_summary"), TEXT("Deep view of a single emitter, including modules per stage, renderers, event flow, spawn-location semantics, and role hints. AI guidance: use full when this emitter may send or receive Niagara events from other emitters."),
 		FMonolithActionHandler::CreateStatic(&HandleGetEmitterSummary),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
 			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name or GUID"))
+			.Optional(TEXT("detail_level"), TEXT("string"), TEXT("Response verbosity: compact (default) or full. Compact keeps semantic fields shallow; full includes event/link and location-module details. If this emitter may participate in an event chain, prefer full."))
 			.Build());
 	Registry.RegisterAction(TEXT("niagara"), TEXT("list_emitter_properties"), TEXT("List all editable properties on FVersionedNiagaraEmitterData with current values"),
 		FMonolithActionHandler::CreateStatic(&HandleListEmitterProperties),
@@ -1657,7 +2253,7 @@ void FMonolithNiagaraActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("max_events_per_frame"), TEXT("integer"), TEXT("Max events per frame (default: 0 = unlimited)"))
 			.Optional(TEXT("spawn_number"), TEXT("integer"), TEXT("Spawn number for spawned_particles mode (default: 0)"))
 			.Build());
-	Registry.RegisterAction(TEXT("niagara"), TEXT("validate_system"), TEXT("Pre-compile validation: check for common misconfigurations"),
+	Registry.RegisterAction(TEXT("niagara"), TEXT("validate_system"), TEXT("Pre-compile validation: check common misconfigurations plus inter-emitter event-chain, spawn-location, and persistent-id issues"),
 		FMonolithActionHandler::CreateStatic(&HandleValidateSystem),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
@@ -6087,9 +6683,19 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetSystemSummary(const TSha
 	FString SystemPath = GetAssetPath(Params);
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
+	EMonolithSemanticDetailLevel DetailLevel = EMonolithSemanticDetailLevel::Compact;
+	FString DetailError;
+	if (!TryParseSemanticDetailLevel(Params, DetailLevel, DetailError))
+	{
+		return FMonolithActionResult::Error(DetailError);
+	}
+	const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+	TArray<FMonolithNiagaraTopologyEdge> TopologyEdges;
+	CollectTopologyEdges(System, TopologyEdges);
 
 	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
 	R->SetStringField(TEXT("system_name"), System->GetName());
+	R->SetStringField(TEXT("detail_level"), DetailLevel == EMonolithSemanticDetailLevel::Full ? TEXT("full") : TEXT("compact"));
 
 	// System properties
 	TSharedRef<FJsonObject> SysProps = MakeShared<FJsonObject>();
@@ -6122,19 +6728,22 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetSystemSummary(const TSha
 	R->SetArrayField(TEXT("user_parameters"), UserParamsArr);
 
 	// Emitters
-	const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
 	TArray<TSharedPtr<FJsonValue>> EmitterArr;
+	TArray<TSharedPtr<FJsonValue>> TopologyArr;
+	TArray<TSharedPtr<FJsonValue>> IndependentBurstArr;
 	int32 TotalModuleCount = 0;
 	for (int32 i = 0; i < Handles.Num(); ++i)
 	{
 		const FNiagaraEmitterHandle& Handle = Handles[i];
 		FVersionedNiagaraEmitterData* ED = Handle.GetEmitterData();
+		const FMonolithNiagaraEmitterSemantic Semantic = AnalyzeEmitterSemantic(System, Handle, i, TopologyEdges);
 		TSharedRef<FJsonObject> EObj = MakeShared<FJsonObject>();
 		EObj->SetStringField(TEXT("name"), Handle.GetName().ToString());
 		EObj->SetNumberField(TEXT("index"), i);
 		EObj->SetBoolField(TEXT("enabled"), Handle.GetIsEnabled());
 		EObj->SetStringField(TEXT("sim_target"), ED && ED->SimTarget == ENiagaraSimTarget::GPUComputeSim ? TEXT("GPU") : TEXT("CPU"));
 		if (ED) EObj->SetBoolField(TEXT("local_space"), ED->bLocalSpace != 0);
+		AppendEmitterSemanticJson(EObj, Semantic, DetailLevel);
 
 		// Module counts per usage
 		TSharedRef<FJsonObject> MCounts = MakeShared<FJsonObject>();
@@ -6174,8 +6783,31 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetSystemSummary(const TSha
 			EObj->SetArrayField(TEXT("renderer_types"), RendTypes);
 		}
 		EmitterArr.Add(MakeShared<FJsonValueObject>(EObj));
+
+		if (Semantic.RoleHint == TEXT("independent_burst"))
+		{
+			TSharedRef<FJsonObject> BurstObj = MakeShared<FJsonObject>();
+			BurstObj->SetStringField(TEXT("emitter"), Semantic.Name);
+			BurstObj->SetStringField(TEXT("reason"), TEXT("Burst-like emitter has no incoming event handler and will behave independently from other emitters."));
+			IndependentBurstArr.Add(MakeShared<FJsonValueObject>(BurstObj));
+		}
 	}
+
+	if (DetailLevel == EMonolithSemanticDetailLevel::Full)
+	{
+		for (const FMonolithNiagaraTopologyEdge& Edge : TopologyEdges)
+		{
+			TopologyArr.Add(MakeShared<FJsonValueObject>(MakeTopologyEdgeJson(Edge, DetailLevel)));
+		}
+	}
+
 	R->SetArrayField(TEXT("emitters"), EmitterArr);
+	R->SetNumberField(TEXT("inter_emitter_link_count"), TopologyEdges.Num());
+	if (DetailLevel == EMonolithSemanticDetailLevel::Full)
+	{
+		R->SetArrayField(TEXT("inter_emitter_topology"), TopologyArr);
+	}
+	R->SetArrayField(TEXT("independent_burst_emitters"), IndependentBurstArr);
 	R->SetNumberField(TEXT("emitter_count"), Handles.Num());
 	R->SetNumberField(TEXT("total_module_count"), TotalModuleCount);
 	return SuccessObj(R);
@@ -6188,6 +6820,12 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetEmitterSummary(const TSh
 
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
+	EMonolithSemanticDetailLevel DetailLevel = EMonolithSemanticDetailLevel::Compact;
+	FString DetailError;
+	if (!TryParseSemanticDetailLevel(Params, DetailLevel, DetailError))
+	{
+		return FMonolithActionResult::Error(DetailError);
+	}
 
 	int32 EIdx = FindEmitterHandleIndex(System, EmitterHandleId);
 	if (EIdx == INDEX_NONE) return FMonolithActionResult::Error(TEXT("Emitter not found"));
@@ -6195,12 +6833,17 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetEmitterSummary(const TSh
 	const FNiagaraEmitterHandle& Handle = System->GetEmitterHandles()[EIdx];
 	FVersionedNiagaraEmitterData* ED = Handle.GetEmitterData();
 	if (!ED) return FMonolithActionResult::Error(TEXT("No emitter data"));
+	TArray<FMonolithNiagaraTopologyEdge> TopologyEdges;
+	CollectTopologyEdges(System, TopologyEdges);
+	const FMonolithNiagaraEmitterSemantic Semantic = AnalyzeEmitterSemantic(System, Handle, EIdx, TopologyEdges);
 
 	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
 	R->SetStringField(TEXT("name"), Handle.GetName().ToString());
+	R->SetStringField(TEXT("detail_level"), DetailLevel == EMonolithSemanticDetailLevel::Full ? TEXT("full") : TEXT("compact"));
 	R->SetStringField(TEXT("sim_target"), ED->SimTarget == ENiagaraSimTarget::GPUComputeSim ? TEXT("GPU") : TEXT("CPU"));
 	R->SetBoolField(TEXT("local_space"), ED->bLocalSpace != 0);
 	R->SetBoolField(TEXT("determinism"), ED->bDeterminism != 0);
+	AppendEmitterSemanticJson(R, Semantic, DetailLevel);
 
 	// Modules per stage
 	TSharedRef<FJsonObject> ModulesObj = MakeShared<FJsonObject>();
@@ -6251,17 +6894,6 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetEmitterSummary(const TSh
 		RendArr.Add(MakeShared<FJsonValueObject>(RO));
 	}
 	R->SetArrayField(TEXT("renderers"), RendArr);
-
-	// Event handlers
-	TArray<TSharedPtr<FJsonValue>> EventArr;
-	for (const FNiagaraEventScriptProperties& ESP : ED->EventHandlerScriptProps)
-	{
-		TSharedRef<FJsonObject> EO = MakeShared<FJsonObject>();
-		EO->SetStringField(TEXT("event_name"), ESP.SourceEventName.ToString());
-		EO->SetStringField(TEXT("source_emitter_id"), ESP.SourceEmitterID.ToString());
-		EventArr.Add(MakeShared<FJsonValueObject>(EO));
-	}
-	R->SetArrayField(TEXT("event_handlers"), EventArr);
 
 	return SuccessObj(R);
 }
@@ -7721,6 +8353,9 @@ FMonolithActionResult FMonolithNiagaraActions::HandleValidateSystem(const TShare
 	FString SystemPath = GetAssetPath(Params);
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
+	const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+	TArray<FMonolithNiagaraTopologyEdge> TopologyEdges;
+	CollectTopologyEdges(System, TopologyEdges);
 
 	TArray<TSharedPtr<FJsonValue>> Errors;
 	TArray<TSharedPtr<FJsonValue>> Warnings;
@@ -7738,12 +8373,25 @@ FMonolithActionResult FMonolithNiagaraActions::HandleValidateSystem(const TShare
 	if (!System->IsValid())
 		Errors.Add(MakeEntry(TEXT("System"), TEXT("System::IsValid() returned false")));
 
-	// Per-emitter checks
-	for (const FNiagaraEmitterHandle& Handle : System->GetEmitterHandles())
+	for (const FMonolithNiagaraTopologyEdge& Edge : TopologyEdges)
 	{
+		if (!Edge.bSourceEmitterResolved)
+		{
+			Warnings.Add(MakeEntry(Edge.TargetEmitterName,
+				FString::Printf(TEXT("Consumes %s but the source emitter could not be resolved from SourceEmitterID '%s'"),
+					*Edge.EventName,
+					*Edge.SourceEmitterId)));
+		}
+	}
+
+	// Per-emitter checks
+	for (int32 EmitterIndex = 0; EmitterIndex < Handles.Num(); ++EmitterIndex)
+	{
+		const FNiagaraEmitterHandle& Handle = Handles[EmitterIndex];
 		FVersionedNiagaraEmitterData* ED = Handle.GetEmitterData();
 		if (!ED) continue;
 		FString EN = Handle.GetName().ToString();
+		const FMonolithNiagaraEmitterSemantic Semantic = AnalyzeEmitterSemantic(System, Handle, EmitterIndex, TopologyEdges);
 
 		// GPU + Light Renderer = error
 		if (ED->SimTarget == ENiagaraSimTarget::GPUComputeSim)
@@ -7942,6 +8590,61 @@ FMonolithActionResult FMonolithNiagaraActions::HandleValidateSystem(const TShare
 					}
 				}
 			}
+		}
+
+		// Event-chain semantics checks
+		if (Semantic.IncomingEvents.Num() > 0)
+		{
+			for (const FMonolithNiagaraTopologyEdge& Incoming : Semantic.IncomingEvents)
+			{
+				bool bSourceGeneratesEvent = false;
+				for (int32 SourceIndex = 0; SourceIndex < Handles.Num(); ++SourceIndex)
+				{
+					if (Handles[SourceIndex].GetId().ToString() != Incoming.SourceEmitterId)
+					{
+						continue;
+					}
+
+					const FMonolithNiagaraEmitterSemantic SourceSemantic = AnalyzeEmitterSemantic(System, Handles[SourceIndex], SourceIndex, TopologyEdges);
+					for (const FMonolithNiagaraEventGeneratorInfo& Generator : SourceSemantic.EventGenerators)
+					{
+						if (Generator.EventName == Incoming.EventName)
+						{
+							bSourceGeneratesEvent = true;
+							break;
+						}
+					}
+					break;
+				}
+
+				if (!bSourceGeneratesEvent && Incoming.bSourceEmitterResolved)
+				{
+					Warnings.Add(MakeEntry(EN,
+						FString::Printf(TEXT("Consumes %s from '%s', but the source emitter does not appear to generate that event"),
+							*Incoming.EventName,
+							*Incoming.SourceEmitterName)));
+				}
+			}
+
+			if (Semantic.SpawnLocationMode == TEXT("mixed_event_and_local_shape"))
+			{
+				Warnings.Add(MakeEntry(EN, TEXT("Emitter consumes incoming events but also has local location modules; placement may still resolve to local origin/shape instead of purely following event payloads")));
+			}
+
+			if (!Semantic.bRequiresPersistentIDs)
+			{
+				Suggestions.Add(MakeEntry(EN, TEXT("Emitter participates in inter-emitter event flow while requires_persistent_ids is false; verify whether source-particle identity must remain stable across frames")));
+			}
+		}
+
+		if (Semantic.RoleHint == TEXT("independent_burst"))
+		{
+			Suggestions.Add(MakeEntry(EN, TEXT("Burst-like emitter has no incoming event handler, so it will spawn independently instead of following another emitter's event location/death position")));
+		}
+
+		if (Semantic.RoleHint == TEXT("burst_receiver") && !Semantic.bRequiresPersistentIDs)
+		{
+			Suggestions.Add(MakeEntry(EN, TEXT("Burst receiver is event-driven but requires_persistent_ids is false; if burst timing/attachment should follow specific source particles, verify persistent ID requirements on the source chain")));
 		}
 	}
 
