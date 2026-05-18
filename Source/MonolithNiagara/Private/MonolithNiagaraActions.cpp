@@ -2666,8 +2666,26 @@ FMonolithActionResult FMonolithNiagaraActions::HandleAddEmitter(const TSharedPtr
 
 	// Use engine's full add-emitter path: AddEmitterHandle + RebuildEmitterNodes + SynchronizeOverviewGraph.
 	// Calling AddEmitterHandle alone leaves the emitter without graph nodes ("Data missing please force a recompile").
+	//
+	// If the source emitter is an emitter subobject owned by another NiagaraSystem, adding it directly keeps
+	// parent/merge chain references back to that foreign system's private emitter object. That can later crash
+	// during save or editor refresh. For embedded emitters, first duplicate without merging so the parent chain is severed.
+	UNiagaraEmitter* SafeEmitterAsset = EmitterAsset;
+	TStrongObjectPtr<UNiagaraEmitter> DetachedEmbeddedEmitter;
+	if (EmitterAsset->GetTypedOuter<UNiagaraSystem>() != nullptr)
+	{
+		DetachedEmbeddedEmitter.Reset(EmitterAsset->DuplicateWithoutMerging(GetTransientPackage()));
+		if (!DetachedEmbeddedEmitter.IsValid())
+		{
+			GEditor->EndTransaction();
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Failed to create detached copy of embedded emitter '%s' before add_emitter"), *EmitterAssetPath));
+		}
+
+		SafeEmitterAsset = DetachedEmbeddedEmitter.Get();
+	}
 	const FGuid NewHandleId = FNiagaraEditorUtilities::AddEmitterToSystem(
-		*System, *EmitterAsset, EmitterAsset->GetExposedVersion().VersionGuid);
+		*System, *SafeEmitterAsset, SafeEmitterAsset->GetExposedVersion().VersionGuid);
 
 	GEditor->EndTransaction();
 
