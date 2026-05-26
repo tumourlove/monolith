@@ -1,0 +1,49 @@
+已在 /Game/00MyFile/FX/fireworks 下创建了一个新的 Niagara 系统：
+
+  /Game/00MyFile/FX/fireworks/NS_Fireworks_FromMCP.NS_Fireworks_FromMCP
+
+  我按“一个粒子向上飞，然后爆炸，不引用其他资产、纯新做”的要求，用 MCP 从零搭了两段结构：
+  Rocket 负责上升并发送 DeathEvent
+  Burst 负责接收 DeathEvent 并生成爆炸粒子
+
+  验证结果不是完全通过，发现了几个明确问题，按严重性列出来：
+
+  1. Rocket 编译失败，核心报错是 GenerateDeathEvent 使用了 Particles.ID，但发射器没有开启 requires_persistent_ids。
+     这会直接导致当前系统 System::IsValid() == false，所以这条“火箭死亡触发爆炸”的链路在当前工具流程下没有完全跑通。
+     诊断原文核心意思是：
+     在使用Particles.ID参数之前，必须在发射器属性中启用“需要持久ID”选项。
+  2. ReceiveDeathEvent 的输入读取和写入能力不一致。
+     get_module_inputs 能看到这些可配置项：
+     Position (Vector 1)
+     Velocity (Vector 2)
+     Color (Linear Color)
+     但 set_module_input_value 去写这些同名输入时会报“Input not found”，只认：
+     Apply RGB
+     Apply Alpha
+     Inherited Velocity Scale
+     我最后只能改用 set_static_switch_value 才把这些事件 payload 开关设置成功。
+     这说明对 ReceiveDeathEvent 这类模块，读接口和写接口的行为不一致，是一个明确工具问题。
+  3. create_emitter 创建成功，但默认最小发射器没有任何 spawn 模块。
+     validate_system 一开始直接报：
+     No spawn module found — emitter will produce no particles
+     这个未必算 bug，但如果你的预期是“新建最小 emitter 至少能出粒子”，那当前行为需要注意。
+  4. get_module_script_inputs 对很多内置 Niagara 模块只返回 InputMap，拿不到真实可写参数。
+     比如：
+     AddVelocity
+     GravityForce
+     GenerateDeathEvent
+     都是这样。
+     实际要配置参数，必须先 add_module 到 emitter，再用实例级 get_module_inputs 读取。
+     这意味着脚本级 introspection 目前不足以支持完整自动装配。
+
+  其他结论：
+  事件链拓扑识别是通的。get_system_summary 已经能正确识别：
+  Rocket -> DeathEvent -> Burst
+  Burst 也被识别成 event_driven 的 burst_receiver
+  预览接口是通的，已成功出图到：
+  G:/Project/MyProject/Saved/Screenshots/Monolith/20260519_171548_NS_Fireworks_FromMCP.png
+
+  所以最终结论是：这次 MCP 验证“部分可用，但未完全通过”。
+  真正卡住落地的是两点：
+  GenerateDeathEvent 触发链依赖 persistent IDs，而当前自动搭建流程没补这个必要设置
+  ReceiveDeathEvent 的 payload 开关只能用 set_static_switch_value 改，set_module_input_value 对同一字段失效

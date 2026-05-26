@@ -41,6 +41,8 @@ These exist because Epic's `FNiagaraStackGraphUtilities` functions lack `NIAGARA
 > **Param name aliases:** The canonical param names registered in schemas are `module_node` and `input`. All module write actions also accept these aliases: `module_node` → `module_name`, `module`; `input` → `input_name`. Use the canonical names when possible — aliases exist for backward compatibility.
 >
 > **Emitter name matching:** `FindEmitterHandleIndex` does NOT auto-select a single emitter when a specific non-matching name is passed. If a name is provided it must match exactly (case-insensitive). Numeric index strings (`"0"`, `"1"`, etc.) are also accepted as a fallback.
+>
+> **Event handler note:** `add_event_handler` only creates the event handler and its `ParticleEventScript` container. It does **not** auto-add `ReceiveDeathEvent` / `ReceiveLocationEvent` modules. To consume source payloads such as `Position`, `Velocity`, or `Color`, target the handler with `usage: "particle_event"` plus `usage_id` or `handler_index`, add the matching `Receive<Event>` module, then set the required payload switches to `Apply`. For fireworks and other death-triggered bursts, `Position` usually must be `Apply`.
 
 **System (14)**
 | Action | Description |
@@ -63,10 +65,10 @@ These exist because Epic's `FNiagaraStackGraphUtilities` functions lack `NIAGARA
 **Module (13)**
 | Action | Description |
 |--------|-------------|
-| `get_ordered_modules` | Get ordered modules in a script stage |
+| `get_ordered_modules` | Get ordered modules in a script stage. Supports standard stages plus `usage: "particle_event"` with `usage_id`/`handler_index` and `usage: "particle_simulation_stage"` with `usage_id`/`stage_name`/`stage_index` |
 | `get_module_inputs` | Get all inputs (floats, vectors, colors, data interfaces, enums, bools) with override values, linked params, and actual DI curve data. Uses engine's `FNiagaraStackGraphUtilities::GetStackFunctionInputs`. Returns short names (no `Module.` prefix). LinearColor/vector defaults deserialized from JSON string if needed |
 | `get_module_graph` | Node graph of a module script |
-| `add_module` | Add module to script stage (uses FNiagaraStackGraphUtilities) |
+| `add_module` | Add module to script stage (uses FNiagaraStackGraphUtilities). Supports `usage: "particle_event"` with `usage_id`/`handler_index` and `usage: "particle_simulation_stage"` with `usage_id`/`stage_name`/`stage_index`. Adding `GenerateDeathEvent` to `particle_update` auto-enables `requires_persistent_ids` on the emitter |
 | `remove_module` | Remove module from stack |
 | `move_module` | Move module to new index (remove+re-add — **loses input overrides**) |
 | `set_module_enabled` | Enable/disable a module |
@@ -74,7 +76,7 @@ These exist because Epic's `FNiagaraStackGraphUtilities` functions lack `NIAGARA
 | `set_module_input_binding` | Bind input to a parameter |
 | `set_module_input_di` | Set data interface on input. Required: `di_class` (class name — `U` prefix optional, e.g. `NiagaraDataInterfaceCurve` or `UNiagaraDataInterfaceCurve`), optional `config` object (supports FRichCurve keys for curve DIs). Validates input exists and is DataInterface type. Accepts both short names and `Module.`-prefixed names |
 | `set_static_switch_value` | Set a static switch value on a module |
-| `create_module_from_hlsl` | Create a Niagara module script from custom HLSL. Params: `name`, `save_path`, `hlsl` (body), optional `inputs[]`/`outputs[]` (`{name, type}` objects), `description`. **HLSL body rules:** use bare input/output names (no `Module.` prefix — compiler adds `In_`/`Out_` automatically). Write particle attributes via `Particles.X` ParameterMap tokens directly in the body. No swizzle via dot on map variables. |
+| `create_module_from_hlsl` | Create a Niagara module script from custom HLSL. Params: `name`, `save_path`, `hlsl` (body), optional `inputs[]`/`outputs[]` (`{name, type}` objects), `description`. **HLSL body rules:** (1) Use bare input/output names (no `Module.` prefix — compiler adds `In_`/`Out_` automatically). (2) **GPU ONLY**: Can write particle attributes via `Particles.X` ParameterMap tokens (e.g., `Particles.Velocity`, `Particles.Position`) — MUST wrap in `#if GPU_SIMULATION ... #endif`. CPU simulation does NOT support `Particles.*` syntax; use output parameters instead. (3) CAN access Data Interface (DI) functions if a DI is passed as input (e.g., Grid3D input enables `GetPreviousValueAtIndex`, `SamplePreviousGridVectorValue` — see `Niagara_Grid_HLSL_API_Reference.md`). (4) No swizzle via dot on map variables. |
 | `create_function_from_hlsl` | Create a Niagara function script from custom HLSL. Same params as `create_module_from_hlsl`. Script usage is set to `Function` instead of `Module`. |
 
 **Parameter (9)**
@@ -142,6 +144,7 @@ These exist because Epic's `FNiagaraStackGraphUtilities` functions lack `NIAGARA
 **Event Handlers (3)**
 | Action | Description |
 |--------|-------------|
+| `add_event_handler` | Add an inter-emitter event handler. `source_emitter` must be provided for inter-emitter links; unresolved handlers are rejected. Returns `handler_index` and `usage_id` for the new `ParticleEventScript`. Does not auto-add `Receive<Event>` modules |
 | `get_event_handlers` | Get all event handlers on an emitter |
 | `set_event_handler_property` | Set a property on an event handler |
 | `remove_event_handler` | Remove an event handler from an emitter |

@@ -687,8 +687,14 @@ TSharedPtr<FJsonObject> FMonolithHttpServer::HandleToolsCall(const TSharedPtr<FJ
 			FString::Printf(TEXT("Unknown tool: %s"), *ToolName));
 	}
 
+	// Record start time for duration measurement without shadowing the server start timestamp member.
+	double ActionStartTimeSeconds = FPlatformTime::Seconds();
+
 	// Execute via registry
 	FMonolithActionResult ActionResult = FMonolithToolRegistry::Get().ExecuteAction(Namespace, Action, Arguments);
+
+	// Calculate duration
+	double DurationMs = (FPlatformTime::Seconds() - ActionStartTimeSeconds) * 1000.0;
 
 	// Build MCP tool result
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();

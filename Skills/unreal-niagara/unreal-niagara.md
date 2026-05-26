@@ -39,6 +39,14 @@ Agents can call `material_query("render_preview", { "asset_path": "/Game/SomeTex
 ### Module Stage Info from get_ordered_modules
 `get_ordered_modules` already returns a `usage` field per module indicating which stage it belongs to (e.g. `"Emitter Update"`, `"Particle Spawn"`). There is no need for a separate stage query — the stage is included in the standard module listing.
 
+For selector-based shared-graph stages, pass an explicit selector when needed:
+- `usage: "particle_simulation_stage"` with `usage_id`, `stage_name`, or `stage_index`
+- `usage: "particle_event"` with `usage_id` or `handler_index`
+
+`add_event_handler` only creates the handler and its `ParticleEventScript` container. It does **not** auto-add `ReceiveDeathEvent` / `ReceiveLocationEvent`. For event-driven effects like fireworks, add the matching `Receive<Event>` module to the `particle_event` script and set required payload fields such as `Position` to `Apply`.
+
+When `GenerateDeathEvent` is added to `particle_update`, the tool now auto-enables `requires_persistent_ids` on that emitter. `validate_system` also reports a direct error if `GenerateDeathEvent` is present while `requires_persistent_ids` is still false.
+
 ### Available Parameters with Usage Filter
 `get_available_parameters` with `usage: "particle"` lists all particle attributes including compiled emitter attributes. This is the fastest way to discover what bindings are available without inspecting individual modules.
 
@@ -70,7 +78,7 @@ Agents can call `material_query("render_preview", { "asset_path": "/Game/SomeTex
 | `list_systems` | `search`?, `path`?, `limit`? | Search/list NiagaraSystem assets, optional path and keyword filter |
 | `list_renderer_properties` | `asset_path`, `emitter`, `renderer` | List editable properties on a renderer |
 | `list_emitter_properties` | `asset_path`, `emitter` | Discover what set_emitter_property accepts (reflection-based) |
-| `get_ordered_modules` | `asset_path`, `emitter` | Get modules with GUIDs and `usage` stage field (needed for module actions) |
+| `get_ordered_modules` | `asset_path`, `emitter`, `usage`?, `usage_id`?, `handler_index`?, `stage_name`?, `stage_index`? | Get modules with GUIDs and `usage` stage field (needed for module actions) |
 | `get_system_diagnostics` | `asset_path` | Compile errors, warnings, incompatibility checks |
 | `get_system_summary` | `asset_path` | One-call overview: emitters, user params, module counts, renderer types |
 | `get_emitter_summary` | `asset_path`, `emitter` | Deep emitter view: modules per stage, renderers, event handlers |
@@ -102,7 +110,7 @@ Agents can call `material_query("render_preview", { "asset_path": "/Game/SomeTex
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
 | `get_module_inputs` | `asset_path`, `emitter`, `module_node` | List all inputs on a module (includes DI curve data; returns short names) |
-| `add_module` | `asset_path`, `emitter`, `module_path`, `stage` | Add a module to an emitter stage |
+| `add_module` | `asset_path`, `emitter`, `usage`, `module_script`, `usage_id`?, `handler_index`?, `stage_name`?, `stage_index`? | Add a module to an emitter stage, including `particle_event` and simulation-stage scripts |
 | `remove_module` | `asset_path`, `emitter`, `module_node` | Remove a module |
 | `clear_emitter_modules` | `asset_path`, `emitter`, `usage`? | Remove ALL modules from an emitter (optionally filter by stage) |
 | `move_module` | `asset_path`, `emitter`, `module_node`, `new_index` | Reorder a module (preserves input overrides) |
@@ -151,7 +159,7 @@ Agents can call `material_query("render_preview", { "asset_path": "/Game/SomeTex
 ### Event Handlers (4)
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
-| `add_event_handler` | `asset_path`, `emitter`, `event_name`, `source_emitter`? | Add inter-emitter event handler |
+| `add_event_handler` | `asset_path`, `emitter`, `event_name`, `source_emitter` | Add inter-emitter event handler. `source_emitter` is required for cross-emitter links. Returns `handler_index` + `usage_id`, but does not auto-add `Receive<Event>` modules |
 | `get_event_handlers` | `asset_path`, `emitter` | Read all event handlers with full properties |
 | `set_event_handler_property` | `asset_path`, `emitter`, `handler_index`/`usage_id`, `property`, `value` | Modify event handler property |
 | `remove_event_handler` | `asset_path`, `emitter`, `handler_index`/`usage_id` | Remove an event handler |
@@ -232,12 +240,73 @@ Agents can call `material_query("render_preview", { "asset_path": "/Game/SomeTex
 **Input/output format:** `[{"name": "InValue", "type": "float"}, {"name": "Velocity", "type": "vec3"}]`
 **Supported types:** `float`, `int`, `bool`, `vec2`, `vec3`, `vec4`, `color`, `position`, `quat`, `matrix`
 
-**HLSL body rules:**
-- Use bare input names in HLSL (e.g. `InValue`, NOT `Module.InValue`)
-- **Outputs must use bare names** (e.g. `OutValue`, NOT `Particles.Color`) — dots in output names generate broken HLSL (`Out_Particles.Color` → struct member access parse error)
-- To write particle attributes, write directly to `Particles.X` in the HLSL body (ParameterMap resolution handles it) — don't put them in the outputs array
-- The compiler generates `In_X` for inputs and `Out_X` for outputs internally
-- Can't swizzle ParameterMap variables directly (`Particles.Color.xyz` is one token) — assign to local first: `float4 C = Particles.Color;`
+**CRITICAL: Before writing HLSL, read `Plugins/Monolith/Docs/specs/SPEC_MonolithNiagara.md` section on `create_module_from_hlsl` for complete HLSL body rules.**
+
+**HLSL body rules (summary):**
+1. **Input/output variables are auto-declared** — do NOT redeclare them. Niagara injects pins into the generated shader scope automatically.
+2. **Custom HLSL is injected inside an existing function body** — global variables, bare functions, namespaces, and `::` static calls are invalid.
+3. **Functions must be wrapped in a struct** — instantiate structs explicitly before calling methods.
+4. **Struct methods cannot access outer-scope variables directly** — always pass all inputs, constants, and Data Interfaces explicitly as parameters.
+5. **GPU ONLY: Can write particle attributes via `Particles.*`** — In GPU simulation, you CAN directly read/write `Particles.Velocity`, `Particles.Position`, etc. MUST wrap in `#if GPU_SIMULATION ... #endif`. CPU simulation does NOT support `Particles.*` syntax; use output parameters instead.
+6. **CAN access Data Interface functions** — if a DI is passed as input, its API functions can be called (e.g. `SamplePreviousGridVector3Value`).
+7. **Grid attribute names use strings** — `"Velocity"` in Grid API calls is a Grid channel/attribute name, NOT an output variable reference.
+8. **DI sampling behaves like GPU resource access** — `SamplePrevious*` reads previous-frame simulation state, not current-frame writes.
+9. **GPU-only code must use conditional compilation** — wrap GPU-only APIs with `#if GPU_SIMULATION ... #endif`.
+10. **Output variables need default values** — assign valid defaults BEFORE any `#if GPU_SIMULATION` block so CPU fallback paths remain valid.
+11. **Niagara HLSL requires strict type matching** — avoid implicit casts between `float`, `float2`, `float3`, `int`, `bool`, etc.
+12. **Use unique struct names** — avoid generic names like `FMath` to prevent generated shader symbol collisions across Custom nodes.
+**Example 1 (GPU-only with Particles.* write):**
+```hlsl
+// Inputs:
+// Strength        (float)
+
+// GPU-only module that directly writes to Particles.Velocity
+#if GPU_SIMULATION
+float3 CurrentPos = Particles.Position;
+Particles.Velocity = normalize(CurrentPos) * Strength;
+#endif
+```
+
+**Example 2 (CPU/GPU compatible with output parameters):**
+```hlsl
+// Inputs:
+// Grid3D          (NiagaraDataInterfaceGrid3D)
+// Strength        (float)
+// GridMin         (float3)
+// GridSize        (float3)
+// Position        (float3)
+
+// Outputs:
+// OutVelocity     (float3)
+OutVelocity = float3(0,0,0);
+#if GPU_SIMULATION
+struct FMyMath
+{
+    float3 SampleGrid(
+        NiagaraDataInterfaceGrid3D Grid,
+        float3 Pos,
+        float3 InGridMin,
+        float3 InGridSize)
+    {
+        float3 UnitPos = (Pos - InGridMin) / InGridSize;
+
+        return Grid.SamplePreviousGridVector3Value(
+            UnitPos,
+            "Velocity"
+        );
+    }
+};
+FMyMath MathUtil;
+OutVelocity =
+    MathUtil.SampleGrid(
+        Grid3D,
+        Position,
+        GridMin,
+        GridSize
+    ) * Strength;
+
+#endif
+```
 
 ## Common Workflows
 
@@ -357,7 +426,7 @@ When creating fire+light effects, do NOT put the Light Renderer on a GPU emitter
 - User parameters are the main interface for Blueprint/C++ control of effects
 - Parameter actions now accept the `User.` prefix (e.g. `User.MyParam`) in addition to bare names
 - `di_class` for `set_module_input_di` accepts both `UNiagaraDataInterfaceCurve` and `NiagaraDataInterfaceCurve` — U prefix is optional (auto-resolved)
-- `create_module_from_hlsl` / `create_function_from_hlsl`: use bare input/output names (no dots — `InColor` not `Module.InColor`). Write to particle attributes via `Particles.X` in the HLSL body. Inputs are fully overridable via `set_module_input_value` after adding to a system.
+- **HLSL modules:** Before writing custom HLSL, ALWAYS read `Plugins/Monolith/Docs/specs/SPEC_MonolithNiagara.md` for complete rules. **Key CPU/GPU difference:** GPU simulation CAN directly write `Particles.Velocity`, `Particles.Position`, etc. (must wrap in `#if GPU_SIMULATION`). CPU simulation does NOT support `Particles.*` syntax — use output parameters instead. See `Plugins/Monolith/Docs/Niagara_Grid_HLSL_API_Reference.md` for Grid DI API reference.
 - When creating VFX, always dispatch material agent FIRST, then assign materials after they're created
 - Verify materials exist before assigning them to renderers
 

@@ -1,14 +1,15 @@
 #pragma once
 
 #include "Modules/ModuleManager.h"
+#include "MonolithHttpServer.h"
 
 #define MONOLITH_VERSION TEXT("0.14.10")
-
-class FMonolithHttpServer;
 
 class MONOLITHCORE_API FMonolithCoreModule : public IModuleInterface
 {
 public:
+	FMonolithCoreModule();
+	virtual ~FMonolithCoreModule() override;
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
 

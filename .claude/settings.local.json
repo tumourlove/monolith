@@ -1,0 +1,6 @@
+{
+  "enabledMcpjsonServers": [
+    "monolith"
+  ],
+  "enableAllProjectMcpServers": true
+}

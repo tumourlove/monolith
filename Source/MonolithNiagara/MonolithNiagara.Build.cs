@@ -1,3 +1,4 @@
+using System.IO;
 using UnrealBuildTool;
 
 public class MonolithNiagara : ModuleRules
@@ -26,6 +27,11 @@ public class MonolithNiagara : ModuleRules
 			"AssetTools",
 			"Slate",
 			"SlateCore"
+		});
+
+		PrivateIncludePaths.AddRange(new string[]
+		{
+			Path.Combine(EngineDirectory, "Plugins/FX/Niagara/Source/NiagaraEditor/Private")
 		});
 	}
 }

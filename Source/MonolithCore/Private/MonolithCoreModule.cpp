@@ -17,6 +17,9 @@ static FAutoConsoleCommand GMonolithRestartCmd(
 	FConsoleCommandDelegate::CreateStatic(&FMonolithCoreModule::RestartHttpServer)
 );
 
+FMonolithCoreModule::FMonolithCoreModule() = default;
+FMonolithCoreModule::~FMonolithCoreModule() = default;
+
 void FMonolithCoreModule::StartupModule()
 {
 	UE_LOG(LogMonolith, Log, TEXT("Monolith %s — Core module initializing"), MONOLITH_VERSION);
