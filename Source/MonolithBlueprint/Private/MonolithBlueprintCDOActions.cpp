@@ -3,6 +3,10 @@
 #include "MonolithJsonUtils.h"
 #include "MonolithParamSchema.h"
 #include "MonolithAssetUtils.h"
+#include "MonolithBulkFillRegistry.h"
+#include "MonolithBulkFillTypes.h"
+#include "Reflection/MonolithReflectionWalker.h"
+#include "Reflection/MonolithDryRunGuard.h"
 #include "UObject/UnrealType.h"
 #include "Engine/Blueprint.h"
 #include "Kismet2/BlueprintEditorUtils.h"
@@ -12,6 +16,13 @@
 #include "StructUtils/InstancedStruct.h"
 #include "ScopedTransaction.h"
 #include "MonolithBlueprintEditCradle.h"
+
+// Forward declaration of Phase 1 handlers (defined at bottom of file).
+namespace MonolithCDOPhase1Internal
+{
+	FMonolithActionResult HandleSetCDOProperties(const TSharedPtr<FJsonObject>& Params);
+	FMonolithActionResult HandleDescribeCDOSchema(const TSharedPtr<FJsonObject>& Params);
+}
 
 // --- Registration ---
 
@@ -40,6 +51,36 @@ void FMonolithBlueprintCDOActions::RegisterActions(FMonolithToolRegistry& Regist
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint or UObject asset path (e.g. /Game/Data/DA_MyData)"))
 			.Required(TEXT("property_name"), TEXT("string"), TEXT("Property name to set (case-insensitive fallback)"))
 			.Required(TEXT("value"), TEXT("any"), TEXT("New value — string, number, bool, or ImportText format for structs (e.g. \"(X=1.0,Y=2.0,Z=3.0)\")"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("If true, validate only — emit the would-be write but do not persist. Phase 1."), TEXT("false"))
+			.Optional(TEXT("strict"), TEXT("boolean"), TEXT("If true, promote silent drops / clamps / unknown-fields to hard errors. Phase 1."), TEXT("false"))
+			.Build());
+
+	// --- Phase 1: bulk_fill plural sibling to set_cdo_property.
+	// Routes through FMonolithBulkFillRegistry's "blueprint" adapter. Feature parity
+	// with the central `bulk_fill.apply` action — exists in the "blueprint" namespace
+	// for call-shape familiarity with existing single-key callers.
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("set_cdo_properties"),
+		TEXT("Bulk-fill multiple CDO properties from a JSON tree in a single transaction. "
+			 "Supports nested structs, arrays, maps, sets, enums, and soft-object refs. "
+			 "Supports dry_run + strict. Phase 1 pilot of the bulk_fill framework."),
+		FMonolithActionHandler::CreateStatic(&MonolithCDOPhase1Internal::HandleSetCDOProperties),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint or UObject asset path (e.g. /Game/Data/DA_MyData)"))
+			.Required(TEXT("properties"), TEXT("object"), TEXT("Nested JSON object — keys are property names, values are scalars / structs / arrays / maps / sets per UPROPERTY layout."))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("If true, validate only — emit the would-be writes but do not persist."), TEXT("false"))
+			.Optional(TEXT("strict"), TEXT("boolean"), TEXT("If true, promote silent drops / clamps / unknown-fields to hard errors."), TEXT("false"))
+			.Build());
+
+	// --- Phase 1: describe — emits the FSchemaDescriptor tree (type names, ImportText
+	// grammar examples, enum-value lists, clamp ranges, nested children) for an asset's
+	// CDO. Counterpart to get_cdo_properties when the caller needs the schema, not the
+	// current values.
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("describe_cdo_schema"),
+		TEXT("Return the rich FSchemaDescriptor tree for a Blueprint CDO / UObject asset. "
+			 "Use to discover legal types, ImportText forms, enum-value lists, clamp ranges, and nested struct/array/map children before calling set_cdo_property or set_cdo_properties."),
+		FMonolithActionHandler::CreateStatic(&MonolithCDOPhase1Internal::HandleDescribeCDOSchema),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint or UObject asset path (e.g. /Game/Data/DA_MyData)"))
 			.Build());
 }
 
@@ -406,6 +447,36 @@ FMonolithActionResult FMonolithBlueprintCDOActions::HandleSetCDOProperty(const T
 	FString OldValue;
 	Prop->ExportText_Direct(OldValue, ValuePtr, ValuePtr, TargetObject, PPF_None);
 
+	// --- Phase 1: dry_run branch.
+	// If dry_run=true, route through the reflection walker's InspectTree (read-only)
+	// and return the FDryRunReport without entering the engine edit cradle. The
+	// guard pulls dry_run + strict from Params per FMonolithDryRunGuard contract.
+	FMonolithDryRunGuard DryRunGuard(Params);
+	if (DryRunGuard.IsDryRun())
+	{
+		// Bind the single-property tree the walker expects.
+		const TSharedPtr<FJsonValue> JsonValForDryRun = Params->TryGetField(TEXT("value"));
+		if (!JsonValForDryRun.IsValid())
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("dry_run: 'value' field missing or null for property '%s'"), *PropertyName));
+		}
+
+		FBulkFillSpec Spec;
+		Spec.TargetNamespace = TEXT("blueprint");
+		Spec.TargetAsset = AssetPath;
+		Spec.Tree = MakeShared<FJsonObject>();
+		// Use the actual (case-corrected) property name resolved above, so the
+		// walker's exact-then-case-insensitive lookup matches the same FProperty.
+		Spec.Tree->SetField(Prop->GetName(), JsonValForDryRun);
+		Spec.bDryRun = true;
+		Spec.bStrict = DryRunGuard.IsStrict();
+
+		const FDryRunReport Report = FMonolithReflectionWalker::InspectTree(
+			Spec.Tree, TargetClass, TargetObject, Spec);
+		return DryRunGuard.MakeDryRunResponse(Report);
+	}
+
 	// --- Engine edit cradle (matches Details panel write path) ---
 	// Without this, cross-package TObjectPtr refs survive in memory but get silently
 	// dropped by FLinkerSave's harvest walk on the next save (#29). The Details panel's
@@ -508,3 +579,121 @@ FMonolithActionResult FMonolithBlueprintCDOActions::HandleSetCDOProperty(const T
 
 	return FMonolithActionResult::Success(Root);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 1 — set_cdo_properties (plural) + describe_cdo_schema
+// Thin wrappers that route through FMonolithBulkFillRegistry's "blueprint"
+// adapter (registered from FMonolithBlueprintModule::StartupModule).
+// ---------------------------------------------------------------------------
+
+namespace MonolithCDOPhase1Internal
+{
+	FMonolithActionResult HandleSetCDOProperties(const TSharedPtr<FJsonObject>& Params)
+	{
+		if (!Params.IsValid())
+		{
+			return FMonolithActionResult::Error(TEXT("set_cdo_properties requires params"));
+		}
+
+		FBulkFillSpec Spec;
+		Spec.TargetNamespace = TEXT("blueprint");
+		Params->TryGetStringField(TEXT("asset_path"), Spec.TargetAsset);
+
+		if (Spec.TargetAsset.IsEmpty())
+		{
+			return FMonolithActionResult::Error(
+				TEXT("set_cdo_properties requires 'asset_path'"),
+				FMonolithJsonUtils::ErrInvalidParams);
+		}
+
+		// 'properties' is the JSON tree of property names -> values. Required.
+		const TSharedPtr<FJsonObject>* TreePtr = nullptr;
+		if (!Params->TryGetObjectField(TEXT("properties"), TreePtr) || !TreePtr || !TreePtr->IsValid())
+		{
+			return FMonolithActionResult::Error(
+				TEXT("set_cdo_properties requires 'properties' (JSON object of prop_name -> value)"),
+				FMonolithJsonUtils::ErrInvalidParams);
+		}
+		Spec.Tree = *TreePtr;
+
+		Params->TryGetBoolField(TEXT("dry_run"), Spec.bDryRun);
+		Params->TryGetBoolField(TEXT("strict"), Spec.bStrict);
+
+		if (!FMonolithBulkFillRegistry::Get().HasAdapter(TEXT("blueprint")))
+		{
+			return FMonolithActionResult::Error(
+				TEXT("blueprint bulk_fill adapter is not registered — module init order issue"),
+				FMonolithJsonUtils::ErrInternalError);
+		}
+
+		const FDryRunReport Report = FMonolithBulkFillRegistry::Get().DispatchBulkFill(Spec);
+		return FMonolithActionResult::Success(FMonolithDryRunGuard::ReportToJson(Report));
+	}
+
+	FMonolithActionResult HandleDescribeCDOSchema(const TSharedPtr<FJsonObject>& Params)
+	{
+		if (!Params.IsValid())
+		{
+			return FMonolithActionResult::Error(TEXT("describe_cdo_schema requires params"));
+		}
+
+		FString AssetPath;
+		Params->TryGetStringField(TEXT("asset_path"), AssetPath);
+		if (AssetPath.IsEmpty())
+		{
+			return FMonolithActionResult::Error(
+				TEXT("describe_cdo_schema requires 'asset_path'"),
+				FMonolithJsonUtils::ErrInvalidParams);
+		}
+
+		if (!FMonolithBulkFillRegistry::Get().HasAdapter(TEXT("blueprint")))
+		{
+			return FMonolithActionResult::Error(
+				TEXT("blueprint describe adapter is not registered — module init order issue"),
+				FMonolithJsonUtils::ErrInternalError);
+		}
+
+		const FSchemaDescriptor Root = FMonolithBulkFillRegistry::Get().DispatchDescribe(
+			TEXT("blueprint"), AssetPath);
+
+		// Serialise the descriptor tree to JSON. We mirror the central dispatcher's
+		// shape (MonolithBulkFillActions.cpp::DescriptorToJson) but inline a tiny
+		// recursive emitter here to avoid coupling this module to MonolithCore's
+		// private Actions/ folder.
+		TFunction<TSharedPtr<FJsonObject>(const FSchemaDescriptor&)> ToJson =
+			[&ToJson](const FSchemaDescriptor& Desc) -> TSharedPtr<FJsonObject>
+		{
+			TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+			O->SetStringField(TEXT("field_path"), Desc.FieldPath);
+			O->SetStringField(TEXT("type_name"), Desc.TypeName);
+			O->SetStringField(TEXT("import_text_form"), Desc.ImportTextForm);
+			O->SetBoolField(TEXT("required"), Desc.bRequired);
+			O->SetBoolField(TEXT("set_once"), Desc.bSetOnce);
+			O->SetBoolField(TEXT("pie_blocked"), Desc.bPieBlocked);
+			if (!Desc.ConditionalOn.IsEmpty())
+			{
+				O->SetStringField(TEXT("conditional_on"), Desc.ConditionalOn);
+			}
+			O->SetNumberField(TEXT("range_min"), Desc.RangeMin);
+			O->SetNumberField(TEXT("range_max"), Desc.RangeMax);
+			if (Desc.EnumValues.Num() > 0)
+			{
+				TArray<TSharedPtr<FJsonValue>> Vals;
+				for (const FString& E : Desc.EnumValues) { Vals.Add(MakeShared<FJsonValueString>(E)); }
+				O->SetArrayField(TEXT("enum_values"), Vals);
+			}
+			if (Desc.Children.Num() > 0)
+			{
+				TArray<TSharedPtr<FJsonValue>> Kids;
+				for (const FSchemaDescriptor& C : Desc.Children)
+				{
+					Kids.Add(MakeShared<FJsonValueObject>(ToJson(C)));
+				}
+				O->SetArrayField(TEXT("children"), Kids);
+			}
+			return O;
+		};
+
+		return FMonolithActionResult::Success(ToJson(Root));
+	}
+} // namespace MonolithCDOPhase1Internal

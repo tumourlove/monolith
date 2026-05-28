@@ -19,7 +19,7 @@ void FMonolithBlueprintGraphActions::RegisterActions(FMonolithToolRegistry& Regi
 		FMonolithActionHandler::CreateStatic(&HandleAddFunction),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
-			.Required(TEXT("name"), TEXT("string"), TEXT("Function name"))
+			.Required(TEXT("name"), TEXT("string"), TEXT("Function name"), {TEXT("function_name")})
 			.Optional(TEXT("is_pure"), TEXT("bool"), TEXT("Mark as pure (no exec pins)"), TEXT("false"))
 			.Optional(TEXT("is_const"), TEXT("bool"), TEXT("Mark as const"), TEXT("false"))
 			.Optional(TEXT("is_static"), TEXT("bool"), TEXT("Mark as static"), TEXT("false"))
@@ -29,6 +29,14 @@ void FMonolithBlueprintGraphActions::RegisterActions(FMonolithToolRegistry& Regi
 			.Optional(TEXT("access"), TEXT("string"), TEXT("Access specifier: Public, Protected, or Private"), TEXT("Public"))
 			.Optional(TEXT("replication"), TEXT("string"), TEXT("Replication mode: none, multicast, server, client (default: none)"))
 			.Optional(TEXT("reliable"), TEXT("bool"), TEXT("Use reliable replication (default: false)"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("override_parent_function"),
+		TEXT("Author a Blueprint override of an overridable parent function (BlueprintImplementableEvent / BlueprintNativeEvent), including those that RETURN a value (e.g. UCommonActivatableWidget::BP_GetDesiredFocusTarget -> UWidget*). add_function cannot do this and the event-node form has no ReturnValue pin. Declaring class is resolved generically by name. Returns graph_name, entry_node_id, return_pin_id/name, override_class, has_return_value."),
+		FMonolithActionHandler::CreateStatic(&HandleOverrideParentFunction),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
+			.Required(TEXT("parent_function_name"), TEXT("string"), TEXT("Name of the overridable parent function"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("remove_function"),
@@ -258,6 +266,118 @@ FMonolithActionResult FMonolithBlueprintGraphActions::HandleAddFunction(const TS
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetStringField(TEXT("graph_name"), NewGraph->GetName());
 	Root->SetNumberField(TEXT("node_count"), NewGraph->Nodes.Num());
+	return FMonolithActionResult::Success(Root);
+}
+
+// --- override_parent_function (gap #6) ---
+// Authors a Blueprint override of a parent BlueprintImplementableEvent / BlueprintNativeEvent
+// that RETURNS a value (e.g. UCommonActivatableWidget::BP_GetDesiredFocusTarget -> UWidget*).
+// add_function can't do this (it makes a fresh graph, ignoring the parent signature) and the
+// event-node form has no ReturnValue pin by design. Engine-generic: the declaring class is
+// resolved by name via GetOverrideFunctionClass — nothing hardcoded.
+
+FMonolithActionResult FMonolithBlueprintGraphActions::HandleOverrideParentFunction(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	UBlueprint* BP = MonolithBlueprintInternal::LoadBlueprintFromParams(Params, AssetPath);
+	if (!BP)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	}
+
+	FString ParentFuncName = Params->GetStringField(TEXT("parent_function_name"));
+	if (ParentFuncName.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: parent_function_name"));
+	}
+
+	// Resolve the parent class that DECLARES this overridable function.
+	// Mirrors engine BlueprintEditor.cpp:6857-6870 / DataprepEditorUtils.cpp:211.
+	UFunction* OverrideFunc = nullptr;
+	UClass* const OverrideFuncClass =
+		FBlueprintEditorUtils::GetOverrideFunctionClass(BP, FName(*ParentFuncName), &OverrideFunc);
+
+	if (!OverrideFuncClass || !OverrideFunc)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("'%s' is not an overridable function on the parent of %s (not found, or not a BlueprintImplementableEvent / BlueprintNativeEvent)."),
+			*ParentFuncName, *BP->GetName()));
+	}
+
+	// Reject if an override graph with this name already exists.
+	for (const UEdGraph* Existing : BP->FunctionGraphs)
+	{
+		if (Existing && Existing->GetName() == ParentFuncName)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Override function graph already exists: %s"), *ParentFuncName));
+		}
+	}
+
+	UEdGraph* NewGraph = FBlueprintEditorUtils::CreateNewGraph(
+		BP, FName(*ParentFuncName), UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
+	if (!NewGraph)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Failed to create override graph: %s"), *ParentFuncName));
+	}
+
+	// Override authoring uses the <UClass> template + the declaring class with
+	// bIsUserCreated=false. (The <UFunction> overload is copy-signature, NOT override —
+	// the gaps-doc had this backwards.) The entry/result nodes inherit the parent signature,
+	// so a value-returning override gets its ReturnValue pin.
+	FBlueprintEditorUtils::AddFunctionGraph<UClass>(BP, NewGraph, /*bIsUserCreated=*/false, OverrideFuncClass);
+
+	UK2Node_FunctionEntry* EntryNode = nullptr;
+	UK2Node_FunctionResult* ResultNode = nullptr;
+	for (UEdGraphNode* Node : NewGraph->Nodes)
+	{
+		if (!EntryNode)  EntryNode  = Cast<UK2Node_FunctionEntry>(Node);
+		if (!ResultNode) ResultNode = Cast<UK2Node_FunctionResult>(Node);
+	}
+
+	// Locate the ReturnValue pin on the result node (the whole point of #6 vs the event form).
+	FString ReturnPinId;
+	FString ReturnPinName;
+	if (ResultNode)
+	{
+		UEdGraphPin* ReturnPin = nullptr;
+		for (UEdGraphPin* Pin : ResultNode->Pins)
+		{
+			if (Pin && Pin->Direction == EGPD_Input && Pin->PinName == UEdGraphSchema_K2::PN_ReturnValue)
+			{
+				ReturnPin = Pin;
+				break;
+			}
+		}
+		// Fall back to the first non-exec input if the return isn't literally named ReturnValue.
+		if (!ReturnPin)
+		{
+			for (UEdGraphPin* Pin : ResultNode->Pins)
+			{
+				if (Pin && Pin->Direction == EGPD_Input && Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Exec)
+				{
+					ReturnPin = Pin;
+					break;
+				}
+			}
+		}
+		if (ReturnPin)
+		{
+			ReturnPinId = ReturnPin->PinId.ToString();
+			ReturnPinName = ReturnPin->PinName.ToString();
+		}
+	}
+
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("graph_name"), NewGraph->GetName());
+	Root->SetStringField(TEXT("entry_node_id"), EntryNode ? EntryNode->GetName() : FString());
+	Root->SetStringField(TEXT("return_pin_id"), ReturnPinId);
+	Root->SetStringField(TEXT("return_pin_name"), ReturnPinName);
+	Root->SetStringField(TEXT("override_class"), OverrideFuncClass->GetName());
+	Root->SetBoolField(TEXT("has_return_value"), !ReturnPinId.IsEmpty());
 	return FMonolithActionResult::Success(Root);
 }
 

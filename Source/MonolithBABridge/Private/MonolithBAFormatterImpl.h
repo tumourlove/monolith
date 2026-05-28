@@ -1,6 +1,8 @@
 #pragma once
 #include "IMonolithGraphFormatter.h"
 
+DECLARE_LOG_CATEGORY_EXTERN(LogMonolithBABridge, Log, All);
+
 #if WITH_BLUEPRINT_ASSIST
 
 class FBAGraphHandler;

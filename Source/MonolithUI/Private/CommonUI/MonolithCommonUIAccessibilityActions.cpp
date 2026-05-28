@@ -117,7 +117,26 @@ namespace MonolithCommonUIAccessibility
 
 		const TArray<FAssetData> Found = GetWbpsInFolder(FolderPath);
 		int32 Scanned = 0, Stamped = 0;
-		TArray<TSharedPtr<FJsonValue>> Missing;
+		TArray<TSharedPtr<FJsonValue>> Skipped;
+		TArray<TSharedPtr<FJsonValue>> MissingLegacy; // backwards-compat mirror
+
+		// Bug #3 fix (2026-05-16 UI gap audit): when stamp doesn't land we now
+		// return a diagnostic-rich skipped[] entry naming the missing UPROPERTY
+		// AND suggested parent classes the caller can re-parent to. Previously
+		// the action returned stamped=0 with no cause attached, forcing the
+		// caller to infer that the parent class lacked the property.
+		//
+		// Suggested parent classes: any UCommonActivatableWidget subclass that
+		// ships a bRespectReduceMotion UPROPERTY. The list is conservative —
+		// Monolith doesn't itself ship a base class; project owners typically
+		// add the property either to a project-local activatable widget or to
+		// Tokenforge's UTokenforgeActivatableWidget. The Tier-2 add_widget_variable
+		// action (Phase 2) will let callers stamp the UPROPERTY directly when
+		// no satisfying parent exists.
+		static const TArray<FString> SuggestedParentClasses = {
+			TEXT("UTokenforgeActivatableWidget"),
+			TEXT("UMonolithReduceMotionAwareWidget")
+		};
 
 		for (const FAssetData& AD : Found)
 		{
@@ -129,10 +148,28 @@ namespace MonolithCommonUIAccessibility
 			if (Result > 0) { Stamped++; }
 			else
 			{
-				TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
-				O->SetStringField(TEXT("wbp_path"), AD.GetObjectPathString());
-				O->SetStringField(TEXT("missing"), TEXT("bRespectReduceMotion bool UPROPERTY"));
-				Missing.Add(MakeShared<FJsonValueObject>(O));
+				const FString WbpPath = AD.GetObjectPathString();
+
+				// New diagnostic-rich skipped[] entry.
+				TSharedPtr<FJsonObject> SkipObj = MakeShared<FJsonObject>();
+				SkipObj->SetStringField(TEXT("wbp"), WbpPath);
+				SkipObj->SetStringField(TEXT("reason"), TEXT("missing_property"));
+				SkipObj->SetStringField(TEXT("missing_property"), TEXT("bRespectReduceMotion"));
+
+				TArray<TSharedPtr<FJsonValue>> SuggestedArr;
+				for (const FString& Cls : SuggestedParentClasses)
+				{
+					SuggestedArr.Add(MakeShared<FJsonValueString>(Cls));
+				}
+				SkipObj->SetArrayField(TEXT("suggested_parent_classes"), SuggestedArr);
+				Skipped.Add(MakeShared<FJsonValueObject>(SkipObj));
+
+				// Legacy missing_property[] mirror, preserved one release for
+				// callers that already parse the prior shape.
+				TSharedPtr<FJsonObject> Legacy = MakeShared<FJsonObject>();
+				Legacy->SetStringField(TEXT("wbp_path"), WbpPath);
+				Legacy->SetStringField(TEXT("missing"), TEXT("bRespectReduceMotion bool UPROPERTY"));
+				MissingLegacy.Add(MakeShared<FJsonValueObject>(Legacy));
 			}
 		}
 
@@ -140,8 +177,9 @@ namespace MonolithCommonUIAccessibility
 		Result->SetStringField(TEXT("folder_path"), FolderPath);
 		Result->SetNumberField(TEXT("wbps_scanned"), Scanned);
 		Result->SetNumberField(TEXT("wbps_stamped"), Stamped);
-		Result->SetArrayField(TEXT("missing_property"), Missing);
-		Result->SetStringField(TEXT("next_step"), TEXT("For WBPs listed in missing_property: add a UPROPERTY bool bRespectReduceMotion, then branch animation starts on GetAccessibilitySubsystem()->IsReduceMotionEnabled()."));
+		Result->SetArrayField(TEXT("skipped"), Skipped);
+		Result->SetArrayField(TEXT("missing_property"), MissingLegacy);
+		Result->SetStringField(TEXT("next_step"), TEXT("For WBPs in skipped[]: either re-parent to a class in suggested_parent_classes that exposes bRespectReduceMotion, or use ui::add_widget_variable (Phase 2) to add the UPROPERTY directly. Then gate animation triggers on UAccessibilitySubsystem::IsReduceMotionEnabled()."));
 		return FMonolithActionResult::Success(Result);
 	}
 

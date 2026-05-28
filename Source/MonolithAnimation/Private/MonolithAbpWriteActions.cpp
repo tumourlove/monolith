@@ -33,6 +33,8 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Editor.h"
+#include "UObject/SoftObjectPath.h"
+#include "UObject/UObjectIterator.h"
 
 // PoseSearchEditor module — provides UAnimGraphNode_MotionMatching
 #include "AnimGraphNode_MotionMatching.h"
@@ -45,11 +47,12 @@ void FMonolithAbpWriteActions::RegisterActions(FMonolithToolRegistry& Registry)
 {
 	// --- add_anim_graph_node ---
 	Registry.RegisterAction(TEXT("animation"), TEXT("add_anim_graph_node"),
-		TEXT("Place an animation graph node (SequencePlayer, BlendSpacePlayer, TwoWayBlend, BlendListByBool, LayeredBoneBlend, MotionMatching, TwoBoneIK, ModifyBone, LocalToComponentSpace, ComponentToLocalSpace) in a state or the main AnimGraph"),
+		TEXT("Place an animation graph node in a state or the main AnimGraph. node_type accepts built-in aliases; node_class accepts any loaded non-abstract UAnimGraphNode_Base subclass by path or name."),
 		FMonolithActionHandler::CreateStatic(&HandleAddAnimGraphNode),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Animation Blueprint asset path"))
-			.Required(TEXT("node_type"), TEXT("string"), TEXT("Node type: SequencePlayer, BlendSpacePlayer, TwoWayBlend, BlendListByBool, LayeredBoneBlend, MotionMatching, TwoBoneIK, ModifyBone, LocalToComponentSpace, ComponentToLocalSpace"))
+			.Optional(TEXT("node_type"), TEXT("string"), TEXT("Alias or UAnimGraphNode_Base class path/name. Aliases: SequencePlayer, BlendSpacePlayer, TwoWayBlend, BlendListByBool, LayeredBoneBlend, MotionMatching, TwoBoneIK, ModifyBone, LocalToComponentSpace, ComponentToLocalSpace"))
+			.Optional(TEXT("node_class"), TEXT("string"), TEXT("UAnimGraphNode_Base subclass path or name, e.g. /Script/AnimGraph.AnimGraphNode_TwoBoneIK. Use this instead of node_type when not using an alias."))
 			.Optional(TEXT("graph_name"), TEXT("string"), TEXT("Target graph name — 'AnimGraph' for top-level, or a state name for state inner graphs (default: AnimGraph)"), TEXT("AnimGraph"))
 			.Optional(TEXT("state_name"), TEXT("string"), TEXT("State name — if set, node is placed inside this state's inner graph (searched within the state machine found via graph_name if graph_name is a SM name, otherwise searches all SMs)"))
 			.Optional(TEXT("position_x"), TEXT("number"), TEXT("Node X position (default: 200)"), TEXT("200"))
@@ -128,8 +131,8 @@ void FMonolithAbpWriteActions::RegisterActions(FMonolithToolRegistry& Registry)
 namespace
 {
 
-/** Map a user-facing node type string to UClass. Returns nullptr on unknown type. */
-UClass* ResolveNodeClass(const FString& NodeType)
+/** Map a user-facing node type alias to UClass. Returns nullptr on unknown type. */
+UClass* ResolveNodeTypeAlias(const FString& NodeType)
 {
 	if (NodeType.Equals(TEXT("SequencePlayer"), ESearchCase::IgnoreCase))
 		return UAnimGraphNode_SequencePlayer::StaticClass();
@@ -152,6 +155,243 @@ UClass* ResolveNodeClass(const FString& NodeType)
 	if (NodeType.Equals(TEXT("ComponentToLocalSpace"), ESearchCase::IgnoreCase))
 		return UAnimGraphNode_ComponentToLocalSpace::StaticClass();
 	return nullptr;
+}
+
+FString CleanClassSpecifier(FString ClassSpecifier)
+{
+	ClassSpecifier.TrimStartAndEndInline();
+
+	const TCHAR* Prefixes[] =
+	{
+		TEXT("Class'"),
+		TEXT("BlueprintGeneratedClass'")
+	};
+
+	for (const TCHAR* Prefix : Prefixes)
+	{
+		if (ClassSpecifier.StartsWith(Prefix) && ClassSpecifier.EndsWith(TEXT("'")))
+		{
+			const int32 PrefixLen = FCString::Strlen(Prefix);
+			ClassSpecifier = ClassSpecifier.Mid(PrefixLen, ClassSpecifier.Len() - PrefixLen - 1);
+			ClassSpecifier.TrimStartAndEndInline();
+			break;
+		}
+	}
+
+	return ClassSpecifier;
+}
+
+void AddUniqueClassLookupCandidate(TArray<FString>& Candidates, const FString& Candidate)
+{
+	const FString CleanCandidate = CleanClassSpecifier(Candidate);
+	if (!CleanCandidate.IsEmpty())
+	{
+		Candidates.AddUnique(CleanCandidate);
+	}
+}
+
+TArray<FString> BuildClassLookupCandidates(const FString& RawClassSpecifier)
+{
+	TArray<FString> Candidates;
+	const FString ClassSpecifier = CleanClassSpecifier(RawClassSpecifier);
+	AddUniqueClassLookupCandidate(Candidates, ClassSpecifier);
+
+	if (ClassSpecifier.StartsWith(TEXT("/Script/")))
+	{
+		int32 DotIndex = INDEX_NONE;
+		if (ClassSpecifier.FindLastChar(TEXT('.'), DotIndex)
+			&& DotIndex + 2 < ClassSpecifier.Len()
+			&& ClassSpecifier[DotIndex + 1] == TEXT('U'))
+		{
+			AddUniqueClassLookupCandidate(Candidates, ClassSpecifier.Left(DotIndex + 1) + ClassSpecifier.Mid(DotIndex + 2));
+		}
+	}
+	else if (!ClassSpecifier.Contains(TEXT("/")) && ClassSpecifier.Contains(TEXT(".")))
+	{
+		AddUniqueClassLookupCandidate(Candidates, TEXT("/Script/") + ClassSpecifier);
+		int32 DotIndex = INDEX_NONE;
+		if (ClassSpecifier.FindLastChar(TEXT('.'), DotIndex)
+			&& DotIndex + 2 < ClassSpecifier.Len()
+			&& ClassSpecifier[DotIndex + 1] == TEXT('U'))
+		{
+			AddUniqueClassLookupCandidate(Candidates, TEXT("/Script/") + ClassSpecifier.Left(DotIndex + 1) + ClassSpecifier.Mid(DotIndex + 2));
+		}
+	}
+	else if (!ClassSpecifier.Contains(TEXT("/")) && !ClassSpecifier.Contains(TEXT(".")))
+	{
+		if ((ClassSpecifier.StartsWith(TEXT("U")) || ClassSpecifier.StartsWith(TEXT("A"))) && ClassSpecifier.Len() > 1)
+		{
+			AddUniqueClassLookupCandidate(Candidates, ClassSpecifier.Mid(1));
+		}
+		else
+		{
+			AddUniqueClassLookupCandidate(Candidates, TEXT("U") + ClassSpecifier);
+			AddUniqueClassLookupCandidate(Candidates, TEXT("A") + ClassSpecifier);
+		}
+	}
+
+	return Candidates;
+}
+
+void AddUniqueClassMatch(TArray<UClass*>& Matches, UClass* Match)
+{
+	if (Match)
+	{
+		Matches.AddUnique(Match);
+	}
+}
+
+TArray<UClass*> FindLoadedClassesBySpecifier(const TArray<FString>& Candidates)
+{
+	TArray<UClass*> Matches;
+	for (TObjectIterator<UClass> It; It; ++It)
+	{
+		UClass* CandidateClass = *It;
+		if (!CandidateClass)
+		{
+			continue;
+		}
+
+		const FString ClassName = CandidateClass->GetName();
+		const FString PathName = CandidateClass->GetPathName();
+		const FString FullName = CandidateClass->GetFullName();
+		for (const FString& Candidate : Candidates)
+		{
+			if (ClassName.Equals(Candidate, ESearchCase::IgnoreCase)
+				|| PathName.Equals(Candidate, ESearchCase::IgnoreCase)
+				|| FullName.Equals(Candidate, ESearchCase::IgnoreCase))
+			{
+				AddUniqueClassMatch(Matches, CandidateClass);
+			}
+		}
+	}
+
+	return Matches;
+}
+
+TArray<UClass*> ResolveClassSpecifier(const FString& RawClassSpecifier)
+{
+	TArray<UClass*> Matches;
+	const TArray<FString> Candidates = BuildClassLookupCandidates(RawClassSpecifier);
+
+	for (const FString& Candidate : Candidates)
+	{
+		if (Candidate.Contains(TEXT("/")) || Candidate.Contains(TEXT(".")))
+		{
+			if (UClass* LoadedClass = LoadClass<UObject>(nullptr, *Candidate))
+			{
+				AddUniqueClassMatch(Matches, LoadedClass);
+			}
+
+			const FSoftClassPath SoftClassPath(Candidate);
+			if (UClass* ResolvedClass = SoftClassPath.ResolveClass())
+			{
+				AddUniqueClassMatch(Matches, ResolvedClass);
+			}
+		}
+	}
+
+	if (Matches.Num() == 0)
+	{
+		Matches = FindLoadedClassesBySpecifier(Candidates);
+	}
+
+	return Matches;
+}
+
+FString DescribeClassMatches(const TArray<UClass*>& Matches)
+{
+	TArray<FString> Paths;
+	for (const UClass* Match : Matches)
+	{
+		if (Match)
+		{
+			Paths.Add(Match->GetPathName());
+		}
+	}
+	return FString::Join(Paths, TEXT(", "));
+}
+
+UClass* ResolveAnimGraphNodeClass(const FString& NodeType, const FString& NodeClassSpecifier, FString& OutError)
+{
+	const FString CleanNodeType = CleanClassSpecifier(NodeType);
+	const FString CleanNodeClassSpecifier = CleanClassSpecifier(NodeClassSpecifier);
+
+	if (!CleanNodeType.IsEmpty() && !CleanNodeClassSpecifier.IsEmpty())
+	{
+		OutError = TEXT("Specify either node_type or node_class, not both. node_type is for built-in aliases or legacy class strings; node_class is for explicit UAnimGraphNode_Base class paths/names.");
+		return nullptr;
+	}
+
+	if (CleanNodeType.IsEmpty() && CleanNodeClassSpecifier.IsEmpty())
+	{
+		OutError = TEXT("Missing required parameter: provide node_type alias or node_class UAnimGraphNode_Base class path/name.");
+		return nullptr;
+	}
+
+	const FString RequestedClass = !CleanNodeClassSpecifier.IsEmpty() ? CleanNodeClassSpecifier : CleanNodeType;
+	UClass* NodeClass = CleanNodeClassSpecifier.IsEmpty() ? ResolveNodeTypeAlias(CleanNodeType) : nullptr;
+	if (!NodeClass)
+	{
+		TArray<UClass*> ClassMatches = ResolveClassSpecifier(RequestedClass);
+		TArray<UClass*> SpawnableMatches;
+		for (UClass* ClassMatch : ClassMatches)
+		{
+			if (ClassMatch
+				&& ClassMatch->IsChildOf(UAnimGraphNode_Base::StaticClass())
+				&& !ClassMatch->HasAnyClassFlags(CLASS_Abstract))
+			{
+				SpawnableMatches.AddUnique(ClassMatch);
+			}
+		}
+
+		if (SpawnableMatches.Num() > 1)
+		{
+			OutError = FString::Printf(
+				TEXT("Ambiguous anim graph node class '%s'. Matches: %s. Use a full class path such as '/Script/Module.AnimGraphNode_Name'."),
+				*RequestedClass,
+				*DescribeClassMatches(SpawnableMatches));
+			return nullptr;
+		}
+
+		if (SpawnableMatches.Num() == 1)
+		{
+			NodeClass = SpawnableMatches[0];
+		}
+		else if (ClassMatches.Num() == 1)
+		{
+			NodeClass = ClassMatches[0];
+		}
+	}
+
+	if (!NodeClass)
+	{
+		OutError = FString::Printf(
+			TEXT("Anim graph node class not found for '%s'. Use an alias [%s], a loaded class name like 'AnimGraphNode_TwoBoneIK', or a full class path like '/Script/AnimGraph.AnimGraphNode_TwoBoneIK'. If this is a plugin node, make sure its editor module is loaded."),
+			*RequestedClass,
+			TEXT("SequencePlayer, BlendSpacePlayer, TwoWayBlend, BlendListByBool, LayeredBoneBlend, MotionMatching, TwoBoneIK, ModifyBone, LocalToComponentSpace, ComponentToLocalSpace"));
+		return nullptr;
+	}
+
+	if (!NodeClass->IsChildOf(UAnimGraphNode_Base::StaticClass()))
+	{
+		OutError = FString::Printf(
+			TEXT("Resolved class '%s' (%s) is not a child of UAnimGraphNode_Base; add_anim_graph_node can only spawn editor AnimGraph node classes."),
+			*NodeClass->GetName(),
+			*NodeClass->GetPathName());
+		return nullptr;
+	}
+
+	if (NodeClass->HasAnyClassFlags(CLASS_Abstract))
+	{
+		OutError = FString::Printf(
+			TEXT("Resolved class '%s' (%s) is abstract and cannot be spawned. Use a concrete UAnimGraphNode_Base subclass."),
+			*NodeClass->GetName(),
+			*NodeClass->GetPathName());
+		return nullptr;
+	}
+
+	return NodeClass;
 }
 
 /** Parse a bone-control-space string. Defaults to ComponentSpace when missing/unrecognized. */
@@ -354,7 +594,10 @@ TArray<TSharedPtr<FJsonValue>> BuildPinList(UEdGraphNode* Node)
 FMonolithActionResult FMonolithAbpWriteActions::HandleAddAnimGraphNode(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
-	FString NodeType  = Params->GetStringField(TEXT("node_type"));
+	FString NodeType;
+	Params->TryGetStringField(TEXT("node_type"), NodeType);
+	FString NodeClassSpecifier;
+	Params->TryGetStringField(TEXT("node_class"), NodeClassSpecifier);
 	FString GraphName = Params->HasField(TEXT("graph_name")) ? Params->GetStringField(TEXT("graph_name")) : TEXT("AnimGraph");
 	FString StateName = Params->HasField(TEXT("state_name")) ? Params->GetStringField(TEXT("state_name")) : TEXT("");
 	FString AnimAsset = Params->HasField(TEXT("anim_asset")) ? Params->GetStringField(TEXT("anim_asset")) : TEXT("");
@@ -365,18 +608,15 @@ FMonolithActionResult FMonolithAbpWriteActions::HandleAddAnimGraphNode(const TSh
 	if (Params->TryGetNumberField(TEXT("position_x"), TempVal)) PosX = static_cast<float>(TempVal);
 	if (Params->TryGetNumberField(TEXT("position_y"), TempVal)) PosY = static_cast<float>(TempVal);
 
-	if (NodeType.IsEmpty()) return FMonolithActionResult::Error(TEXT("Missing required parameter: node_type"));
-
 	UAnimBlueprint* ABP = FMonolithAssetUtils::LoadAssetByPath<UAnimBlueprint>(AssetPath);
 	if (!ABP) return FMonolithActionResult::Error(FString::Printf(TEXT("AnimBlueprint not found: %s"), *AssetPath));
 
 	// Resolve the node class
-	UClass* NodeClass = ResolveNodeClass(NodeType);
+	FString ClassError;
+	UClass* NodeClass = ResolveAnimGraphNodeClass(NodeType, NodeClassSpecifier, ClassError);
 	if (!NodeClass)
 	{
-		return FMonolithActionResult::Error(FString::Printf(
-			TEXT("Unknown node_type '%s'. Supported: SequencePlayer, BlendSpacePlayer, TwoWayBlend, BlendListByBool, LayeredBoneBlend, MotionMatching, TwoBoneIK, ModifyBone, LocalToComponentSpace, ComponentToLocalSpace"),
-			*NodeType));
+		return FMonolithActionResult::Error(ClassError);
 	}
 
 	// Resolve the target graph
@@ -388,7 +628,17 @@ FMonolithActionResult FMonolithAbpWriteActions::HandleAddAnimGraphNode(const TSh
 	UAnimGraphNode_Base* Template = Cast<UAnimGraphNode_Base>(NewObject<UObject>(GetTransientPackage(), NodeClass));
 	if (!Template)
 	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create node template for type '%s'"), *NodeType));
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create node template for class '%s'"), *NodeClass->GetPathName()));
+	}
+
+	const UEdGraphSchema* TargetSchema = TargetGraph->GetSchema();
+	if (!TargetSchema || !Template->CanCreateUnderSpecifiedSchema(TargetSchema))
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Class '%s' cannot be created under target graph '%s' with schema '%s'. Use an AnimGraph or animation state graph."),
+			*NodeClass->GetPathName(),
+			*TargetGraph->GetName(),
+			TargetSchema ? *TargetSchema->GetClass()->GetName() : TEXT("<null>")));
 	}
 
 	// Set animation asset before spawning (gets duplicated with the node)
@@ -502,6 +752,7 @@ FMonolithActionResult FMonolithAbpWriteActions::HandleAddAnimGraphNode(const TSh
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetStringField(TEXT("node_name"), SpawnedNode->GetName());
 	Root->SetStringField(TEXT("node_class"), SpawnedNode->GetClass()->GetName());
+	Root->SetStringField(TEXT("node_class_path"), SpawnedNode->GetClass()->GetPathName());
 	Root->SetStringField(TEXT("node_guid"), SpawnedNode->NodeGuid.ToString());
 	Root->SetNumberField(TEXT("position_x"), SpawnedNode->NodePosX);
 	Root->SetNumberField(TEXT("position_y"), SpawnedNode->NodePosY);

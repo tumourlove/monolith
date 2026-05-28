@@ -298,7 +298,12 @@ def handle_initialize(msg: dict) -> str:
         },
         "serverInfo": {"name": PROXY_NAME, "version": PROXY_VERSION},
         "instructions": (
-            "Monolith MCP proxy. Tools are forwarded to the Unreal Editor. "
+            "Monolith MCP proxy for Unreal Engine. Tools are forwarded to the Unreal Editor. "
+            "Before calling a domain action, check its schema instead of guessing: "
+            "monolith_discover() lists namespaces, monolith_discover('<namespace>') lists a "
+            "namespace's actions, and describe_query('action_schema', ...) returns an action's "
+            "exact parameter schema. monolith_guide(section='recipes') gives cross-namespace "
+            "workflows, decision matrices, and gotchas. "
             "If tools return errors about the editor not running, wait and retry."
         ),
     })

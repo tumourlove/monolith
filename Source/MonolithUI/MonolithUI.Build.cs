@@ -39,7 +39,19 @@ public class MonolithUI : ModuleRules
             "DeveloperSettings",
             // Automation tests and editor helpers query assets generically
             // without hardcoding optional provider mount names.
-            "AssetRegistry"
+            "AssetRegistry",
+            // Phase 2 (2026-05-16 UI gap audit) — Item #10 apply_token_binding
+            // probes IPluginManager::Get().FindPlugin("TokenforgeRuntime") to
+            // emit -32011 when the optional Tokenforge provider is absent.
+            // IPluginManager lives in the Projects module.
+            "Projects",
+            // Phase 2 (2026-05-16 UI gap audit) — Item #8 add_widget_variable
+            // references UEdGraphSchema_K2::PC_* FName constants (Boolean,
+            // Byte, Class, Double, Float, Int, Int64, Real, Name, Object,
+            // SoftObject, String, Text, Struct, Wildcard, Enum) when parsing
+            // var_type tokens into FEdGraphPinType. The constants are
+            // dllimport'd from the BlueprintGraph module.
+            "BlueprintGraph"
         });
 
         // CommonUI optional integration — detected across 3 install vectors so the

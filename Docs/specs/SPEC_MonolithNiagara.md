@@ -187,6 +187,55 @@ These exist because Epic's `FNiagaraStackGraphUtilities` functions lack `NIAGARA
 | `clone_module_overrides` | Clone input overrides from one module to another |
 | `auto_layout` | Auto-arrange nodes in a Niagara module script graph. `formatter`: `"auto"` (default) — uses Blueprint Assist if available, falls back to built-in layout; `"blueprint_assist"` — requires BA; `"builtin"` — built-in only |
 
+### Bulk Fill & Describe Surface (2026-05-11)
+
+`MonolithNiagaraBulkFillAdapter` registers under `FMonolithBulkFillRegistry` for the `niagara` namespace, exposed via the framework-level `bulk_fill_query("apply", ...)` and `describe_query("schema", ...)` dispatchers. Phase 5 of the MCP ergonomics rollout (design spec `Docs/plans/2026-05-11-monolith-mcp-ergonomics-design.md`).
+
+**Surface summary.** `bulk_fill_query("apply", target_namespace="niagara", target="<system_asset_path>", tree={...}, dry_run=<bool>, strict=<bool>)` walks the JSON tree and commits atomically. `describe_query("schema", target_namespace="niagara", target="<system_asset_path>")` surfaces the writable parameter / curve / DI surface for the target system.
+
+**fill_kind catalogue (3 — enumerated against `MonolithNiagaraBulkFillAdapter.cpp`):**
+
+| `fill_kind` | Target shape | Walks |
+|---|---|---|
+| `DataInterfaceArray` | `UNiagaraSystem` | `rows:[]` payload written into a `User.*` Array Data Interface (e.g. Curl Noise Force, Skel Mesh Sample Pos). Replaces the 15-30 nested-field round-trip per DI |
+| `Curve` | `UNiagaraSystem` | `keys:[]` (FRichCurveKey shape `{time, value, interp_mode, tangent}`) written into a Curve UPROPERTY on a module input. Replaces the 24-48 per-key atomic writes per curve |
+| `ParameterOverrides` | `UNiagaraSystem` | Generic UPROPERTY tree walked against system / per-emitter rapid-iteration parameters. Covers RibbonRenderer's 40+ props in one transaction |
+
+**Sample tree (Curve fill, design spec Appendix B.4):**
+
+```json
+{
+  "target": "/Game/VFX/NS_Smoke",
+  "tree": {
+    "fill_kind": "Curve",
+    "emitter": "Smoke",
+    "module_node": "Initialize Particle",
+    "input": "LifetimeCurve",
+    "curve_name": "LifetimeCurve",
+    "keys": [
+      {"time": 0.0, "value": 1.0, "interp_mode": "Cubic"},
+      {"time": 1.0, "value": 0.0, "interp_mode": "Cubic"}
+    ]
+  },
+  "dry_run": true
+}
+```
+
+**Adapter-specific quirks.**
+
+- **GPU emitter introspection is one-way.** GPU-side runtime state is not readable. The adapter detects GPU emitters via a v1 **name-heuristic only** scan of `SimTarget` literal strings; reliable `SimTarget`-walk parity is `(v1.1)`. `describe_schema` flags GPU-mode emitters with `gpu_one_way: true` and refuses to surface read-back parameters.
+- **`module_node` GUIDs change on duplicate.** When the target system was duplicated from another, module GUIDs are regenerated. The adapter falls back to module-name lookup if a GUID resolves to nothing; dry-run report flags the fallback so callers can re-bind to the new GUID. Schema surfaces `module_node` as `id_form: "guid_or_name"`.
+- **Parent-emitter override vs inherit is invisible.** `get_module_inputs` doesn't flag override-vs-inherit. The adapter's `ParameterOverrides` handler walks both layers — the dry-run `field_writes` entries annotate each with `override_layer: "system" | "emitter" | "inherited"`.
+- **`build_material_graph` fill_kind is v1 audit-only.** Cross-namespace materials authoring stays at `material_query("build_material_graph")` (Niagara emitters can reference materials but the BuildMaterialGraph fill_kind lives in the material adapter, not here).
+- **CustomHlsl modules.** Inputs not in the ParameterMap history are routed to the FunctionCall node's typed input pins (matches the existing `get_module_inputs` / `set_module_input_value` fallback). Schema surfaces this via `read_path: "function_call_typed_pin"`.
+
+**Limitations / v1.1 follow-ups.**
+
+- Curl-Noise Force / Skel Mesh Sample DI 15-30 nested-field bulk fill — covered by `DataInterfaceArray` only for array DIs in v1; scalar-field DIs `(WISHLIST v1.1)`.
+- GPU-sim `SimTarget` walker — `(v1.1)` to replace the v1 name heuristic.
+- PIE-time parameter snooping for `User.*` — `(WISHLIST)` per cross-cutting PIE-bound quirks; cannot be unblocked without engine-level changes.
+- CSV ingest for FRichCurve keys — `(WISHLIST v1.1)` per Q2.
+
 ### UE 5.7 Compatibility Fixes (6 sites)
 
 All marked with "UE 5.7 FIX" comments:

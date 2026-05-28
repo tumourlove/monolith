@@ -5,6 +5,7 @@
 // Usage:
 //   monolith_query.exe source <action> [params...] [--options]
 //   monolith_query.exe project <action> [params...] [--options]
+//   monolith_query.exe monolith guide [--section=NAME]
 
 #include <cstdio>
 #include <cstdlib>
@@ -221,7 +222,9 @@ static Args parse_args(int argc, char* argv[]) {
                   << "  find_by_type <asset_class> [--limit=N] [--offset=N]\n"
                   << "  find_references <asset_path>\n"
                   << "  get_stats\n"
-                  << "  get_asset_details <asset_path>\n";
+                  << "  get_asset_details <asset_path>\n"
+                  << "\nMonolith actions:\n"
+                  << "  guide [--section=NAME]   (NAME: onboarding|recipes|decisions|errors|skills_map|gotchas)\n";
         std::exit(1);
     }
 
@@ -1001,10 +1004,8 @@ public:
 // DB path resolution
 // ============================================================
 
-static std::string resolve_db_dir() {
-    // Default: ../../Saved/ relative to exe location
-    // (exe at Plugins/Monolith/Tools/MonolithQuery/ or Plugins/Monolith/Binaries/)
-    // Get exe path
+// Directory containing the running executable, or empty on failure.
+static fs::path get_exe_dir() {
     fs::path exe_path;
 #ifdef _WIN32
     char buf[MAX_PATH];
@@ -1012,12 +1013,17 @@ static std::string resolve_db_dir() {
     if (len > 0 && len < MAX_PATH)
         exe_path = buf;
 #endif
-    if (exe_path.empty()) {
+    return exe_path.empty() ? fs::path() : exe_path.parent_path();
+}
+
+static std::string resolve_db_dir() {
+    // Default: ../../Saved/ relative to exe location
+    // (exe at Plugins/Monolith/Tools/MonolithQuery/ or Plugins/Monolith/Binaries/)
+    auto exe_dir = get_exe_dir();
+    if (exe_dir.empty()) {
         // Fallback: try current directory
         return ".";
     }
-
-    auto exe_dir = exe_path.parent_path();
 
     // Try ../../Saved/ (from Tools/MonolithQuery/)
     auto saved1 = exe_dir / ".." / ".." / "Saved";
@@ -1033,6 +1039,229 @@ static std::string resolve_db_dir() {
 
     return exe_dir.string();
 }
+
+// Resolve the Monolith plugin root (the dir containing Monolith.uplugin) by
+// probing the same exe-relative layouts resolve_db_dir() uses. Returns empty
+// if not found.
+//   exe at Plugins/Monolith/Tools/MonolithQuery/ -> root is ../../
+//   exe at Plugins/Monolith/Binaries/            -> root is ../
+//   exe at Plugins/Monolith/ (plugin root)       -> root is ./
+static fs::path resolve_plugin_root() {
+    auto exe_dir = get_exe_dir();
+    if (exe_dir.empty())
+        return fs::path();
+
+    const fs::path candidates[] = {
+        exe_dir / ".." / "..",   // Tools/MonolithQuery/
+        exe_dir / "..",          // Binaries/
+        exe_dir                  // plugin root
+    };
+    for (const auto& c : candidates) {
+        if (fs::exists(c / "Monolith.uplugin"))
+            return fs::canonical(c);
+    }
+    return fs::path();
+}
+
+// Read "VersionName" from Monolith.uplugin via a plain string scan (no JSON
+// dependency for this single field). Returns empty on any failure — the guide
+// is still served; the version line is simply omitted.
+static std::string parse_uplugin_version(const fs::path& plugin_root) {
+    if (plugin_root.empty())
+        return "";
+
+    std::ifstream f((plugin_root / "Monolith.uplugin").string());
+    if (!f.is_open())
+        return "";
+
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string contents = ss.str();
+
+    // Find "VersionName", then the value inside the next pair of quotes after
+    // the following colon. Tolerant of arbitrary whitespace.
+    auto key = contents.find("\"VersionName\"");
+    if (key == std::string::npos)
+        return "";
+
+    auto colon = contents.find(':', key);
+    if (colon == std::string::npos)
+        return "";
+
+    auto open_quote = contents.find('"', colon);
+    if (open_quote == std::string::npos)
+        return "";
+
+    auto close_quote = contents.find('"', open_quote + 1);
+    if (close_quote == std::string::npos)
+        return "";
+
+    return contents.substr(open_quote + 1, close_quote - open_quote - 1);
+}
+
+// ============================================================
+// Monolith namespace — offline guide server
+// ============================================================
+//
+// Mirrors the in-editor FMonolithGuideTool but WITHOUT the live registry
+// overlay (offline has no registry — it just serves the markdown). The H2
+// section split mirrors FMonolithGuideTool::SplitSections: a line is a section
+// header iff it starts with "## " (after trimming) but NOT "### "; the key is
+// the trimmed, lowercased remainder. Blank lines inside bodies are preserved;
+// trailing whitespace per body is trimmed. Content before the first H2 (the H1
+// title + intro) is intentionally dropped.
+
+// Canonical section order — must match GetCanonicalSectionOrder() in
+// MonolithGuideTool.cpp so offline and in-editor agree on index ordering.
+static const std::vector<std::string>& get_canonical_section_order() {
+    static const std::vector<std::string> order = {
+        "onboarding", "recipes", "decisions", "errors", "skills_map", "gotchas"
+    };
+    return order;
+}
+
+static std::string join_canonical_section_names() {
+    std::string out;
+    const auto& order = get_canonical_section_order();
+    for (size_t i = 0; i < order.size(); ++i) {
+        if (i > 0) out += ", ";
+        out += order[i];
+    }
+    return out;
+}
+
+// Trim leading whitespace.
+static std::string ltrim_copy(const std::string& s) {
+    size_t i = 0;
+    while (i < s.size() && std::isspace((unsigned char)s[i])) ++i;
+    return s.substr(i);
+}
+
+// Trim trailing whitespace (mirrors FString::TrimEnd for body cleanup).
+static std::string rtrim_copy(const std::string& s) {
+    size_t end = s.size();
+    while (end > 0 && std::isspace((unsigned char)s[end - 1])) --end;
+    return s.substr(0, end);
+}
+
+static std::string trim_copy(const std::string& s) {
+    return rtrim_copy(ltrim_copy(s));
+}
+
+static std::string to_lower_copy(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    return s;
+}
+
+// Split markdown into H2-keyed sections, preserving body order in `ordered`.
+static void split_sections(const std::string& markdown,
+                           std::map<std::string, std::string>& out_sections,
+                           std::vector<std::string>& out_ordered) {
+    out_sections.clear();
+    out_ordered.clear();
+
+    std::string current_name;
+    std::string current_body;
+    bool in_section = false;
+
+    auto flush_current = [&]() {
+        if (!current_name.empty()) {
+            out_sections[current_name] = rtrim_copy(current_body);
+            out_ordered.push_back(current_name);
+        }
+    };
+
+    std::istringstream iss(markdown);
+    std::string line;
+    while (std::getline(iss, line)) {
+        // Strip a trailing CR so CRLF files split cleanly.
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+
+        std::string trimmed = trim_copy(line);
+        // H2 == "## " but NOT "### " (H3) and NOT "#" (H1 title).
+        if (trimmed.rfind("## ", 0) == 0 && trimmed.rfind("### ", 0) != 0) {
+            flush_current();
+            current_name = to_lower_copy(trim_copy(trimmed.substr(3)));
+            current_body.clear();
+            in_section = true;
+            continue;
+        }
+
+        if (in_section) {
+            current_body += line;
+            current_body += "\n";
+        }
+        // Content before the first H2 is intentionally dropped.
+    }
+
+    flush_current();
+}
+
+class MonolithActions {
+public:
+    // --- guide ---
+    void print_guide(const Args& args) {
+        fs::path plugin_root = resolve_plugin_root();
+        fs::path guide_path = plugin_root.empty()
+            ? fs::path("MONOLITH_GUIDE.md")
+            : (plugin_root / "Docs" / "MONOLITH_GUIDE.md");
+
+        std::ifstream f(guide_path.string());
+        if (!f.is_open()) {
+            std::cout << "Guide markdown not found at " << guide_path.string()
+                      << "\nRestore Docs/MONOLITH_GUIDE.md (it ships in the release zip) "
+                         "or pull the latest Monolith release, then retry." << std::endl;
+            return;
+        }
+
+        std::stringstream ss;
+        ss << f.rdbuf();
+        std::string markdown = ss.str();
+
+        std::map<std::string, std::string> sections;
+        std::vector<std::string> ordered;
+        split_sections(markdown, sections, ordered);
+
+        const std::vector<std::string>& canonical = get_canonical_section_order();
+        std::string version = parse_uplugin_version(plugin_root);
+
+        // ----- Section-keyed dispatch -----
+        std::string requested = to_lower_copy(trim_copy(args.opt("section")));
+        if (!requested.empty()) {
+            auto it = sections.find(requested);
+            if (it == sections.end()) {
+                std::cout << "Unknown section '" << requested << "'. Valid sections: "
+                          << join_canonical_section_names() << "." << std::endl;
+                return;
+            }
+            std::cout << "## " << requested << "\n\n" << it->second << std::endl;
+            return;
+        }
+
+        // ----- No-arg dispatch: index + all section bodies (no live overlay) -----
+        std::cout << "=== Monolith Guide";
+        if (!version.empty())
+            std::cout << " (v" << version << ")";
+        std::cout << " ===\n\n";
+
+        std::cout << "Sections (pass --section=NAME to print just one):\n";
+        for (const auto& name : canonical) {
+            if (sections.count(name))
+                std::cout << "  - " << name << "\n";
+        }
+        std::cout << "\n";
+
+        for (const auto& name : canonical) {
+            auto it = sections.find(name);
+            if (it != sections.end()) {
+                std::cout << "## " << name << "\n\n" << it->second << "\n\n";
+            }
+        }
+        std::cout << std::flush;
+    }
+};
 
 // ============================================================
 // Main
@@ -1086,8 +1315,20 @@ int main(int argc, char* argv[]) {
         if (it == actions.end()) die("Unknown project action: " + args.action);
         it->second(pa, args);
 
+    } else if (args.ns == "monolith") {
+        // No database — the guide is served straight from Docs/MONOLITH_GUIDE.md.
+        MonolithActions ma;
+
+        static const std::map<std::string, std::function<void(MonolithActions&, const Args&)>> actions = {
+            {"guide", [](MonolithActions& m, const Args& a) { m.print_guide(a); }},
+        };
+
+        auto it = actions.find(args.action);
+        if (it == actions.end()) die("Unknown monolith action: " + args.action + " (expected 'guide')");
+        it->second(ma, args);
+
     } else {
-        die("Unknown namespace: " + args.ns + " (expected 'source' or 'project')");
+        die("Unknown namespace: " + args.ns + " (expected 'source', 'project', or 'monolith')");
     }
 
     return 0;

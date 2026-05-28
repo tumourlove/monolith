@@ -2,7 +2,7 @@
 
 **Parent:** [SPEC_CORE.md](../SPEC_CORE.md)
 **Engine:** Unreal Engine 5.7+
-**Version:** 0.14.10 (Beta)
+**Version:** 0.16.0 (Beta)
 
 ---
 
@@ -14,12 +14,12 @@
 
 | Class | Responsibility |
 |-------|---------------|
-| `FMonolithEditorModule` | Creates FMonolithLogCapture, attaches to GLog, registers 29 actions (20 base + 2 Phase J F8 map actions + 2 v0.14.8 PR #48 automation + 2 v0.14.9 Issue #50 scripting + 3 v0.14.10 PR #54 PIE/console) |
+| `FMonolithEditorModule` | Creates FMonolithLogCapture, attaches to GLog, registers 33 actions (20 base + 2 Phase J F8 map actions + 2 v0.14.8 PR #48 automation + 2 v0.14.9 Issue #50 scripting + 3 v0.14.10 PR #54 PIE/console + 4 v0.16.0 preview & inspection) |
 | `FMonolithLogCapture` | FOutputDevice subclass. Ring buffer (10,000 entries max). Thread-safe. Tracks counts by verbosity |
 | `FMonolithEditorActions` | Static handlers for build and log operations. Hooks into `ILiveCodingModule::GetOnPatchCompleteDelegate()` to capture compile results and timestamps |
 | `FMonolithSettingsCustomization` | IDetailCustomization for UMonolithSettings. Adds re-index buttons for project and source databases in Project Settings UI |
 
-### Actions (29 — namespace: "editor")
+### Actions (33 — namespace: "editor")
 
 **Base (22 — v0.14.7 baseline + Phase J F8)**
 
@@ -74,5 +74,16 @@
 | `start_pie` | Begin a PIE session pinned to in-viewport mode (`EPlaySessionWorldType::PlayInEditor` + first active level viewport via `FLevelEditorModule::GetFirstActiveViewport`). Independent of the user's `LastExecutedPlayModeType` toolbar choice. Returns `started: true, mode: 'in_viewport'`. Refuses to queue duplicates when PIE is already running. |
 | `stop_pie` | End the active PIE session via `GUnrealEd->RequestEndPlayMap()`. No-op (returns `stopped: false`) if PIE not active. |
 | `run_console_command` | Execute a console command. Routes to the first PIE PlayerController found (multi-client PIE not disambiguated); falls back to `GEngine->Exec` (with null-guard) when no PIE session is active. |
+
+**Preview & Inspection (4 — v0.16.0)**
+
+| Action | Description |
+|--------|-------------|
+| `capture_material_grid` | Render N material instances side-by-side under shared HDRI/floor/lighting in a single `FAdvancedPreviewScene` + `USceneCaptureComponent2D` capture pass. Auto-grid layout via `ceil(sqrt(N))` with optional `columns` override. Params: `material_paths[]`, `output_path`, `resolution`, `columns`, `preview_mesh`, `camera`. Failed loads logged + skipped; `material_count` reflects successes only. |
+| `capture_with_overlay` | Single-asset capture under one of 5 engine debug show-flags: `wireframe`, `normals`, `uv_density`, `lightmap_density`, `shader_complexity`. Toggles the matching `FEngineShowFlags` setter before `CaptureScene`. Params: `asset_path`, `mode`, `output_path`, `resolution`, `camera`. UE 5.7 has no public normal-visualiser setter — `normals` mode falls back to `SetMeshEdges`; external name preserved for future engine versions. |
+| `inspect_material_pbr` | Reflective walk of a material's texture parameter list, classifying each by PBR slot (basecolor/normal/roughness/metallic) and detecting ORM / ARM / MRA channel-packing conventions by substring. Pure JSON, no rendering. Returns scalar/vector/texture parameter lists per slot plus packed-channel flags. `material_class` distinguishes Material / MaterialInstance / MaterialInstanceConstant / MaterialInstanceDynamic. |
+| `inspect_texture_channels` | `LockMipReadOnly` on `UTexture2D` source mip 0; walks pixel buffer per channel for min/max/mean statistics. Returns width, height, runtime pixel format, sRGB flag, has_alpha flag. Optional `emit_splits=true` writes 4 grayscale-replicated BGRA8 PNGs to `output_dir` for per-channel visual diff. Non-BGRA8 source returns a clean warning payload rather than mis-decoded bytes. |
+
+Plus `capture_scene_preview` (in Base section above) was **extended** in v0.16.0: `asset_type` enum now also accepts `static_mesh`, `skeletal_mesh` (with optional `animation_path` + `seek_time` for posed-frame capture), and `widget` (UMG via `FWidgetRenderer` with `scale` DPI multiplier). No new action — schema widening only.
 
 ---

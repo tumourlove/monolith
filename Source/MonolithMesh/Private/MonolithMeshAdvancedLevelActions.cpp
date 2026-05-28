@@ -734,15 +734,21 @@ FMonolithActionResult FMonolithMeshAdvancedLevelActions::PlaceSpline(const TShar
 		return FMonolithActionResult::Error(TEXT("Failed to spawn spline actor"));
 	}
 
-	// Add a scene root component
-	USceneComponent* RootComp = NewObject<USceneComponent>(SplineActor, TEXT("RootComponent"));
+	SplineActor->Modify();
+
+	// Add a scene root component (Static so Static USplineMeshComponents can attach to the hierarchy)
+	USceneComponent* RootComp = NewObject<USceneComponent>(SplineActor, USceneComponent::StaticClass(), TEXT("RootComponent"), RF_Transactional);
+	RootComp->SetMobility(EComponentMobility::Static);
 	RootComp->SetWorldLocation(ActorLocation);
 	SplineActor->SetRootComponent(RootComp);
+	SplineActor->AddInstanceComponent(RootComp);
 	RootComp->RegisterComponent();
 
-	// Add USplineComponent
-	USplineComponent* SplineComp = NewObject<USplineComponent>(SplineActor, TEXT("SplineComponent"));
+	// Add USplineComponent (Static — pipes/cables/railings are placed decoration; matches USplineMeshComponent's default Static mobility)
+	USplineComponent* SplineComp = NewObject<USplineComponent>(SplineActor, USplineComponent::StaticClass(), TEXT("SplineComponent"), RF_Transactional);
+	SplineComp->SetMobility(EComponentMobility::Static);
 	SplineComp->SetupAttachment(RootComp);
+	SplineActor->AddInstanceComponent(SplineComp);
 
 	// Convert points to local space (relative to actor origin)
 	TArray<FVector> LocalPoints;
@@ -785,8 +791,9 @@ FMonolithActionResult FMonolithMeshAdvancedLevelActions::PlaceSpline(const TShar
 			SplineComp->GetLocationAndTangentAtSplinePoint(NextIdx, EndPos, EndTangent, ESplineCoordinateSpace::Local);
 
 			FName CompName(*FString::Printf(TEXT("SplineMesh_%d"), i));
-			USplineMeshComponent* SMC = NewObject<USplineMeshComponent>(SplineActor, CompName);
+			USplineMeshComponent* SMC = NewObject<USplineMeshComponent>(SplineActor, USplineMeshComponent::StaticClass(), CompName, RF_Transactional);
 			SMC->SetupAttachment(SplineComp);
+			SplineActor->AddInstanceComponent(SMC);
 			SMC->SetStaticMesh(SplineMesh);
 			SMC->SetStartAndEnd(StartPos, StartTangent, EndPos, EndTangent, /*bUpdateMesh=*/true);
 			SMC->SetForwardAxis(ForwardAxis);
@@ -797,6 +804,8 @@ FMonolithActionResult FMonolithMeshAdvancedLevelActions::PlaceSpline(const TShar
 			SegmentCount++;
 		}
 	}
+
+	SplineActor->MarkPackageDirty();
 
 	if (!Label.IsEmpty())
 	{

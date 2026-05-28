@@ -35,4 +35,7 @@ public:
 
 	// Wave 7 — Advanced
 	static FMonolithActionResult HandlePromotePinToVariable(const TSharedPtr<FJsonObject>& Params);
+
+	// Phase 1 (gap #11) — Cross-class property access (foreign-class VariableGet/Set)
+	static FMonolithActionResult HandleAddPropertyAccess(const TSharedPtr<FJsonObject>& Params);
 };

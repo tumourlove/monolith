@@ -8,6 +8,7 @@ public:
 	static void RegisterActions(FMonolithToolRegistry& Registry);
 
 	static FMonolithActionResult HandleAddFunction(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleOverrideParentFunction(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleRemoveFunction(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleRenameFunction(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleAddMacro(const TSharedPtr<FJsonObject>& Params);

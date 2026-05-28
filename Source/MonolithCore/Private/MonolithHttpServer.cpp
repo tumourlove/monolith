@@ -214,7 +214,7 @@ bool FMonolithHttpServer::HandlePostMcp(const FHttpServerRequest& Request, const
 	if (BodyString.IsEmpty())
 	{
 		TSharedPtr<FJsonObject> Err = FMonolithJsonUtils::ErrorResponse(
-			nullptr, FMonolithJsonUtils::ErrParseError, TEXT("Empty request body"));
+			nullptr, FMonolithJsonUtils::ErrParseError, TEXT("Empty request body — send a JSON-RPC 2.0 request, e.g. {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}."));
 		auto Response = MakeJsonResponse(FMonolithJsonUtils::Serialize(Err), EHttpServerResponseCodes::BadRequest);
 		AddCorsHeaders(*Response, Request);
 		OnComplete(MoveTemp(Response));
@@ -251,7 +251,7 @@ bool FMonolithHttpServer::HandlePostMcp(const FHttpServerRequest& Request, const
 		else
 		{
 			TSharedPtr<FJsonObject> Err = FMonolithJsonUtils::ErrorResponse(
-				nullptr, FMonolithJsonUtils::ErrParseError, TEXT("Invalid JSON"));
+				nullptr, FMonolithJsonUtils::ErrParseError, TEXT("Invalid JSON — body must be a valid JSON-RPC 2.0 request object or an array of them for batch."));
 			auto Response = MakeJsonResponse(FMonolithJsonUtils::Serialize(Err), EHttpServerResponseCodes::BadRequest);
 			AddCorsHeaders(*Response, Request);
 			OnComplete(MoveTemp(Response));
@@ -369,21 +369,21 @@ TSharedPtr<FJsonObject> FMonolithHttpServer::ProcessJsonRpcRequest(const TShared
 {
 	if (!Request.IsValid())
 	{
-		return FMonolithJsonUtils::ErrorResponse(nullptr, FMonolithJsonUtils::ErrInvalidRequest, TEXT("Invalid request object"));
+		return FMonolithJsonUtils::ErrorResponse(nullptr, FMonolithJsonUtils::ErrInvalidRequest, TEXT("Invalid request object — must be a JSON object with jsonrpc, method, and id fields."));
 	}
 
 	// Validate jsonrpc version
 	FString Version;
 	if (!Request->TryGetStringField(TEXT("jsonrpc"), Version) || Version != TEXT("2.0"))
 	{
-		return FMonolithJsonUtils::ErrorResponse(nullptr, FMonolithJsonUtils::ErrInvalidRequest, TEXT("Missing or invalid jsonrpc version"));
+		return FMonolithJsonUtils::ErrorResponse(nullptr, FMonolithJsonUtils::ErrInvalidRequest, TEXT("Missing or invalid jsonrpc version — set \"jsonrpc\" to the string \"2.0\"."));
 	}
 
 	// Get method
 	FString Method;
 	if (!Request->TryGetStringField(TEXT("method"), Method))
 	{
-		return FMonolithJsonUtils::ErrorResponse(nullptr, FMonolithJsonUtils::ErrInvalidRequest, TEXT("Missing method field"));
+		return FMonolithJsonUtils::ErrorResponse(nullptr, FMonolithJsonUtils::ErrInvalidRequest, TEXT("Missing method field — set \"method\" to one of: initialize, tools/list, tools/call, ping."));
 	}
 
 	// Get id (null for notifications)
@@ -431,7 +431,7 @@ TSharedPtr<FJsonObject> FMonolithHttpServer::ProcessJsonRpcRequest(const TShared
 	else
 	{
 		Response = FMonolithJsonUtils::ErrorResponse(Id, FMonolithJsonUtils::ErrMethodNotFound,
-			FString::Printf(TEXT("Unknown method: %s"), *Method));
+			FString::Printf(TEXT("Unknown method: %s — use tools/list to enumerate available tools, then tools/call."), *Method));
 	}
 
 	// Notifications don't get responses
@@ -475,6 +475,15 @@ TSharedPtr<FJsonObject> FMonolithHttpServer::HandleInitialize(const TSharedPtr<F
 	Capabilities->SetObjectField(TEXT("tools"), ToolsCap);
 
 	Result->SetObjectField(TEXT("capabilities"), Capabilities);
+
+	// Onboarding hint so agents discover schemas instead of guessing parameter names.
+	Result->SetStringField(TEXT("instructions"),
+		TEXT("Monolith MCP server for Unreal Engine. ")
+		TEXT("Before calling a domain action, check its schema instead of guessing: ")
+		TEXT("monolith_discover() lists namespaces, monolith_discover('<namespace>') lists a ")
+		TEXT("namespace's actions, and describe_query('action_schema', ...) returns an action's ")
+		TEXT("exact parameter schema. monolith_guide(section='recipes') gives cross-namespace ")
+		TEXT("workflows, decision matrices, and gotchas."));
 
 	return FMonolithJsonUtils::SuccessResponse(Id, MakeShared<FJsonValueObject>(Result));
 }
@@ -581,13 +590,13 @@ TSharedPtr<FJsonObject> FMonolithHttpServer::HandleToolsCall(const TSharedPtr<FJ
 {
 	if (!Params.IsValid())
 	{
-		return FMonolithJsonUtils::ErrorResponse(Id, FMonolithJsonUtils::ErrInvalidParams, TEXT("Missing params"));
+		return FMonolithJsonUtils::ErrorResponse(Id, FMonolithJsonUtils::ErrInvalidParams, TEXT("Missing params — tools/call params must include \"name\" and optionally \"arguments\"."));
 	}
 
 	FString ToolName;
 	if (!Params->TryGetStringField(TEXT("name"), ToolName))
 	{
-		return FMonolithJsonUtils::ErrorResponse(Id, FMonolithJsonUtils::ErrInvalidParams, TEXT("Missing tool name"));
+		return FMonolithJsonUtils::ErrorResponse(Id, FMonolithJsonUtils::ErrInvalidParams, TEXT("Missing tool name — set params.name to a tool like monolith_discover or <namespace>_query."));
 	}
 
 	// Get arguments
@@ -620,7 +629,7 @@ TSharedPtr<FJsonObject> FMonolithHttpServer::HandleToolsCall(const TSharedPtr<FJ
 		if (!Arguments->TryGetStringField(TEXT("action"), Action))
 		{
 			return FMonolithJsonUtils::ErrorResponse(Id, FMonolithJsonUtils::ErrInvalidParams,
-				TEXT("Missing 'action' in arguments"));
+				TEXT("Missing 'action' in arguments — for *_query tools, set arguments.action; call monolith_discover(\"<namespace>\") to enumerate."));
 		}
 
 		// Collect top-level fields (excluding reserved keys) — MCP clients may
@@ -684,7 +693,7 @@ TSharedPtr<FJsonObject> FMonolithHttpServer::HandleToolsCall(const TSharedPtr<FJ
 	else
 	{
 		return FMonolithJsonUtils::ErrorResponse(Id, FMonolithJsonUtils::ErrMethodNotFound,
-			FString::Printf(TEXT("Unknown tool: %s"), *ToolName));
+			FString::Printf(TEXT("Unknown tool: %s — tool must start with monolith_ or end with _query; call tools/list to enumerate."), *ToolName));
 	}
 
 	// Record start time for duration measurement without shadowing the server start timestamp member.

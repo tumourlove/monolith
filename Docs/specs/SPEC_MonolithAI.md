@@ -45,6 +45,52 @@ Counts below are the **actual** registrations from `Source/MonolithAI/Private/Mo
 
 See [SPEC_CORE.md §11 Recent Fixes](../SPEC_CORE.md#recent-fixes-phase-j--shipped-in-0147) for the long-form descriptions.
 
+### Bulk Fill & Describe Surface (2026-05-11)
+
+`MonolithAIBulkFillAdapter` registers under `FMonolithBulkFillRegistry` for the `ai` namespace, exposed via the framework-level `bulk_fill_query("apply", ...)` and `describe_query("schema", ...)` dispatchers. Phase 5 of the MCP ergonomics rollout (design spec `Docs/plans/2026-05-11-monolith-mcp-ergonomics-design.md`, implementation plan `Docs/plans/2026-05-11-monolith-mcp-ergonomics.md`).
+
+**Surface summary.** `bulk_fill_query("apply", target_namespace="ai", target="<asset_path>", tree={...}, dry_run=<bool>, strict=<bool>)` walks the JSON tree against the target asset's reflection schema and either commits atomically or fails with a per-key error map. `describe_query("schema", target_namespace="ai", target="<asset_path|class>")` returns the settable surface — field paths, UE reflection types, ImportText forms, set-once flags, clamp annotations.
+
+**fill_kind catalogue (3 — enumerated against `MonolithAIBulkFillAdapter.cpp`):**
+
+| `fill_kind` | Target shape | Walks |
+|---|---|---|
+| `EQSTests` | `UEnvQuery` asset | `tests:[]` against the query's Options/Tests, supports weight / score_equation / filter_min / filter_max per row |
+| `BlackboardKeys` | `UBlackboardData` | `keys:{}` against `BlackboardKeys` (per-key type, description, instance-synced flag) |
+| `SmartObjectSlots` | `USmartObjectDefinition` | `slots:[]` against the definition's slot array (slot transform, behavior bindings, activity tags) |
+
+**Sample tree (EQSTests, design spec Appendix B.1):**
+
+```json
+{
+  "target": "/Game/AI/EQS/EQ_FlankPlayer",
+  "tree": {
+    "fill_kind": "EQSTests",
+    "tests": [
+      {"type": "Distance", "weight": 1.0, "score_equation": "Linear", "filter_min": 200, "filter_max": 2000},
+      {"type": "Trace",    "weight": 2.0, "score_equation": "InverseLinear"},
+      {"type": "Dot",      "weight": 0.5, "score_equation": "Constant"}
+    ],
+    "context_bindings": {"Querier": "Self", "Target": "PlayerPawn"}
+  },
+  "dry_run": true
+}
+```
+
+**Adapter-specific quirks.**
+
+- **Vector params are dict-only.** Per-row vector fields accept `{"x":0,"y":0,"z":0}` only; bare 3-tuples are rejected with a typed-mismatch reason. The reflection walker emits dict form on ImportText; the design spec's cross-cutting quirks row drives this invariant.
+- **Set-once Perception fields.** When the target is an `AAIController` or perception component, `sense_affiliation` and `dominant_sense` are tagged in the schema descriptor as **set-once** — a second write attempt does not silently no-op (status-quo behaviour) but surfaces a `SilentDrops` entry in the dry-run report with reason `"set-once field already written; subsequent write would no-op"`.
+- **`lose_sight_radius` clamp annotation.** The dry-run report annotates writes that violate the engine's `lose_sight_radius >= 1.1 × sight_radius` clamp with a `clamp` entry showing the original value, clamped value, and the rule. Schema also surfaces the clamp rule under `lose_sight_radius.conditional_on`.
+- **F15 GUID-vs-name distinction carries.** When BlackboardKeys targets a Blueprint-authored Blackboard, the reflection walker reuses the F15 `RequireBtNodeByGuid` helper pattern — invalid-GUID and unknown-GUID errors stay distinct (no collapse to a single "lookup failed" diagnostic).
+- **NavArea BP references.** Freshly-created NavArea Blueprints do not resolve in the same session. `describe_schema` flags `nav_area` fields as `conditional_on: "asset must be cooked or reopened — fresh BP references unresolvable same-session"`.
+
+**Limitations / v1.1 follow-ups.**
+
+- CSV ingest for EQS test arrays — `(WISHLIST v1.1)` per Q2 decision.
+- `batch_add_blackboard_keys` silent-overwrite-no-diff — `(v1.1)` dry-run integration on the existing batch action.
+- SmartObject slot activity-tag persistence does not round-trip save — `(WISHLIST)` per design Cross-Cutting Engine Quirks.
+
 ### Key Actions
 
 > **`build_behavior_tree_from_spec` (power action).** Creates a complete behavior tree from a JSON specification. Handles composite/decorator/service/task node creation, wiring, and compilation in a single call.

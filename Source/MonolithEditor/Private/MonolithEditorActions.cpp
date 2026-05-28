@@ -33,8 +33,21 @@
 #include "ShaderCompiler.h"
 #include "TextureResource.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/SkeletalMesh.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Animation/AnimationAsset.h"
+#include "Animation/AnimSequence.h"
+#include "Animation/AnimSingleNodeInstance.h"
 #include "Materials/MaterialInstanceDynamic.h"
+// asset_type=widget (Phase 1 expansion)
+#include "Blueprint/UserWidget.h"
+#include "Blueprint/WidgetBlueprintGeneratedClass.h"
+#include "Components/Widget.h"
+#include "Framework/Application/SlateApplication.h"
+#include "WidgetBlueprint.h"
+#include "Slate/WidgetRenderer.h"
+#include "RenderDeferredCleanup.h"
 #include "UObject/SavePackage.h"
 #include "LevelEditorViewport.h"
 #include "PixelFormat.h"
@@ -397,16 +410,65 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 	// --- Capture actions ---
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("capture_scene_preview"),
-		TEXT("Capture a screenshot of an asset (Niagara, material) rendered in a preview scene"),
+		TEXT("Capture a screenshot of an asset (Niagara, material, static_mesh, skeletal_mesh, widget) rendered in a preview scene"),
 		FMonolithActionHandler::CreateStatic(&HandleCaptureScenePreview),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path to preview"))
-			.Required(TEXT("asset_type"), TEXT("string"), TEXT("niagara | material"))
+			.Required(TEXT("asset_type"), TEXT("string"), TEXT("niagara | material | static_mesh | skeletal_mesh | widget"))
 			.Optional(TEXT("preview_mesh"), TEXT("string"), TEXT("Mesh for materials: plane, sphere, cube"), TEXT("plane"))
-			.Optional(TEXT("seek_time"), TEXT("number"), TEXT("Advance Niagara sim to this time (seconds)"), TEXT("0.0"))
+			.Optional(TEXT("seek_time"), TEXT("number"), TEXT("Advance Niagara sim or skeletal animation to this time (seconds)"), TEXT("0.0"))
+			.Optional(TEXT("animation_path"), TEXT("string"), TEXT("skeletal_mesh only: UAnimSequence to pose with at seek_time"))
+			.Optional(TEXT("scale"), TEXT("number"), TEXT("widget only: DPI multiplier (>=0.01)"), TEXT("1.0"))
 			.Optional(TEXT("camera"), TEXT("object"), TEXT("{location:[x,y,z], rotation:[p,y,r], fov:60}"))
 			.Optional(TEXT("resolution"), TEXT("array"), TEXT("[width, height]"), TEXT("[512,512]"))
 			.Optional(TEXT("output_path"), TEXT("string"), TEXT("Output PNG path (absolute or relative to project)"))
+			.Build());
+
+	// --- Inspect actions (Phase 2: 2026-05-26-monolith-editor-preview-expansion plan) ---
+	// Pure reflection / source-mip-read. No render path. Bodies in
+	// MonolithEditorInspectActions.cpp.
+
+	Registry.RegisterAction(TEXT("editor"), TEXT("inspect_material_pbr"),
+		TEXT("Inspect a UMaterialInterface's PBR parameter set. Returns scalar/vector/texture parameter lists plus heuristic classification of base color / normal / roughness / metallic textures and ORM / ARM / MRA channel-packing detection. Pure reflection — no render, no thumbnail. Use this when capture_scene_preview's pixel output isn't enough and you need the actual parameter values."),
+		FMonolithActionHandler::CreateStatic(&HandleInspectMaterialPBR),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("UMaterialInterface asset path (e.g. /Game/Materials/M_Foo or /Game/Materials/MI_Foo)"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("editor"), TEXT("inspect_texture_channels"),
+		TEXT("Inspect a UTexture2D's R/G/B/A channel statistics (min/max/mean per channel) plus format/dimensions/sRGB/alpha. Optional per-channel split PNGs for visual debugging. Reads source mip 0 directly — bypasses runtime mip selection and compression. Useful for ORM/ARM channel-packing audits, alpha-coverage checks, and verifying source authoring against runtime appearance."),
+		FMonolithActionHandler::CreateStatic(&HandleInspectTextureChannels),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("UTexture2D asset path (e.g. /Game/Textures/T_Foo)"))
+			.Optional(TEXT("emit_splits"), TEXT("bool"), TEXT("If true, emit 4 grayscale PNGs (R/G/B/A) under output_dir. Default false (stats only)."), TEXT("false"))
+			.Optional(TEXT("output_dir"), TEXT("string"), TEXT("Output directory for split PNGs (default: Saved/Tests/Monolith/InspectTexture/<TextureName>/)"))
+			.Build());
+
+	// --- Composite-capture actions (Phase 3: 2026-05-26-monolith-editor-preview-expansion plan) ---
+	// Multi-asset / show-flag overlay captures. Bodies live in
+	// MonolithEditorPreviewActions.cpp.
+
+	Registry.RegisterAction(TEXT("editor"), TEXT("capture_material_grid"),
+		TEXT("Render N materials side-by-side on identical preview meshes in ONE scene, ONE camera, ONE PNG. Shares lighting + HDRI across all cells (the value-add over N separate captures). Auto-grid layout via ceil(sqrt(N)) columns unless overridden. Use when comparing material variations visually — e.g. tweaking roughness across MI tiers, A/B-testing a master vs an instance, or auditing a packs's hero/variant materials."),
+		FMonolithActionHandler::CreateStatic(&HandleCaptureMaterialGrid),
+		FParamSchemaBuilder()
+			.Required(TEXT("material_paths"), TEXT("array"), TEXT("Array of UMaterialInterface asset paths (1..16). Each becomes one grid cell."))
+			.Optional(TEXT("output_path"), TEXT("string"), TEXT("Output PNG path. Default: Saved/Screenshots/Monolith/CaptureMaterialGrid/<timestamp>.png"))
+			.Optional(TEXT("resolution"), TEXT("array"), TEXT("[width, height] total grid PNG size. Default [1024, 1024]."), TEXT("[1024,1024]"))
+			.Optional(TEXT("columns"), TEXT("integer"), TEXT("Grid columns. Default: ceil(sqrt(material_count))."))
+			.Optional(TEXT("preview_mesh"), TEXT("string"), TEXT("Mesh per cell: plane | sphere | cube. Default sphere."), TEXT("sphere"))
+			.Optional(TEXT("camera"), TEXT("object"), TEXT("{location:[x,y,z], rotation:[p,y,r], fov:60} — overrides auto-framing"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("editor"), TEXT("capture_with_overlay"),
+		TEXT("Render a static mesh with an FEngineShowFlags overlay (wireframe | normals | uv_density | lightmap_density | shader_complexity). Useful for visual debugging — overdraw audits, UV-density checks, lightmap-density layout review, shader-complexity heatmaps. Static-mesh only in v1 (skeletal/material flavours can be added later)."),
+		FMonolithActionHandler::CreateStatic(&HandleCaptureWithOverlay),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("UStaticMesh asset path (e.g. /Engine/BasicShapes/Cube)"))
+			.Required(TEXT("mode"), TEXT("string"), TEXT("Overlay: wireframe | normals | uv_density | lightmap_density | shader_complexity"))
+			.Optional(TEXT("output_path"), TEXT("string"), TEXT("Output PNG path. Default: Saved/Screenshots/Monolith/CaptureWithOverlay/<timestamp>.png"))
+			.Optional(TEXT("resolution"), TEXT("array"), TEXT("[width, height]. Default [512, 512]."), TEXT("[512,512]"))
+			.Optional(TEXT("camera"), TEXT("object"), TEXT("{location:[x,y,z], rotation:[p,y,r], fov:60}"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("capture_sequence_frames"),
@@ -1590,10 +1652,263 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureScenePreview(
 			FOV, ResX, ResY, OutputPath, ESceneCaptureSource::SCS_FinalToneCurveHDR,
 			UVTiling, BgColor);
 	}
+	else if (AssetType.Equals(TEXT("static_mesh"), ESearchCase::IgnoreCase))
+	{
+		// Load asset.
+		UStaticMesh* Mesh = LoadObject<UStaticMesh>(nullptr, *AssetPath);
+		if (!Mesh)
+		{
+			return FMonolithActionResult::Error(
+				FString::Printf(TEXT("Failed to load static mesh: %s"), *AssetPath));
+		}
+
+		// Allocate transient preview scene (matches CaptureMaterialFrame pattern).
+		TSharedPtr<FAdvancedPreviewScene> PreviewScene =
+			MakeShareable(new FAdvancedPreviewScene(FPreviewScene::ConstructionValues()));
+		PreviewScene->SetFloorVisibility(false);
+
+		UStaticMeshComponent* MeshComp = NewObject<UStaticMeshComponent>(
+			GetTransientPackage(), NAME_None, RF_Transient);
+		MeshComp->SetStaticMesh(Mesh);
+		PreviewScene->AddComponent(MeshComp, MeshComp->GetRelativeTransform());
+
+		UTextureRenderTarget2D* RT = NewObject<UTextureRenderTarget2D>(
+			GetTransientPackage(), NAME_None, RF_Transient);
+		RT->InitAutoFormat(ResX, ResY);
+		RT->ClearColor = FLinearColor(0.18f, 0.18f, 0.18f);
+		RT->UpdateResourceImmediate(true);
+
+		USceneCaptureComponent2D* CaptureComp = NewObject<USceneCaptureComponent2D>(
+			GetTransientPackage(), NAME_None, RF_Transient);
+		CaptureComp->bTickInEditor = false;
+		CaptureComp->SetComponentTickEnabled(false);
+		CaptureComp->SetVisibility(true);
+		CaptureComp->bCaptureEveryFrame = false;
+		CaptureComp->bCaptureOnMovement = false;
+		CaptureComp->TextureTarget = RT;
+		CaptureComp->CaptureSource = ESceneCaptureSource::SCS_FinalToneCurveHDR;
+		CaptureComp->ProjectionType = ECameraProjectionMode::Perspective;
+		CaptureComp->FOVAngle = FOV;
+		CaptureComp->PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_RenderScenePrimitives;
+
+		UWorld* World = PreviewScene->GetWorld();
+		CaptureComp->RegisterComponentWithWorld(World);
+		CaptureComp->SetWorldLocationAndRotation(CameraLocation, CameraRotation);
+
+		bSuccess = RenderAndSaveCapture(CaptureComp, RT, ResX, ResY, OutputPath);
+
+		// Cleanup.
+		CaptureComp->TextureTarget = nullptr;
+		CaptureComp->UnregisterComponent();
+		PreviewScene->RemoveComponent(MeshComp);
+	}
+	else if (AssetType.Equals(TEXT("skeletal_mesh"), ESearchCase::IgnoreCase))
+	{
+		USkeletalMesh* SkelMesh = LoadObject<USkeletalMesh>(nullptr, *AssetPath);
+		if (!SkelMesh)
+		{
+			return FMonolithActionResult::Error(
+				FString::Printf(TEXT("Failed to load skeletal mesh: %s"), *AssetPath));
+		}
+
+		// Optional animation_path — when present, pose at seek_time. seek_time is
+		// already parsed at the top of this function (default 0.0).
+		UAnimSequence* AnimSeq = nullptr;
+		if (Params->HasField(TEXT("animation_path")))
+		{
+			FString AnimPath = Params->GetStringField(TEXT("animation_path"));
+			if (!AnimPath.IsEmpty())
+			{
+				AnimSeq = LoadObject<UAnimSequence>(nullptr, *AnimPath);
+				if (!AnimSeq)
+				{
+					return FMonolithActionResult::Error(
+						FString::Printf(TEXT("Failed to load animation sequence: %s"), *AnimPath));
+				}
+			}
+		}
+
+		TSharedPtr<FAdvancedPreviewScene> PreviewScene =
+			MakeShareable(new FAdvancedPreviewScene(FPreviewScene::ConstructionValues()));
+		PreviewScene->SetFloorVisibility(false);
+
+		USkeletalMeshComponent* SkelMeshComp = NewObject<USkeletalMeshComponent>(
+			GetTransientPackage(), NAME_None, RF_Transient);
+		SkelMeshComp->SetSkeletalMesh(SkelMesh);
+
+		if (AnimSeq)
+		{
+			// Pair-and-evaluate posing per UE 5.7 contract: PlayAnimation puts the
+			// component into single-node-instance mode + assigns the asset, then
+			// SetPosition forces evaluation at the target time without ticking.
+			SkelMeshComp->PlayAnimation(AnimSeq, /*bLooping=*/false);
+			SkelMeshComp->SetPosition(SeekTime, /*bFireNotifies=*/false);
+		}
+
+		PreviewScene->AddComponent(SkelMeshComp, SkelMeshComp->GetRelativeTransform());
+
+		// Tick the world once so the pose evaluation lands before capture.
+		UWorld* World = PreviewScene->GetWorld();
+		if (World)
+		{
+			World->Tick(ELevelTick::LEVELTICK_PauseTick, 0.0f);
+			SkelMeshComp->TickComponent(0.0f, ELevelTick::LEVELTICK_All, nullptr);
+			World->SendAllEndOfFrameUpdates();
+		}
+
+		UTextureRenderTarget2D* RT = NewObject<UTextureRenderTarget2D>(
+			GetTransientPackage(), NAME_None, RF_Transient);
+		RT->InitAutoFormat(ResX, ResY);
+		RT->ClearColor = FLinearColor(0.18f, 0.18f, 0.18f);
+		RT->UpdateResourceImmediate(true);
+
+		USceneCaptureComponent2D* CaptureComp = NewObject<USceneCaptureComponent2D>(
+			GetTransientPackage(), NAME_None, RF_Transient);
+		CaptureComp->bTickInEditor = false;
+		CaptureComp->SetComponentTickEnabled(false);
+		CaptureComp->SetVisibility(true);
+		CaptureComp->bCaptureEveryFrame = false;
+		CaptureComp->bCaptureOnMovement = false;
+		CaptureComp->TextureTarget = RT;
+		CaptureComp->CaptureSource = ESceneCaptureSource::SCS_FinalToneCurveHDR;
+		CaptureComp->ProjectionType = ECameraProjectionMode::Perspective;
+		CaptureComp->FOVAngle = FOV;
+		CaptureComp->PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_RenderScenePrimitives;
+
+		CaptureComp->RegisterComponentWithWorld(World);
+		CaptureComp->SetWorldLocationAndRotation(CameraLocation, CameraRotation);
+
+		bSuccess = RenderAndSaveCapture(CaptureComp, RT, ResX, ResY, OutputPath);
+
+		// Cleanup.
+		CaptureComp->TextureTarget = nullptr;
+		CaptureComp->UnregisterComponent();
+		PreviewScene->RemoveComponent(SkelMeshComp);
+	}
+	else if (AssetType.Equals(TEXT("widget"), ESearchCase::IgnoreCase))
+	{
+		// Headless / nullrhi / commandlet contexts have no rendering path — bail
+		// with the same -32603 convention claudedesign::capture_widget uses so
+		// agents can pattern-match the error code.
+		if (!FApp::CanEverRender())
+		{
+			return FMonolithActionResult::Error(
+				TEXT("Cannot render widget: this app has no rendering path (server / nullrhi / commandlet)"),
+				-32603);
+		}
+
+		// Load Widget Blueprint. UMG widget assets live in UWidgetBlueprint with
+		// the runtime UClass on GeneratedClass.
+		UWidgetBlueprint* WBP = LoadObject<UWidgetBlueprint>(nullptr, *AssetPath);
+		if (!WBP)
+		{
+			return FMonolithActionResult::Error(
+				FString::Printf(TEXT("Failed to load Widget Blueprint: %s"), *AssetPath),
+				-32602);
+		}
+		if (!WBP->GeneratedClass)
+		{
+			return FMonolithActionResult::Error(
+				FString::Printf(TEXT("Widget Blueprint '%s' has no GeneratedClass (needs compile?)"), *AssetPath),
+				-32603);
+		}
+
+		UClass* GenClass = WBP->GeneratedClass.Get();
+		if (!GenClass || !GenClass->IsChildOf(UUserWidget::StaticClass()))
+		{
+			return FMonolithActionResult::Error(
+				TEXT("Widget Blueprint GeneratedClass is not a UUserWidget subclass"),
+				-32603);
+		}
+
+		UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+		if (!EditorWorld)
+		{
+			return FMonolithActionResult::Error(
+				TEXT("No editor world available to create widget in"), -32603);
+		}
+
+		UUserWidget* Instance = CreateWidget<UUserWidget>(EditorWorld, GenClass);
+		if (!Instance)
+		{
+			return FMonolithActionResult::Error(
+				TEXT("CreateWidget<UUserWidget> returned null"), -32603);
+		}
+
+		// Resolved-question #2: ship optional `scale` param defaulting to 1.0, clamp >= 0.01.
+		double ScaleD = 1.0;
+		Params->TryGetNumberField(TEXT("scale"), ScaleD);
+		const float Scale = FMath::Max(0.01f, (float)ScaleD);
+
+		const uint32 PhysicalW = FMath::Max(1u, (uint32)(ResX * Scale));
+		const uint32 PhysicalH = FMath::Max(1u, (uint32)(ResY * Scale));
+
+		const bool bUseGammaCorrection = true;
+		const bool bIsLinearSpace = !bUseGammaCorrection;
+		const EPixelFormat RequestedFormat = FSlateApplication::Get().GetRenderer()->GetSlateRecommendedColorFormat();
+
+		UTextureRenderTarget2D* WidgetRT = NewObject<UTextureRenderTarget2D>();
+		WidgetRT->ClearColor = FLinearColor::Transparent;
+		WidgetRT->Filter = TF_Bilinear;
+		WidgetRT->SRGB = bIsLinearSpace;
+		WidgetRT->TargetGamma = 1;
+		WidgetRT->InitCustomFormat(PhysicalW, PhysicalH, RequestedFormat, bIsLinearSpace);
+		WidgetRT->UpdateResourceImmediate(/*bClearRenderTarget=*/true);
+
+		// FWidgetRenderer derives from FDeferredCleanupInterface — must be deleted
+		// via BeginCleanup, not raw `delete`. Mirrors sibling claudedesign pattern.
+		FWidgetRenderer* WRenderer = new FWidgetRenderer(bUseGammaCorrection, /*bInClearTarget=*/true);
+		WRenderer->SetIsPrepassNeeded(true);
+
+		const TSharedRef<SWidget> SlateWidget = Instance->TakeWidget();
+
+		// First draw triggers material handle creation + shader compilation. Without
+		// the warmup + FinishAllCompilation, material-backed widget batches are
+		// silently skipped (SlateRHIRenderingPolicy.cpp:1109).
+		WRenderer->DrawWidget(WidgetRT, SlateWidget, Scale, FVector2D(ResX, ResY), 0.0f);
+		FlushRenderingCommands();
+		if (GShaderCompilingManager)
+		{
+			GShaderCompilingManager->FinishAllCompilation();
+		}
+
+		WRenderer->DrawWidget(WidgetRT, SlateWidget, Scale, FVector2D(ResX, ResY), 0.0f);
+		FlushRenderingCommands();
+
+		// Export — match the sibling pattern. ExportRenderTarget2DAsPNG is soft-
+		// deprecated but functional in 5.7; mirror existing-pattern choice.
+		const FString OutDir = FPaths::GetPath(OutputPath);
+		if (!OutDir.IsEmpty())
+		{
+			IFileManager::Get().MakeDirectory(*OutDir, /*Tree=*/true);
+		}
+
+		bool bExportOk = false;
+		{
+			TUniquePtr<FArchive> Writer(IFileManager::Get().CreateFileWriter(*OutputPath));
+			if (Writer)
+			{
+				bExportOk = FImageUtils::ExportRenderTarget2DAsPNG(WidgetRT, *Writer);
+				Writer->Close();
+			}
+		}
+
+		BeginCleanup(WRenderer);
+
+		bSuccess = bExportOk;
+
+		// Physical (scale-adjusted) resolution dominates for the widget branch;
+		// stash it back in ResX/ResY so the success payload below reflects what
+		// was actually written.
+		ResX = (int32)PhysicalW;
+		ResY = (int32)PhysicalH;
+	}
 	else
 	{
 		return FMonolithActionResult::Error(
-			FString::Printf(TEXT("Unsupported asset_type: %s (supported: niagara, material)"), *AssetType));
+			FString::Printf(
+				TEXT("Unsupported asset_type: %s (supported: niagara, material, static_mesh, skeletal_mesh, widget)"),
+				*AssetType));
 	}
 
 	double ElapsedMs = (FPlatformTime::Seconds() - StartTime) * 1000.0;

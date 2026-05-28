@@ -169,12 +169,32 @@ uint32 FMonolithUIStyleService::ComputeContentHash(
     UClass* StyleClass,
     const TSharedPtr<FJsonObject>& Properties)
 {
-    // Mix the class name into the hash so a Button-style with the same fields
-    // as a Text-style still gets a distinct hash. Otherwise a property bag
-    // {ColorAndOpacity:white} would collide between style types.
+    // Two-arg overload retained for callers that don't carry an asset_name
+    // (e.g. unit tests verifying property-bag equivalence). New production
+    // call sites should prefer the three-arg overload below.
+    return ComputeContentHash(StyleClass, FString(), Properties);
+}
+
+uint32 FMonolithUIStyleService::ComputeContentHash(
+    UClass* StyleClass,
+    const FString& AssetName,
+    const TSharedPtr<FJsonObject>& Properties)
+{
+    // Mix the class name + asset_name into the hash so a Button-style with the
+    // same fields as a Text-style still gets a distinct hash, AND so two
+    // requests under the same class with an empty property bag but different
+    // asset names hash to different buckets. The latter clause closes Bug #1
+    // from the 2026-05-16 UI gap audit: previously,
+    //   create_common_text_style("CTS_A", {}) followed by
+    //   create_common_text_style("CTS_B", {})
+    // collided on the same content-hash (Step 3 of ResolveOrCreate) and the
+    // second call returned the first asset's resolution. Including AssetName
+    // in the canonical buffer means each name produces a distinct hash.
     FString Buffer;
     Buffer.Reserve(256);
     Buffer.Append(StyleClass ? StyleClass->GetName() : TEXT("<null>"));
+    Buffer.Append(TEXT("|"));
+    Buffer.Append(AssetName);
     Buffer.Append(TEXT("|"));
     AppendCanonicalObject(Buffer, Properties);
 
@@ -425,10 +445,18 @@ FUIStyleResolution FMonolithUIStyleService::ResolveOrCreate(
         return Result;
     }
 
-    const uint32 ContentHash = ComputeContentHash(StyleClass, Properties);
+    // Derive the asset name first using the property-bag-only hash (no name
+    // mix-in), so a caller who omits AssetName still gets a deterministic
+    // "Auto_<type>_<hash>" suffix derived from properties alone. Then compute
+    // the FINAL content-hash that includes the EffectiveName — Bug #1 fix:
+    // without the name mix-in, two empty-property-bag requests under different
+    // asset_names collided in the Step-3 hash cache and returned the wrong
+    // asset on the second call.
+    const uint32 PropOnlyHash = ComputeContentHash(StyleClass, Properties);
     const FString EffectiveName = AssetName.IsEmpty()
-        ? DeriveNameFromHash(StyleClass, ContentHash)
+        ? DeriveNameFromHash(StyleClass, PropOnlyHash)
         : AssetName;
+    const uint32 ContentHash = ComputeContentHash(StyleClass, EffectiveName, Properties);
 
     // ---- Step 1: cache by name -------------------------------------------
     {

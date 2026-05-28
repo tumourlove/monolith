@@ -1298,15 +1298,19 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::ConvertToHism(const TShar
 		return FMonolithActionResult::Error(TEXT("Failed to spawn HISM host actor"));
 	}
 
+	HISMActor->Modify();
+
 	// Add root scene component
-	USceneComponent* RootComp = NewObject<USceneComponent>(HISMActor, TEXT("RootComponent"));
+	USceneComponent* RootComp = NewObject<USceneComponent>(HISMActor, USceneComponent::StaticClass(), TEXT("RootComponent"), RF_Transactional);
 	HISMActor->SetRootComponent(RootComp);
+	HISMActor->AddInstanceComponent(RootComp);
 	RootComp->RegisterComponent();
 	RootComp->SetWorldLocation(AvgLocation);
 
 	// Create HISM component
-	UHierarchicalInstancedStaticMeshComponent* HISM = NewObject<UHierarchicalInstancedStaticMeshComponent>(HISMActor, TEXT("HISMComponent"));
+	UHierarchicalInstancedStaticMeshComponent* HISM = NewObject<UHierarchicalInstancedStaticMeshComponent>(HISMActor, UHierarchicalInstancedStaticMeshComponent::StaticClass(), TEXT("HISMComponent"), RF_Transactional);
 	HISM->SetupAttachment(RootComp);
+	HISMActor->AddInstanceComponent(HISM);
 	HISM->RegisterComponent();
 	HISM->SetStaticMesh(Mesh);
 	HISM->SetMobility(EComponentMobility::Static);
@@ -1357,13 +1361,26 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::ConvertToHism(const TShar
 		HISMActor->SetFolderPath(FName(*Folder));
 	}
 
+	// Persistence sanity-check before destroying sources.
+	if (HISM->GetInstanceCount() != Transforms.Num())
+	{
+		Transaction.Cancel();
+		World->DestroyActor(HISMActor);
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("HISM persistence guard failed: expected %d instances, got %d. Source actors preserved."),
+			Transforms.Num(), HISM->GetInstanceCount()));
+	}
+
 	// Delete original actors
 	TArray<TSharedPtr<FJsonValue>> RemovedArr;
 	for (AActor* Actor : SourceActors)
 	{
 		RemovedArr.Add(MakeShared<FJsonValueString>(Actor->GetActorNameOrLabel()));
+		Actor->Modify();
 		World->DestroyActor(Actor);
 	}
+
+	HISMActor->MarkPackageDirty();
 
 	auto Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("hism_actor"), HISMActor->GetActorNameOrLabel());

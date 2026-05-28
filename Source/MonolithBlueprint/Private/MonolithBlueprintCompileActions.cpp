@@ -18,6 +18,8 @@
 #include "Engine/BlueprintGeneratedClass.h"
 #include "MonolithBlueprintEditCradle.h"
 #include "ScopedTransaction.h"
+#include "UObject/UObjectIterator.h"
+#include "Engine/Blueprint.h"
 
 // ============================================================
 //  Registration
@@ -70,6 +72,13 @@ void FMonolithBlueprintCompileActions::RegisterActions(FMonolithToolRegistry& Re
 		FMonolithActionHandler::CreateStatic(&HandleSaveAsset),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path to save"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("save_dirty_assets"),
+		TEXT("Save ALL currently-dirty Blueprint and Widget Blueprint packages in one sweep (closes the data-loss window after a batch of edit actions that dirty but do not persist packages). Filter with path_prefix (default /Game). Returns saved[], failed[], count."),
+		FMonolithActionHandler::CreateStatic(&HandleSaveDirtyAssets),
+		FParamSchemaBuilder()
+			.Optional(TEXT("path_prefix"), TEXT("string"), TEXT("Only save assets whose package path starts with this prefix (default: /Game). Pass empty string to save all dirty Blueprint/Widget packages regardless of path."), TEXT("/Game"))
 			.Build());
 }
 
@@ -644,5 +653,48 @@ FMonolithActionResult FMonolithBlueprintCompileActions::HandleSaveAsset(const TS
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to save asset: %s"), *AssetPath));
 	}
+	return FMonolithActionResult::Success(Root);
+}
+
+// --- save_dirty_assets (gap #10) ---
+// Edit actions dirty packages but do not persist them. This sweep saves every dirty Blueprint /
+// Widget Blueprint (UWidgetBlueprint : UBlueprint, so one iterator covers both) in a single call,
+// reusing the exact SaveLoadedAsset path as save_asset. Closes the data-loss window if the editor
+// closes between a batch of edits and a manual save.
+FMonolithActionResult FMonolithBlueprintCompileActions::HandleSaveDirtyAssets(const TSharedPtr<FJsonObject>& Params)
+{
+	FString PathPrefix = TEXT("/Game");
+	Params->TryGetStringField(TEXT("path_prefix"), PathPrefix); // empty string = no path filter
+
+	TArray<TSharedPtr<FJsonValue>> SavedArr;
+	TArray<TSharedPtr<FJsonValue>> FailedArr;
+
+	for (TObjectIterator<UBlueprint> It; It; ++It)
+	{
+		UBlueprint* BP = *It;
+		if (!IsValid(BP))
+		{
+			continue;
+		}
+		UPackage* Pkg = BP->GetOutermost();
+		if (!Pkg || Pkg == GetTransientPackage() || !Pkg->IsDirty())
+		{
+			continue;
+		}
+		const FString PkgName = Pkg->GetName();
+		if (!PathPrefix.IsEmpty() && !PkgName.StartsWith(PathPrefix))
+		{
+			continue;
+		}
+
+		const FString AssetPath = BP->GetPathName();
+		const bool bSaved = UEditorAssetLibrary::SaveLoadedAsset(BP, false);
+		(bSaved ? SavedArr : FailedArr).Add(MakeShared<FJsonValueString>(AssetPath));
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetArrayField(TEXT("saved"), SavedArr);
+	Root->SetArrayField(TEXT("failed"), FailedArr);
+	Root->SetNumberField(TEXT("count"), SavedArr.Num());
 	return FMonolithActionResult::Success(Root);
 }

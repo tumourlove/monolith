@@ -983,6 +983,248 @@ namespace MonolithUI::SpecActionsInternal
         const FUISpecSerializerResult R = FUISpecSerializer::Dump(In);
         return FMonolithActionResult::Success(PackDumpResponse(R));
     }
+
+    // ------------------------------------------------------------------
+    // Phase 3 Item #18 (2026-05-16 UI Gap Audit) — ui::build_menu_from_spec
+    //
+    // Conservative MVP scope (matches the orchestrator-blessed Phase 2 Item #10
+    // pattern: validator + registration FULL, multi-screen builder pipeline
+    // STUB-with-clear-status). The action accepts a menu-shape document of:
+    //
+    //     {
+    //       "layers":       [{ "id": "...", "screens": ["..."] }, ...],
+    //       "screens":      [{ "id": "...", "asset_path": "/Game/UI/...",
+    //                          "spec": <FUISpecDocument>?, "kind": "main_menu"|"settings"|... }, ...],
+    //       "focus_table":  [{ "screen": "...", "target": "..." }, ...],
+    //       "nav_overrides": [{ "screen": "...", "widget": "...",
+    //                           "direction": "Up", "target": "..." }, ...]
+    //     }
+    //
+    // For each screen that supplies an embedded `spec`, the MVP dispatches it
+    // through the existing FUISpecBuilder pipeline (one call per screen). The
+    // focus_table / nav_overrides / layer-aggregation surface is captured in
+    // the response under `status="stub"` so the LLM can see the partial
+    // implementation boundary without crashing on missing functionality. Modes
+    // (`dry_run`, `treat_warnings_as_errors`, `raw_mode`, `overwrite`) are
+    // forwarded onto every per-screen build call so the menu-level mode flag
+    // propagates uniformly.
+    //
+    // Full implementation (deferred to a follow-up issue): build pre-walker
+    // that emits the activatable-stack layer hierarchy first, threading
+    // focus_table writes into the post-compile CDO pass on each screen WBP,
+    // and applying nav_overrides via SetNavigationRuleExplicit.
+
+    static FMonolithActionResult HandleBuildMenuFromSpec(const TSharedPtr<FJsonObject>& Params)
+    {
+        if (!Params.IsValid())
+        {
+            return FMonolithActionResult::Error(TEXT("Missing params object"), -32602);
+        }
+
+        FString RequestId;
+        Params->TryGetStringField(TEXT("request_id"), RequestId);
+
+        bool bDryRun = false, bTreatWarningsAsErrors = false, bRawMode = false, bOverwrite = true;
+        Params->TryGetBoolField(TEXT("dry_run"), bDryRun);
+        Params->TryGetBoolField(TEXT("treat_warnings_as_errors"), bTreatWarningsAsErrors);
+        Params->TryGetBoolField(TEXT("raw_mode"), bRawMode);
+        Params->TryGetBoolField(TEXT("overwrite"), bOverwrite);
+
+        // ---- Validator (Phase 3 Item #18 MVP clause) -------------------------
+        // The full FUISpecValidator extension lives in UISpecValidator.cpp;
+        // the MVP wires the menu-shape structural checks inline here so the
+        // action surface is unblocked without dragging FUISpecValidator into
+        // a partial refactor.
+        TArray<TSharedPtr<FJsonValue>> StructuralErrors;
+        TArray<TSharedPtr<FJsonValue>> StructuralWarnings;
+
+        auto AddError = [&StructuralErrors](const FString& Category, const FString& JsonPath, const FString& Message)
+        {
+            TSharedPtr<FJsonObject> E = MakeShared<FJsonObject>();
+            E->SetStringField(TEXT("category"), Category);
+            E->SetStringField(TEXT("json_path"), JsonPath);
+            E->SetStringField(TEXT("message"), Message);
+            StructuralErrors.Add(MakeShared<FJsonValueObject>(E));
+        };
+
+        auto AddWarning = [&StructuralWarnings](const FString& Category, const FString& JsonPath, const FString& Message)
+        {
+            TSharedPtr<FJsonObject> W = MakeShared<FJsonObject>();
+            W->SetStringField(TEXT("category"), Category);
+            W->SetStringField(TEXT("json_path"), JsonPath);
+            W->SetStringField(TEXT("message"), Message);
+            StructuralWarnings.Add(MakeShared<FJsonValueObject>(W));
+        };
+
+        // screens[] is the load-bearing array. layers[]/focus_table[]/nav_overrides[]
+        // are partially-supported in the MVP — caller-supplied entries are echoed
+        // back so downstream tooling can surface "expected vs delivered".
+        const TArray<TSharedPtr<FJsonValue>>* Screens = nullptr;
+        if (!Params->TryGetArrayField(TEXT("screens"), Screens) || !Screens || Screens->Num() == 0)
+        {
+            AddError(TEXT("MenuShape"), TEXT("screens"),
+                TEXT("`screens` array is required and must contain at least one entry. "
+                     "Each entry needs {id, asset_path} and either an embedded `spec` "
+                     "(FUISpecDocument) or a `kind` token for scaffolder dispatch (kind dispatch "
+                     "is STUB in this MVP)."));
+        }
+
+        const TArray<TSharedPtr<FJsonValue>>* Layers = nullptr;
+        const bool bHasLayers = Params->TryGetArrayField(TEXT("layers"), Layers) && Layers && Layers->Num() > 0;
+
+        const TArray<TSharedPtr<FJsonValue>>* FocusTable = nullptr;
+        const bool bHasFocusTable = Params->TryGetArrayField(TEXT("focus_table"), FocusTable) && FocusTable;
+
+        const TArray<TSharedPtr<FJsonValue>>* NavOverrides = nullptr;
+        const bool bHasNavOverrides = Params->TryGetArrayField(TEXT("nav_overrides"), NavOverrides) && NavOverrides;
+
+        if (bHasLayers || bHasFocusTable || bHasNavOverrides)
+        {
+            AddWarning(TEXT("MenuShape"), TEXT("layers|focus_table|nav_overrides"),
+                TEXT("layers / focus_table / nav_overrides are accepted but applied as STUB in this MVP. "
+                     "Per-screen `spec` builds run FULL via FUISpecBuilder. The cross-screen "
+                     "aggregation surface (activatable-stack layer hierarchy, focus-table CDO writes, "
+                     "nav-override propagation) is deferred to issue #3-18b. Caller-supplied entries "
+                     "echo back in the response under `deferred_aggregation`."));
+        }
+
+        // Hard-fail on structural errors. The result payload mirrors
+        // PackResponse so consumers can dispatch on bSuccess uniformly.
+        if (StructuralErrors.Num() > 0)
+        {
+            TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+            Out->SetBoolField(TEXT("bSuccess"), false);
+            if (!RequestId.IsEmpty()) Out->SetStringField(TEXT("request_id"), RequestId);
+            Out->SetArrayField(TEXT("errors"), StructuralErrors);
+            Out->SetArrayField(TEXT("warnings"), StructuralWarnings);
+            Out->SetStringField(TEXT("status"), TEXT("validation_failed"));
+            return FMonolithActionResult::Success(Out);
+        }
+
+        // ---- Per-screen dispatch into FUISpecBuilder -------------------------
+        TArray<TSharedPtr<FJsonValue>> ScreenResults;
+        int32 TotalCreated = 0, TotalModified = 0, TotalRemoved = 0;
+        bool bAllSucceeded = true;
+
+        for (int32 i = 0; i < Screens->Num(); ++i)
+        {
+            const TSharedPtr<FJsonValue>& V = (*Screens)[i];
+            const TSharedPtr<FJsonObject>* ScreenObj = nullptr;
+            if (!V.IsValid() || !V->TryGetObject(ScreenObj) || !ScreenObj)
+            {
+                AddError(TEXT("MenuShape"),
+                    FString::Printf(TEXT("screens[%d]"), i),
+                    TEXT("screen entry must be an object"));
+                bAllSucceeded = false;
+                continue;
+            }
+
+            FString ScreenId, ScreenAssetPath, ScreenKind;
+            (*ScreenObj)->TryGetStringField(TEXT("id"), ScreenId);
+            (*ScreenObj)->TryGetStringField(TEXT("asset_path"), ScreenAssetPath);
+            (*ScreenObj)->TryGetStringField(TEXT("kind"), ScreenKind);
+
+            if (ScreenAssetPath.IsEmpty())
+            {
+                AddError(TEXT("MenuShape"),
+                    FString::Printf(TEXT("screens[%d].asset_path"), i),
+                    TEXT("each screen entry requires `asset_path`"));
+                bAllSucceeded = false;
+                continue;
+            }
+
+            // Per-screen result block — populated below.
+            TSharedPtr<FJsonObject> ScreenOut = MakeShared<FJsonObject>();
+            ScreenOut->SetStringField(TEXT("id"), ScreenId);
+            ScreenOut->SetStringField(TEXT("asset_path"), ScreenAssetPath);
+            if (!ScreenKind.IsEmpty())
+            {
+                ScreenOut->SetStringField(TEXT("kind"), ScreenKind);
+            }
+
+            const TSharedPtr<FJsonObject>* EmbeddedSpec = nullptr;
+            if (!(*ScreenObj)->TryGetObjectField(TEXT("spec"), EmbeddedSpec) || !EmbeddedSpec)
+            {
+                // Kind-only dispatch is the STUB surface. Surface it loudly so
+                // the caller knows the per-screen WBP is NOT being built.
+                ScreenOut->SetStringField(TEXT("status"), TEXT("stub"));
+                ScreenOut->SetStringField(TEXT("reason"),
+                    TEXT("screen has no embedded `spec` — kind-based scaffolder dispatch is deferred to issue #3-18b. "
+                         "Pass a full FUISpecDocument under screens[N].spec to build this screen now, or call "
+                         "scaffold_main_menu / scaffold_settings_panel_with_tabs / scaffold_pause_menu directly."));
+                ScreenResults.Add(MakeShared<FJsonValueObject>(ScreenOut));
+                continue;
+            }
+
+            FUISpecDocument Document;
+            FUISpecValidationResult ParseValidation;
+            if (!ParseDocument(*EmbeddedSpec, Document, ParseValidation))
+            {
+                ScreenOut->SetBoolField(TEXT("bSuccess"), false);
+                ScreenOut->SetStringField(TEXT("status"), TEXT("parse_failed"));
+                ScreenOut->SetStringField(TEXT("llm_report"), ParseValidation.ToLLMReport());
+                ScreenResults.Add(MakeShared<FJsonValueObject>(ScreenOut));
+                bAllSucceeded = false;
+                continue;
+            }
+
+            FUISpecBuilderInputs In;
+            In.Document  = &Document;
+            In.AssetPath = ScreenAssetPath;
+            In.bOverwrite             = bOverwrite;
+            In.bDryRun                = bDryRun;
+            In.bTreatWarningsAsErrors = bTreatWarningsAsErrors;
+            In.bRawMode               = bRawMode;
+            In.RequestId              = FString::Printf(TEXT("%s:%s"), *RequestId, *ScreenId);
+            if (Document.bTreatWarningsAsErrors)
+            {
+                In.bTreatWarningsAsErrors = true;
+            }
+
+            const FUISpecBuilderResult R = FUISpecBuilder::Build(In);
+            TotalCreated  += R.NodesCreated;
+            TotalModified += R.NodesModified;
+            TotalRemoved  += R.NodesRemoved;
+            if (!R.bSuccess) bAllSucceeded = false;
+
+            // Each screen reuses the shared PackResponse shape for symmetry
+            // with build_ui_from_spec callers.
+            TSharedPtr<FJsonObject> Packed = PackResponse(R, bDryRun);
+            ScreenOut->SetObjectField(TEXT("build_result"), Packed);
+            ScreenResults.Add(MakeShared<FJsonValueObject>(ScreenOut));
+        }
+
+        // ---- Deferred aggregation echo -------------------------------------
+        // Capture caller-supplied layers / focus_table / nav_overrides so
+        // downstream tooling can post-process them in user-space until the
+        // full builder pipeline lands.
+        TSharedPtr<FJsonObject> DeferredAgg = MakeShared<FJsonObject>();
+        if (bHasLayers)        DeferredAgg->SetArrayField(TEXT("layers"),        *Layers);
+        if (bHasFocusTable)    DeferredAgg->SetArrayField(TEXT("focus_table"),   *FocusTable);
+        if (bHasNavOverrides)  DeferredAgg->SetArrayField(TEXT("nav_overrides"), *NavOverrides);
+
+        // ---- Response ------------------------------------------------------
+        TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+        Out->SetBoolField(TEXT("bSuccess"), bAllSucceeded && StructuralErrors.Num() == 0);
+        if (!RequestId.IsEmpty()) Out->SetStringField(TEXT("request_id"), RequestId);
+        Out->SetStringField(TEXT("status"),
+            (bHasLayers || bHasFocusTable || bHasNavOverrides) ? TEXT("partial_stub") : TEXT("ok"));
+        Out->SetArrayField(TEXT("screens"), ScreenResults);
+
+        TSharedPtr<FJsonObject> Counts = MakeShared<FJsonObject>();
+        Counts->SetNumberField(TEXT("created"),  TotalCreated);
+        Counts->SetNumberField(TEXT("modified"), TotalModified);
+        Counts->SetNumberField(TEXT("removed"),  TotalRemoved);
+        Out->SetObjectField(TEXT("aggregate_node_counts"), Counts);
+
+        if (StructuralErrors.Num() > 0)  Out->SetArrayField(TEXT("errors"),   StructuralErrors);
+        if (StructuralWarnings.Num() > 0) Out->SetArrayField(TEXT("warnings"), StructuralWarnings);
+        if (DeferredAgg->Values.Num() > 0)
+        {
+            Out->SetObjectField(TEXT("deferred_aggregation"), DeferredAgg);
+        }
+        return FMonolithActionResult::Success(Out);
+    }
 } // namespace MonolithUI::SpecActionsInternal
 
 
@@ -1040,5 +1282,50 @@ void MonolithUI::FSpecActions::Register(FMonolithToolRegistry& Registry)
             .Required(TEXT("asset_path"), TEXT("string"), TEXT("Long-package asset path of the WBP to read, e.g. /Game/UI/MyMenu"))
             .Optional(TEXT("emit_defaults"), TEXT("boolean"), TEXT("Include fields that match engine defaults. Default false."), TEXT("false"))
             .Optional(TEXT("request_id"), TEXT("string"), TEXT("Caller-supplied UUID echoed back in the response."))
+            .Build());
+
+    // Phase 3 Item #18 (2026-05-16 UI Gap Audit) — build_menu_from_spec.
+    // Always-on (not WITH_COMMONUI-gated): the spec system is the source
+    // of the shared menu document grammar; per-screen WBPs may use CommonUI
+    // types but the dispatch surface itself is engine-side. MVP-STUB —
+    // per-screen `spec` builds run FULL via FUISpecBuilder; cross-screen
+    // aggregation (layers / focus_table / nav_overrides) is deferred to
+    // issue #3-18b. Same modes as build_ui_from_spec.
+    Registry.RegisterAction(
+        TEXT("ui"), TEXT("build_menu_from_spec"),
+        TEXT("Phase 3 Tier-3 — multi-screen menu document builder. Accepts {layers[], screens[], "
+             "focus_table[], nav_overrides[]}. For each screens[N] entry that includes an embedded "
+             "`spec` (FUISpecDocument), dispatches through the existing FUISpecBuilder pipeline "
+             "(same atomicity + dry-run + strict-mode semantics as build_ui_from_spec). screens[N] "
+             "entries without an embedded `spec` echo back as status='stub' (kind-based scaffolder "
+             "dispatch deferred to issue #3-18b). layers / focus_table / nav_overrides are accepted, "
+             "validated structurally, and echoed under `deferred_aggregation` so user-space tooling "
+             "can post-process — the cross-screen activatable-stack hierarchy, focus-table CDO writes, "
+             "and nav-override propagation are deferred. Modes (`dry_run`, `treat_warnings_as_errors`, "
+             "`raw_mode`, `overwrite`) propagate to every per-screen build call. Returns "
+             "{ bSuccess, status, screens[], aggregate_node_counts, errors?, warnings?, "
+             "deferred_aggregation?, request_id? } where each screens[] entry includes a full "
+             "build_result object (same shape as build_ui_from_spec)."),
+        FMonolithActionHandler::CreateStatic(&HandleBuildMenuFromSpec),
+        FParamSchemaBuilder()
+            .Required(TEXT("screens"), TEXT("array"),
+                TEXT("[{ id, asset_path, spec?, kind? }, ...] — each entry triggers a per-screen FUISpecBuilder "
+                     "dispatch when `spec` is set. Without `spec`, the entry echoes status='stub'."))
+            .Optional(TEXT("layers"), TEXT("array"),
+                TEXT("[{ id, screens[] }, ...] — activatable-stack layer hierarchy. STUB (echoed back, not applied)."))
+            .Optional(TEXT("focus_table"), TEXT("array"),
+                TEXT("[{ screen, target }, ...] — per-screen DesiredFocusTargetName CDO writes. STUB (echoed back)."))
+            .Optional(TEXT("nav_overrides"), TEXT("array"),
+                TEXT("[{ screen, widget, direction, target }, ...] — per-widget nav overrides. STUB (echoed back)."))
+            .Optional(TEXT("overwrite"), TEXT("boolean"),
+                TEXT("Replace existing WBPs at each screen's asset_path. Default true."), TEXT("true"))
+            .Optional(TEXT("dry_run"), TEXT("boolean"),
+                TEXT("Validate + walk each per-screen spec; do not commit. Default false."), TEXT("false"))
+            .Optional(TEXT("treat_warnings_as_errors"), TEXT("boolean"),
+                TEXT("Promote validator warnings to errors. Default false."), TEXT("false"))
+            .Optional(TEXT("raw_mode"), TEXT("boolean"),
+                TEXT("Bypass the per-write allowlist gate on every per-screen build. Default false."), TEXT("false"))
+            .Optional(TEXT("request_id"), TEXT("string"),
+                TEXT("Caller-supplied UUID echoed back; per-screen builds receive '<request_id>:<screen.id>'."))
             .Build());
 }

@@ -39,6 +39,18 @@
 // from Phases A-G+I.
 #include "Actions/MonolithUISpecActions.h"
 
+// Phase 4 (2026-05-11) — bulk_fill / describe adapter for target_namespace="ui".
+// Per H5 stub-adapter invariant: Register() ALWAYS runs from StartupModule,
+// regardless of WITH_COMMONUI. The adapter BODY splits per fill_kind:
+//   * vanilla UMG paths (DataTableRows, WidgetProperties, slot-prop describe)
+//     run gate-free
+//   * CommonUI-specific paths (InputActionDataTable) are #if WITH_COMMONUI
+//     gated INSIDE the adapter with a clean stub error in the #else branch.
+// SINGLE-TRANSACTION INVARIANT: the 40-row input-action DT write commits as
+// ONE FScopedTransaction + ONE Modify + N AddRow + ONE MarkPackageDirty —
+// THE fix for the 2026-04-25 parallel-burst editor crash.
+#include "MonolithUIBulkFillAdapter.h"
+
 #if WITH_COMMONUI
 #include "CommonUI/MonolithCommonUIActions.h"
 #include "Style/MonolithUIStyleService.h"   // Phase G: cache stats + shutdown
@@ -89,6 +101,13 @@ void FMonolithUIModule::StartupModule()
     // Phase H (2026-04-26) -- transactional spec builder + schema dump.
     // 2 actions: ui::build_ui_from_spec (the centerpiece) + ui::dump_ui_spec_schema.
     MonolithUI::FSpecActions::Register(Registry);
+
+    // Phase 4 (2026-05-11) — bulk_fill / describe adapter registration.
+    // H5 stub-adapter invariant: register call ALWAYS runs, regardless of
+    // WITH_COMMONUI. Body splits on fill_kind inside the adapter — vanilla UMG
+    // paths run gate-free; CommonUI paths (InputActionDataTable) are gated
+    // #if WITH_COMMONUI INSIDE the adapter with a clean stub error fallback.
+    FMonolithUIBulkFillAdapter::Register();
 
 #if WITH_COMMONUI
     FMonolithCommonUIActions::RegisterAll(Registry);
@@ -159,6 +178,10 @@ void FMonolithUIModule::ShutdownModule()
         FCoreDelegates::OnPostEngineInit.Remove(GMonolithUIPostEngineInitHandle);
         GMonolithUIPostEngineInitHandle.Reset();
     }
+
+    // Phase 4 (2026-05-11) — symmetric unregister of the bulk_fill / describe
+    // adapter. Mirrors the unconditional Register() in StartupModule.
+    FMonolithUIBulkFillAdapter::Unregister();
 
     FMonolithToolRegistry::Get().UnregisterNamespace(TEXT("ui"));
 

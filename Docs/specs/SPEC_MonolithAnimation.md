@@ -16,7 +16,7 @@
 |-------|---------------|
 | `FMonolithAnimationModule` | Registers 125 animation actions across `MonolithAnimationActions.cpp` (103), `MonolithPoseSearchActions.cpp` (13), `MonolithAbpWriteActions.cpp` (5), `MonolithControlRigWriteActions.cpp` (3), `MonolithAnimLayoutActions.cpp` (1) |
 | `FMonolithAnimationActions` | Static handlers organized in 15 groups (the original action handlers) |
-| `FMonolithAbpWriteActions` | ABP graph write actions (Phase v0.14.3 PR #34): `add_anim_graph_node` (TwoBoneIK / ModifyBone / LocalToComponentSpace / ComponentToLocalSpace + auto-pin exposure), `connect_anim_graph_pins`, `set_state_animation`, `add_variable_get`, `set_anim_graph_node_property` |
+| `FMonolithAbpWriteActions` | ABP graph write actions (Phase v0.14.3 PR #34): `add_anim_graph_node` (built-in aliases plus generic `UAnimGraphNode_Base` class path/name resolution, with TwoBoneIK / ModifyBone helpers and auto-pin exposure), `connect_anim_graph_pins`, `set_state_animation`, `add_variable_get`, `set_anim_graph_node_property` |
 | `FMonolithControlRigWriteActions` | ControlRig write actions: 3 actions (graph node creation, pin configuration, variable management) |
 | `FMonolithAnimLayoutActions` | `auto_layout` for AnimBP graphs |
 
@@ -160,7 +160,7 @@ Wraps `USkeleton::CompatibleSkeletons` — the canonical UE5 mechanism that lets
 **ABP Write (5) — v0.14.3 PR #34 by @MaxenceEpitech**
 | Action | Description |
 |--------|-------------|
-| `add_anim_graph_node` | Place an animation graph node. Supports `TwoBoneIK`, `ModifyBone`, `LocalToComponentSpace`, `ComponentToLocalSpace`. TwoBoneIK auto-exposes `EffectorLocation`, `JointTargetLocation`, `Alpha` as input pins. New `expose_pins` parameter for manual pin control on any node type |
+| `add_anim_graph_node` | Place an animation graph node. `node_type` still accepts the existing aliases (`SequencePlayer`, `BlendSpacePlayer`, `TwoWayBlend`, `BlendListByBool`, `LayeredBoneBlend`, `MotionMatching`, `TwoBoneIK`, `ModifyBone`, `LocalToComponentSpace`, `ComponentToLocalSpace`) and may also be a class path/name for legacy clients. New `node_class` accepts any loaded non-abstract `UAnimGraphNode_Base` subclass by class path or name. Rejects missing, ambiguous, non-`UAnimGraphNode_Base`, abstract, and unresolved classes with actionable errors. TwoBoneIK auto-exposes `EffectorLocation`, `JointTargetLocation`, `Alpha` as input pins; `expose_pins` manually controls optional pins on any node type |
 | `connect_anim_graph_pins` | Wire two pins inside an ABP graph |
 | `set_state_animation` | Assign an animation asset to a state machine state |
 | `add_variable_get` | Place a `K2Node_VariableGet` in an ABP anim graph for reading AnimInstance member variables. Validates the variable exists on the skeleton class before spawning |
@@ -175,5 +175,51 @@ Wraps `USkeleton::CompatibleSkeletons` — the canonical UE5 mechanism that lets
 | Action | Description |
 |--------|-------------|
 | `auto_layout` | Auto-arrange nodes in an Animation Blueprint graph. `formatter`: `"auto"` (default) — uses Blueprint Assist if available, falls back to built-in hierarchical layout; `"blueprint_assist"` — requires BA; `"builtin"` — built-in only. Optional `graph_name` to target a specific graph |
+
+### Bulk Fill & Describe Surface (2026-05-11)
+
+`MonolithAnimationBulkFillAdapter` registers under `FMonolithBulkFillRegistry` for the `animation` namespace, exposed via the framework-level `bulk_fill_query("apply", ...)` and `describe_query("schema", ...)` dispatchers. Phase 5 of the MCP ergonomics rollout (design spec `Docs/plans/2026-05-11-monolith-mcp-ergonomics-design.md`).
+
+**Surface summary.** `bulk_fill_query("apply", target_namespace="animation", target="<asset_path>", tree={...})` covers PoseSearch database bulk-populate (the 60-300+ entry pain) and a v1 audit-only notify-apply-template scan. `describe_query("schema", target_namespace="animation", target="<asset_path>")` returns the PoseSearch entry schema and the notify/curve track schema for the target sequence.
+
+**fill_kind catalogue (2 — enumerated against `MonolithAnimationBulkFillAdapter.cpp`):**
+
+| `fill_kind` | Target shape | Walks |
+|---|---|---|
+| `PoseSearchDatabase` | `UPoseSearchDatabase` | `entries:[]` walked as `FPoseSearchDatabaseAnimationAsset` rows. Discriminated 5.7-unified shape: `sequence` / `blendspace` / `composite` / `montage` per entry, plus `looping` / `mirror_option` / `sample_range` |
+| `NotifyApplyTemplate` | Folder + name_glob | **v1 audit-only.** Scans the folder via name glob (e.g. `name_glob: "A_Walk_*"`) and surfaces which sequences a template would apply to. Commit still through existing per-asset notify CRUD actions |
+
+**Sample tree (PoseSearchDatabase, design spec Appendix B.3):**
+
+```json
+{
+  "target": "/Game/AnimGraph/PSD_Locomotion",
+  "tree": {
+    "fill_kind": "PoseSearchDatabase",
+    "entries": [
+      {"animation": "/Game/Anim/A_Idle",     "looping": true,  "mirror_option": "UnmirroredOnly"},
+      {"animation": "/Game/Anim/A_Walk_F",   "looping": true,  "sample_range": {"min": 0.0, "max": 1.5}},
+      {"animation": "/Game/Anim/A_Run_F",    "looping": true},
+      {"blendspace": "/Game/Anim/BS_Strafe", "mirror_option": "UnmirroredAndMirrored"}
+    ]
+  },
+  "dry_run": true
+}
+```
+
+**Adapter-specific quirks.**
+
+- **`FPoseSearchDatabaseAnimationAsset` is a unified 5.7 shape.** UE 5.7 collapsed prior per-asset-type containers into a single discriminated struct. The adapter routes per-row writes via the discriminator (the first of `sequence` / `blendspace` / `composite` / `montage` present in each row). Schema surfaces the discriminator under `entries[].asset_type` with the four valid values.
+- **`IAnimationDataController` requires bracket transactions.** Sequence-level writes (notify CRUD, curve CRUD, bone-track CRUD) must open / close an `IAnimationDataController` transaction. The PoseSearchDatabase fill_kind does NOT touch sequence-level transactions (it writes to the database asset directly); notify/curve fill_kinds would, hence they remain `(WISHLIST v1.1)`.
+- **CHT_ chooser-table has NO MCP surface — `(WISHLIST)`.** Chooser tables are not in the animation_query action surface and not in bulk_fill v1. Per the first-fanout Appendix A row "Chooser table (CHT_) population not in animation_query".
+- **`v1 NotifyApplyTemplate fill_kind is audit-only.** Cited from the design spec. The handler scans the folder + glob and returns matched sequences with their existing notify / curve state, plus the template that would be applied. No writes commit. Real per-asset notify writes still flow through the existing `add_notify` / `add_curve` / `set_notify_time` actions.
+- **Skeleton compatibility surface in v0.14.10.** Schema surfaces `CompatibleSkeletons` via the existing `get_compatible_skeletons` action — bulk_fill of compatible-skeleton lists is a separate `(WISHLIST v1.1)` fill_kind.
+
+**Limitations / v1.1 follow-ups.**
+
+- Notify/curve glob-template real-write fill_kind — `(v1.1)` — blocked on per-asset `IAnimationDataController` transaction surface enumeration.
+- `set_blend_space_axis` / `set_section_next` / `add_montage_section` dry-run integration — `(WISHLIST v1.1)` — dry_run integration on existing actions.
+- CHT_ chooser-table population fill_kind — `(WISHLIST)` — entire chooser-table action surface absent from animation_query.
+- CSV ingest of PoseSearch entries via folder + naming convention — `(WISHLIST v1.1)` per Q2.
 
 ---

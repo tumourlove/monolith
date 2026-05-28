@@ -137,6 +137,12 @@ $trackedFiles = $allTrackedFiles | Where-Object {
     if ($keep -and $path -like "Docs/testing/*") {
         $keep = $false
     }
+    # Strip internal-only Docs that the project tracks in git but should not ship.
+    # MISSING_FEATURES.md is the empirical gap log fed from real project work;
+    # downstream consumers do not need it.
+    if ($keep -and $path -eq "Docs/MISSING_FEATURES.md") {
+        $keep = $false
+    }
     $keep
 }
 $strippedSourceCount = $allTrackedFiles.Count - $trackedFiles.Count

@@ -122,6 +122,40 @@
 
 > **Procedural Geometry Overhaul (2026-03-28):** The proc gen actions (`create_parametric_mesh`, `create_structure`, `create_horror_prop`, etc.) now feature sweep-based thin walls (`wall_mode: "sweep"` default), auto snap-to-floor (`snap_to_floor` param), auto-collision on all saved meshes (`collision: auto/box/convex/complex_as_simple/none`), human-scale defaults (stairs 90/28/18cm, doors 90cm, floor 3cm), door/window/vent trim frames (`add_trim` param), and vent openings via `create_structure`. Collision-aware prop placement uses `collision_mode: none/warn/reject/adjust` on scatter actions with SweepSingle box traces for floor finding. All proc gen actions support `use_cache` and `auto_save` params for the caching system.
 
+### Mesh Import (`import_mesh` — automated FBX/glTF pipeline)
+
+Handler: `FMonolithMeshTechArtActions::ImportMesh` (`Source/MonolithMesh/Private/MonolithMeshTechArtActions.cpp`). Drives the engine's `IAssetTools::ImportAssetsAutomated` path via `UFbxImportUI` + `UFbxFactory` for FBX inputs (and the engine default factory for glTF / other formats). Backwards-compatible with the original static-mesh-only contract: omitting the new skeletal flags reproduces pre-PR behaviour exactly.
+
+**Schema:**
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `files` | array<string> | required | — | Absolute file paths to import (FBX, glTF, etc.) |
+| `destination` | string | required | — | Content path (e.g. `/Game/Characters/Skeleton/MyCharacter`) |
+| `replace_existing` | boolean | optional | `false` | Overwrite assets that already exist at `destination` |
+| `combine_meshes` | boolean | optional | `true` | Combine all FBX sub-meshes into a single asset |
+| `generate_lightmap_uvs` | boolean | optional | `true` | Generate a lightmap UV channel on import |
+| `auto_generate_collision` | boolean | optional | `true` | Generate collision primitives on import |
+| `normal_import_method` | string | optional | `ImportNormalsAndTangents` | `ImportNormals` / `ImportNormalsAndTangents` / `ComputeNormals` |
+| `material_import` | string | optional | `create_new` | `create_new` (new MIs), `find_existing` (reuse by name), `skip` (no material/texture import) |
+| **`import_as_skeletal`** | boolean | optional | `false` | **NEW.** Selects `USkeletalMesh` import path: sets `UFbxImportUI::bImportAsSkeletal=true` + `MeshTypeToImport=FBXIT_SkeletalMesh`. Engine auto-creates a `USkeleton` companion asset under `destination` when no existing skeleton is supplied. |
+| **`import_animations`** | boolean | optional | `false` | **NEW.** Imports animation sequences alongside the skeletal mesh via `UFbxImportUI::bImportAnimations=true`. **Forces `import_as_skeletal=true`** if not already set — animation import is not paired with the static-mesh branch. |
+
+**FBX branch behaviour** (when at least one input file ends in `.fbx`):
+
+- **Skeletal path** (`import_as_skeletal=true` OR `import_animations=true`): skeletal mesh + auto-created skeleton; anim sequences imported only when `import_animations=true`.
+- **Static path** (default, no skeletal flags): identical to pre-PR behaviour — `bImportAsSkeletal=false`, `MeshTypeToImport=FBXIT_StaticMesh`, `bImportAnimations=false`.
+
+**Response shape:** for each imported `UObject`, returns `{ asset_path, type }`. When the imported object is a `UStaticMesh`, additional fields are populated: `vertex_count`, `triangle_count`, `material_slots[]`, `bounds`. The skeletal-result branch currently emits only `{ asset_path, type }` per imported asset — bone count, skeleton path, and morph-target metadata enrichment is **(WISHLIST)** for the skeletal-result JSON branch.
+
+**Wishlist / v2 follow-ups:**
+
+- **(WISHLIST)** `skeleton_asset` param — supply an existing `USkeleton` asset path to bind imported animations to, rather than auto-creating a new skeleton under `destination`. Enables retargeting onto an existing character rig.
+- **(WISHLIST)** Enriched skeletal-result JSON branch — bone count, skeleton asset path, socket count, morph target count, physics asset reference parity with the existing `UStaticMesh` stat block.
+- **(WISHLIST)** glTF skeletal/animation parity — confirm glTF factory honors the same boolean semantics, or document the divergence.
+
+**Credit:** integration-test contribution from @4698to (downstream UE 5.7 fork). See `Docs/FEEDBACK_import_mesh_skeletal_params.md` for the upstream contributor's full design rationale (bilingual EN/中文).
+
 ### Procedural Town Generator (45 gated + 1 always-registered actions — 11 sub-projects) — WORK-IN-PROGRESS
 
 > **Status:** Work-in-progress, disabled by default (`bEnableProceduralTownGen = false`). Fix Plans v2-v5 addressed 27+ issues but fundamental geometry problems remain (wall misalignment, room separation). Very much a WIP — unless you're willing to dig in and help improve it, it's best left alone.
@@ -262,6 +296,51 @@ SP1's `create_building_from_grid` returns a JSON descriptor consumed by all down
 18. Door placement validation (doors on shared walls only)
 19. `validate_building` action added for post-generation integrity checks
 20. Graceful error reporting with per-issue severity levels
+
+### Bulk Fill & Describe Surface (2026-05-11)
+
+`MonolithMeshBulkFillAdapter` registers under `FMonolithBulkFillRegistry` for the `mesh` namespace, exposed via the framework-level `bulk_fill_query("apply", ...)` and `describe_query("schema", ...)` dispatchers. Phase 5 of the MCP ergonomics rollout (design spec `Docs/plans/2026-05-11-monolith-mcp-ergonomics-design.md`).
+
+**Surface summary.** `bulk_fill_query("apply", target_namespace="mesh", target="<asset_or_actor>", tree={...})` covers two distinct fanout paths: DataTable row authoring for surface mapping (the `create_surface_datatable` / `create_room_template` / `create_prop_kit` row-by-row pain) and a v1 audit-only wrapper over `set_actor_properties` to surface the Mobility-ordering folklore. `describe_query("schema", target_namespace="mesh", target="<actor_class>")` returns actor properties + nested struct paths (`StaticMeshComponent.OverrideMaterials[N]`, `BodyInstance.CollisionProfileName`).
+
+**fill_kind catalogue (2 — enumerated against `MonolithMeshBulkFillAdapter.cpp`):**
+
+| `fill_kind` | Target shape | Walks |
+|---|---|---|
+| `SurfaceDataTable` | `UDataTable` | `rows:{}` written as DataTable rows (e.g. `{"Wood":{...},"Metal":{...}}`). Assumes the row struct already exists |
+| `ActorProperties` | Spawned actor path | **v1 audit-only** wrapper for `mesh_query("set_actor_properties")`. Surfaces the Mobility-must-be-Movable-before-`bSimulatePhysics=true` dependency. Writes still flow through the existing action |
+
+**Sample tree (SurfaceDataTable):**
+
+```json
+{
+  "target": "/Game/Audio/DT_FootstepSurfaces",
+  "tree": {
+    "fill_kind": "SurfaceDataTable",
+    "rows": {
+      "Wood":   {"FootstepSC": "/Game/Audio/SC_Wood",   "ImpactSC": "/Game/Audio/SC_WoodImpact"},
+      "Metal":  {"FootstepSC": "/Game/Audio/SC_Metal",  "ImpactSC": "/Game/Audio/SC_MetalImpact"},
+      "Carpet": {"FootstepSC": "/Game/Audio/SC_Carpet"}
+    }
+  },
+  "dry_run": true
+}
+```
+
+**Adapter-specific quirks.**
+
+- **DT row-struct synthesis is impossible from MCP — `(WISHLIST)`.** The `SurfaceDataTable` fill_kind assumes the row struct already exists on the target DataTable. Authoring a USTRUCT from a JSON shape is reflection-bound but blocked on UE not supporting runtime struct synthesis. Schema returns the existing row struct's settable surface; bulk_fill rejects writes to a DataTable with no row struct attached with `"target DataTable has no row struct — synthesise the struct in editor first or use an existing DT as template"`.
+- **Mobility ordering surfaces in describe_schema.** Actor schema descriptors annotate `bSimulatePhysics` with `conditional_on: "Mobility == Movable"`. The `ActorProperties` fill_kind audits the property order — if a tree writes `bSimulatePhysics: true` before `Mobility: "Movable"` (or omits the Mobility write entirely when the current value is Static / Stationary), the dry-run surfaces a `SilentDrops` entry naming the dependency. This is the v1 audit-only behaviour referenced by the cited adapter source.
+- **`monolith_reindex` is a silent prerequisite for `search_meshes_by_size`.** Schema descriptors for mesh-catalog-dependent actions annotate `reindex_required: true`. Dry-run reports flag stale catalog state and recommend a `monolith_reindex` call before bulk_fill of catalog-keyed fields.
+- **`v1 ActorProperties fill_kind is audit-only (Mobility-guard) — write still through existing `mesh_query("set_actor_properties")`.** Cited verbatim from design spec; adapter refuses to commit actor writes in v1 and points callers at the existing action.
+- **`batch_execute` interaction.** Bulk_fill is single-transaction by design and does NOT inherit `batch_execute`'s flat-key shape (which would conflict with nested params). Mesh's existing `batch_execute` action remains available alongside.
+
+**Limitations / v1.1 follow-ups.**
+
+- CSV/JSON-array ingestion on `create_surface_datatable` / `create_room_template` / `create_prop_kit` — covered minimally by SurfaceDataTable's nested-rows shape in v1; full CSV path `(WISHLIST v1.1)` per Q2.
+- `apply_replacement` / `match_all_in_volume` / `scatter_props` confidence-score preview — `(WISHLIST v1.1)` — dry_run integration on the existing actions.
+- ActorProperties non-audit (real write) fill_kind — `(v1.1)` — blocked until the Mobility-ordering audit surfaces every silent-drop case in the existing `set_actor_properties` action.
+- `create_blockout_blueprint` BP logic authoring — `(WISHLIST)` — bulk_fill cannot synthesise Blueprint graphs.
 
 **Data Files (Procedural Town Generator)**
 | Directory | Sub-Project | Contents |

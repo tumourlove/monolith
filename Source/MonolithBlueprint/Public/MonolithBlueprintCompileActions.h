@@ -15,4 +15,6 @@ public:
 
 	// Phase 1F — save_asset
 	static FMonolithActionResult HandleSaveAsset(const TSharedPtr<FJsonObject>& Params);
+	// Gap #10 — save all dirty Blueprint/Widget packages in one sweep
+	static FMonolithActionResult HandleSaveDirtyAssets(const TSharedPtr<FJsonObject>& Params);
 };

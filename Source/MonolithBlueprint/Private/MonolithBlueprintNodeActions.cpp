@@ -150,6 +150,103 @@ static const TMap<FString, FNodeAlias>& GetNodeAliases()
 }
 
 // ============================================================
+//  CallFunction default target-class resolution (engine-generic)
+// ============================================================
+//
+// When a CallFunction node is requested without an explicit target_class, the
+// resolver scans loaded UClasses for the first one exposing a matching function.
+// A bare first-match by TObjectIterator order is non-deterministic and, for a
+// Widget Blueprint, frequently lands on an unrelated engine class that happens
+// to share a function name (e.g. SetVisibility) instead of the UMG widget the
+// author meant. When the owning asset is a UWidget-derived Blueprint, prefer a
+// candidate whose owning class is itself UWidget-derived before falling back to
+// the unbiased first match.
+//
+// The bias is purely reflection-based: UWidget is resolved by string so this
+// module needs no UMG link-time dependency, and no sibling/marketplace widget
+// class names are referenced. If UMG is not loaded the helper degrades to the
+// original first-match behaviour.
+
+// Resolve the UMG base widget class by path without a compile-time UMG dependency.
+// Returns nullptr when UMG is not loaded (cooked/standalone configs that strip it).
+static UClass* ResolveWidgetBaseClass()
+{
+	static TWeakObjectPtr<UClass> Cached;
+	if (UClass* Hit = Cached.Get())
+	{
+		return Hit;
+	}
+	// /Script/UMG.Widget is the canonical path; prefer it to avoid colliding with
+	// any unrelated class that merely happens to be named "Widget".
+	UClass* WidgetClass = FindObject<UClass>(nullptr, TEXT("/Script/UMG.Widget"));
+	if (!WidgetClass)
+	{
+		WidgetClass = FindFirstObject<UClass>(TEXT("Widget"), EFindFirstObjectOptions::NativeFirst);
+	}
+	Cached = WidgetClass;
+	return WidgetClass;
+}
+
+// True when the Blueprint generates a UWidget-derived class (Widget Blueprint).
+static bool IsWidgetBlueprintContext(const UBlueprint* BP)
+{
+	if (!BP)
+	{
+		return false;
+	}
+	UClass* WidgetBase = ResolveWidgetBaseClass();
+	if (!WidgetBase)
+	{
+		return false;
+	}
+	if (BP->GeneratedClass && BP->GeneratedClass->IsChildOf(WidgetBase))
+	{
+		return true;
+	}
+	return BP->ParentClass && BP->ParentClass->IsChildOf(WidgetBase);
+}
+
+// Scan loaded classes for the first one exposing any of the candidate function
+// names. When bPreferWidget is set, a UWidget-derived owner wins over a
+// non-widget owner found earlier in iteration order (the Widget-BP bias). The
+// first non-widget match is retained as the fallback so non-widget functions
+// (e.g. KismetMathLibrary helpers used inside a Widget BP) still resolve.
+static UFunction* FindFunctionAcrossLoadedClasses(const TArray<FName>& Candidates, bool bPreferWidget)
+{
+	UClass* WidgetBase = bPreferWidget ? ResolveWidgetBaseClass() : nullptr;
+	UFunction* FirstMatch = nullptr;
+	for (TObjectIterator<UClass> It; It; ++It)
+	{
+		UClass* Class = *It;
+		if (!Class)
+		{
+			continue;
+		}
+		for (const FName& Candidate : Candidates)
+		{
+			if (UFunction* Found = Class->FindFunctionByName(Candidate))
+			{
+				if (!FirstMatch)
+				{
+					FirstMatch = Found;
+				}
+				// With the Widget-BP bias, a widget-owned match short-circuits.
+				if (WidgetBase && Class->IsChildOf(WidgetBase))
+				{
+					return Found;
+				}
+				if (!WidgetBase)
+				{
+					return Found;
+				}
+				break; // candidate matched on this class; move to next class
+			}
+		}
+	}
+	return FirstMatch;
+}
+
+// ============================================================
 //  MonolithBlueprintInternal helpers
 // ============================================================
 
@@ -185,9 +282,9 @@ void FMonolithBlueprintNodeActions::RegisterActions(FMonolithToolRegistry& Regis
 			.Required(TEXT("asset_path"),       TEXT("string"),  TEXT("Blueprint asset path"))
 			.Required(TEXT("node_type"),         TEXT("string"),  TEXT("Node type: CallFunction (or 'function'/'call'), VariableGet (or 'get'), VariableSet (or 'set'), CustomEvent (or 'event'), Branch (or 'if'), Sequence, MacroInstance (or 'macro'), SpawnActorFromClass (or 'spawn'), DynamicCast (or 'cast'), Self, Return, MakeStruct (or 'make_struct'), BreakStruct (or 'break_struct'), SwitchOnEnum (or 'switch_enum'), SwitchOnInt (or 'switch_int'), SwitchOnString (or 'switch_string'), FormatText (or 'format_text'), MakeArray (or 'make_array'), Select. Shortcuts: ForEachLoop, ForLoop, DoOnce, FlipFlop, Gate, IsValid, Delay, RetriggerableDelay, ComponentBoundEvent, AddDelegate, RemoveDelegate, ClearDelegate, CallDelegate"))
 			.Optional(TEXT("graph_name"),        TEXT("string"),  TEXT("Graph name (defaults to EventGraph)"))
-			.Optional(TEXT("position"),          TEXT("array"),   TEXT("Node position as [x, y] (default: [0, 0])"))
+			.Optional(TEXT("position"),          TEXT("array"),   TEXT("Node position as [x, y] (default: [0, 0])"), {TEXT("pos")})
 			.Optional(TEXT("function_name"),     TEXT("string"),  TEXT("Function name for CallFunction nodes (e.g. PrintString)"))
-			.Optional(TEXT("target_class"),      TEXT("string"),  TEXT("Class to search for the function (CallFunction) or delegate (AddDelegate / RemoveDelegate / ClearDelegate / CallDelegate). For delegate nodes, defaults to BP's generated class (self-context) if omitted. For CallFunction, searches all loaded classes if omitted."))
+			.Optional(TEXT("target_class"),      TEXT("string"),  TEXT("Name of the class to search for the function being called (CallFunction) or the multicast delegate being bound (AddDelegate / RemoveDelegate / ClearDelegate / CallDelegate). Accepts a bare class name (e.g. 'KismetSystemLibrary', 'MyPawn'). For delegate nodes, defaults to the BP's generated class (self-context) if omitted. For CallFunction, all loaded classes are searched if omitted."), {TEXT("function_class"), TEXT("member_class")})
 			.Optional(TEXT("variable_name"),     TEXT("string"),  TEXT("Variable name for VariableGet/VariableSet nodes"))
 			.Optional(TEXT("event_name"),        TEXT("string"),  TEXT("Custom event name for CustomEvent nodes"))
 			.Optional(TEXT("macro_name"),        TEXT("string"),  TEXT("Macro graph name for MacroInstance nodes"))
@@ -405,6 +502,24 @@ void FMonolithBlueprintNodeActions::RegisterActions(FMonolithToolRegistry& Regis
 			.Optional(TEXT("variable_name"),  TEXT("string"), TEXT("Name for the new variable (defaults to pin_name)"))
 			.Optional(TEXT("graph_name"),     TEXT("string"), TEXT("Graph name (searches all graphs if omitted)"))
 			.Build());
+
+	// ---- Phase 1 (gap #11): cross-class property access ----
+
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("add_property_access"),
+		TEXT("Author a VariableGet (or VariableSet if is_setter) node that reads/writes a UPROPERTY on an ARBITRARY foreign class — "
+		     "not just the Blueprint's own variables. member_class is resolved by string (FindFirstObject, native-first; accepts U/A prefix or bare name), "
+		     "then VariableReference.SetExternalMember() binds the member so the node's value pin resolves to the property's real type. "
+		     "Unlike node_type='VariableGet' (which is self-context only and produces a wildcard 0-pin node for foreign properties), this binds the external class correctly. "
+		     "Returns node_id plus value_pin_id and target_pin_id (the object/self input the caller must wire via connect_pins to supply the instance to read/write)."),
+		FMonolithActionHandler::CreateStatic(&HandleAddPropertyAccess),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"),  TEXT("string"),  TEXT("Blueprint asset path"))
+			.Required(TEXT("member_class"), TEXT("string"), TEXT("Class that owns the property (e.g. 'Item', 'UItem', 'AActor'). Resolved by string, native-first; accepts U/A prefix or bare name."), {TEXT("target_class")})
+			.Required(TEXT("member_name"), TEXT("string"),  TEXT("Name of the UPROPERTY to read/write (e.g. 'Icon')"))
+			.Optional(TEXT("graph_name"),  TEXT("string"),  TEXT("Graph name (defaults to EventGraph)"))
+			.Optional(TEXT("is_setter"),   TEXT("bool"),    TEXT("If true, creates a VariableSet (write) node; otherwise a VariableGet (read) node. Default: false."))
+			.Optional(TEXT("position"),    TEXT("array"),   TEXT("Node position as [x, y] (default: [0, 0])"))
+			.Build());
 }
 
 // ============================================================
@@ -515,14 +630,10 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddNode(const TShared
 		}
 		else
 		{
-			for (TObjectIterator<UClass> It; It && !Func; ++It)
-			{
-				for (const FName& Candidate : FuncNameCandidates)
-				{
-					Func = It->FindFunctionByName(Candidate);
-					if (Func) break;
-				}
-			}
+			// Widget Blueprints bias toward UWidget-derived owners so name
+			// collisions (e.g. SetVisibility) resolve to the UMG widget the
+			// author meant rather than an arbitrary first-match engine class.
+			Func = FindFunctionAcrossLoadedClasses(FuncNameCandidates, IsWidgetBlueprintContext(BP));
 			if (!Func)
 			{
 				return FMonolithActionResult::Error(FString::Printf(
@@ -1147,6 +1258,11 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddNode(const TShared
 		return FMonolithActionResult::Error(TEXT("Failed to create node — NewObject returned null"));
 	}
 
+	// Gap #15: every authored K2Node must carry a valid NodeGuid, else UE's cook path
+	// warns "missing NodeGuid ... deterministic cooking issues". All node-type branches
+	// converge here, so a single CreateNewGuid covers them all.
+	NewNode->CreateNewGuid();
+
 	FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
 
 	TSharedPtr<FJsonObject> Root = MonolithBlueprintInternal::SerializeNode(NewNode);
@@ -1156,6 +1272,168 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddNode(const TShared
 	{
 		Root->SetStringField(TEXT("warning"),
 			TEXT("Created via generic K2Node fallback — node may require additional configuration via set_pin_default or dedicated handler"));
+	}
+	return FMonolithActionResult::Success(Root);
+}
+
+// ============================================================
+//  add_property_access  (Phase 1, gap #11)
+//
+//  Authors a VariableGet/VariableSet bound to a UPROPERTY on an
+//  ARBITRARY foreign class. The plain add_node VariableGet branch
+//  hardcodes SetSelfMember (self-context), which yields a 0-pin
+//  wildcard node for foreign-class properties. Here we resolve the
+//  member's owning class by string (same FindFirstObject mechanism
+//  CallFunction uses) and call SetExternalMember BEFORE
+//  AllocateDefaultPins so the pin types resolve from the member ref.
+// ============================================================
+
+FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddPropertyAccess(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	UBlueprint* BP = MonolithBlueprintInternal::LoadBlueprintFromParams(Params, AssetPath);
+	if (!BP)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	}
+
+	const FString MemberClassName = Params->GetStringField(TEXT("member_class"));
+	if (MemberClassName.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("add_property_access requires 'member_class'"));
+	}
+
+	const FString MemberName = Params->GetStringField(TEXT("member_name"));
+	if (MemberName.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("add_property_access requires 'member_name'"));
+	}
+
+	bool bIsSetter = false;
+	Params->TryGetBoolField(TEXT("is_setter"), bIsSetter);
+
+	const FString GraphName = Params->GetStringField(TEXT("graph_name"));
+	UEdGraph* Graph = MonolithBlueprintInternal::FindGraphByName(BP, GraphName);
+	if (!Graph)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Graph not found: %s"), GraphName.IsEmpty() ? TEXT("EventGraph") : *GraphName));
+	}
+
+	// Parse position
+	int32 PosX = 0;
+	int32 PosY = 0;
+	const TArray<TSharedPtr<FJsonValue>>* PosArray = nullptr;
+	if (Params->TryGetArrayField(TEXT("position"), PosArray) && PosArray && PosArray->Num() >= 2)
+	{
+		PosX = (int32)(*PosArray)[0]->AsNumber();
+		PosY = (int32)(*PosArray)[1]->AsNumber();
+	}
+
+	// Resolve member_class by string — mirror the CallFunction class-resolution
+	// idiom (native-first, then U-prefix and de-U-prefix variants). ENGINE-GENERIC:
+	// any class, resolved at runtime; never hardcode a sibling-plugin class name.
+	UClass* MemberClass = FindFirstObject<UClass>(*MemberClassName, EFindFirstObjectOptions::NativeFirst);
+	if (!MemberClass && !MemberClassName.StartsWith(TEXT("U")))
+		MemberClass = FindFirstObject<UClass>(*FString::Printf(TEXT("U%s"), *MemberClassName), EFindFirstObjectOptions::NativeFirst);
+	if (!MemberClass && MemberClassName.StartsWith(TEXT("U")))
+		MemberClass = FindFirstObject<UClass>(*MemberClassName.Mid(1), EFindFirstObjectOptions::NativeFirst);
+
+	if (!MemberClass)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Class '%s' not found (also tried U-prefix variants). Pass the property's owning class name."),
+			*MemberClassName));
+	}
+
+	// Warn (but don't fail) if the named property isn't found on the class — the
+	// node still authors usefully, and the caller may target a class whose
+	// property surface isn't loaded the same way; SetExternalMember is the
+	// authoritative bind regardless.
+	const bool bPropertyFound = (MemberClass->FindPropertyByName(FName(*MemberName)) != nullptr);
+
+	// Create the node and bind the EXTERNAL member BEFORE AllocateDefaultPins so
+	// pin types resolve from the member reference (wrong order = wildcard node —
+	// the exact failure this action fixes). Native UPROPERTYs carry no member
+	// GUID, so the 2-arg SetExternalMember overload is correct (MemberReference.h:177).
+	UEdGraphNode* NewNode = nullptr;
+	UEdGraphPin* ValuePin = nullptr;
+	UEdGraphPin* TargetPin = nullptr;
+
+	if (bIsSetter)
+	{
+		UK2Node_VariableSet* VarNode = NewObject<UK2Node_VariableSet>(Graph);
+		VarNode->VariableReference.SetExternalMember(FName(*MemberName), MemberClass);
+		VarNode->NodePosX = PosX;
+		VarNode->NodePosY = PosY;
+		Graph->AddNode(VarNode, /*bUserAction=*/true, /*bSelectNewNode=*/false);
+		VarNode->AllocateDefaultPins();
+		NewNode = VarNode;
+	}
+	else
+	{
+		UK2Node_VariableGet* VarNode = NewObject<UK2Node_VariableGet>(Graph);
+		VarNode->VariableReference.SetExternalMember(FName(*MemberName), MemberClass);
+		VarNode->NodePosX = PosX;
+		VarNode->NodePosY = PosY;
+		Graph->AddNode(VarNode, /*bUserAction=*/true, /*bSelectNewNode=*/false);
+		VarNode->AllocateDefaultPins();
+		NewNode = VarNode;
+	}
+
+	if (!NewNode)
+	{
+		return FMonolithActionResult::Error(TEXT("Failed to create property-access node — NewObject returned null"));
+	}
+
+	// Ensure a non-zero NodeGuid (gap #15's universal fix lands separately, but
+	// this new node must not ship a zero GUID). EdGraphNode.cpp:791.
+	NewNode->CreateNewGuid();
+
+	// Identify the value pin (the data pin carrying the property's value) and the
+	// target pin (the "self"/object input the caller wires to supply the instance).
+	// For an external-member node the self pin is a PC_Object input named PN_Self;
+	// the value pin is the other non-exec data pin (output for getter, input for setter).
+	const FName SelfPinName = UEdGraphSchema_K2::PN_Self;
+	const EEdGraphPinDirection ValueDir = bIsSetter ? EGPD_Input : EGPD_Output;
+	for (UEdGraphPin* P : NewNode->Pins)
+	{
+		if (!P) continue;
+		if (P->PinName == SelfPinName)
+		{
+			TargetPin = P;
+			continue;
+		}
+		if (!ValuePin && P->Direction == ValueDir && P->PinType.PinCategory != UEdGraphSchema_K2::PC_Exec)
+		{
+			ValuePin = P;
+		}
+	}
+
+	FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
+
+	TSharedPtr<FJsonObject> Root = MonolithBlueprintInternal::SerializeNode(NewNode);
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+	Root->SetStringField(TEXT("graph"), Graph->GetName());
+	Root->SetStringField(TEXT("node_id"), NewNode->GetName());
+	Root->SetStringField(TEXT("member_class"), MemberClass->GetName());
+	Root->SetStringField(TEXT("member_name"), MemberName);
+	Root->SetBoolField(TEXT("is_setter"), bIsSetter);
+	Root->SetStringField(TEXT("value_pin_id"), ValuePin ? ValuePin->PinId.ToString() : FString());
+	Root->SetStringField(TEXT("target_pin_id"), TargetPin ? TargetPin->PinId.ToString() : FString());
+	if (ValuePin)
+	{
+		Root->SetStringField(TEXT("value_pin_name"), ValuePin->PinName.ToString());
+	}
+	if (TargetPin)
+	{
+		Root->SetStringField(TEXT("target_pin_name"), TargetPin->PinName.ToString());
+	}
+	if (!bPropertyFound)
+	{
+		Root->SetStringField(TEXT("warning"), FString::Printf(
+			TEXT("Property '%s' was not found on class '%s' via reflection — node was authored with the external member reference, but verify the property name."),
+			*MemberName, *MemberClass->GetName()));
 	}
 	return FMonolithActionResult::Success(Root);
 }
@@ -1795,14 +2073,19 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleResolveNode(const TSh
 		}
 		else
 		{
-			for (TObjectIterator<UClass> It; It && !Func; ++It)
+			// resolve_node is a dry-run with only an optional asset_path. When a
+			// Widget Blueprint path is supplied, apply the same UWidget-derived
+			// bias used by add_node so the resolved pin layout matches what the
+			// real write would produce. Without an asset_path the bias is off and
+			// behaviour is the unbiased first-match.
+			bool bPreferWidget = false;
+			if (!Params->GetStringField(TEXT("asset_path")).IsEmpty())
 			{
-				for (const FName& C : Candidates)
-				{
-					Func = It->FindFunctionByName(C);
-					if (Func) break;
-				}
+				FString ResolveAssetPath;
+				UBlueprint* ContextBP = MonolithBlueprintInternal::LoadBlueprintFromParams(Params, ResolveAssetPath);
+				bPreferWidget = IsWidgetBlueprintContext(ContextBP);
 			}
+			Func = FindFunctionAcrossLoadedClasses(Candidates, bPreferWidget);
 			if (!Func)
 			{
 				return FMonolithActionResult::Error(FString::Printf(
@@ -2596,6 +2879,7 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddTimeline(const TSh
 	// Step 5: Add to graph and allocate pins
 	Graph->AddNode(TimelineNode, /*bUserAction=*/true, /*bSelectNewNode=*/false);
 	TimelineNode->AllocateDefaultPins();
+	TimelineNode->CreateNewGuid(); // Gap #15: NodeGuid (distinct from TimelineGuid) for deterministic cooking
 
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
 
@@ -2777,6 +3061,7 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddEventNode(const TS
 		EventNode->NodePosY = PosY;
 		Graph->AddNode(EventNode, /*bUserAction=*/true, /*bSelectNewNode=*/false);
 		EventNode->AllocateDefaultPins();
+		EventNode->CreateNewGuid(); // Gap #15: valid NodeGuid for deterministic cooking
 
 		FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
 
@@ -2803,6 +3088,7 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddEventNode(const TS
 		EventNode->NodePosY = PosY;
 		Graph->AddNode(EventNode, /*bUserAction=*/true, /*bSelectNewNode=*/false);
 		EventNode->AllocateDefaultPins();
+		EventNode->CreateNewGuid(); // Gap #15: valid NodeGuid for deterministic cooking
 
 		// RPC / Multicast replication flags (Phase 5A)
 		bool bNetFlagsChanged = false;
@@ -2966,6 +3252,7 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddCommentNode(const 
 	}
 
 	Graph->AddNode(CommentNode, /*bUserAction=*/true, /*bSelectNewNode=*/false);
+	CommentNode->CreateNewGuid(); // Gap #15: valid NodeGuid for deterministic cooking
 
 	FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
 
@@ -3127,6 +3414,7 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandlePromotePinToVariable(
 		GetNode->NodePosY = VarNodePosY;
 		Graph->AddNode(GetNode, /*bUserAction=*/true, /*bSelectNewNode=*/false);
 		GetNode->AllocateDefaultPins();
+		GetNode->CreateNewGuid(); // Gap #15: valid NodeGuid for deterministic cooking
 		VarNode = GetNode;
 
 		// Rewire: connect the VariableGet's output to each of the original pin's consumers
@@ -3173,6 +3461,7 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandlePromotePinToVariable(
 		SetNode->NodePosY = VarNodePosY;
 		Graph->AddNode(SetNode, /*bUserAction=*/true, /*bSelectNewNode=*/false);
 		SetNode->AllocateDefaultPins();
+		SetNode->CreateNewGuid(); // Gap #15: valid NodeGuid for deterministic cooking
 		VarNode = SetNode;
 
 		// Find the input data pin on the VariableSet node (the value pin, not exec)

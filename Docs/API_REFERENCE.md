@@ -1,14 +1,16 @@
 # Monolith API Reference
 
-**Version:** v0.14.7 (+ [Unreleased] editor +2) · **Last updated:** 2026-04-30
+**Version:** v0.15.0 · **Last updated:** 2026-05-23
 
-**In-tree action total: 1271** registered across **16 in-tree namespaces** (all 1271 active by default; 45 town-gen actions are experimental and disabled until you flip `bEnableProceduralTownGen=true`, which lifts the registry to 1316). The `ui` namespace re-exports 4 GAS UI binding actions as aliases, so the count of **distinct handlers is 1267**. The four `monolith_*` meta-tools (`discover`, `status`, `update`, `reindex`) live in their own namespace and bring the dispatcher count to 20.
+**In-tree action total: 1344** registered across **19 in-tree namespaces** (all active by default; 45 town-gen actions are experimental and disabled until you flip `bEnableProceduralTownGen=true`, which lifts the registry to 1389). The `ui` namespace re-exports 4 GAS UI binding actions as aliases, which are included in that headline figure. The five `monolith_*` meta-tools (`discover`, `status`, `update`, `reindex`, `guide`) plus the `bulk_fill_query` and `describe_query` framework dispatchers bring the MCP tool count to 23. This total EXCLUDES sibling-plugin actions (`MonolithISX`, `MonolithSteamBridge`, `MonolithSubstance`, `MonolithClaudeDesignBridge`) — they ship in their own repos and are not in the public release zip.
 
 Live editor introspection on a fully loaded project (with sibling plugins present) can report additional namespaces beyond the in-tree Monolith surface. Those actions ship in their owning sibling repositories and are documented separately — see [§Sibling Plugins](#sibling-plugins).
 
 > Auto-generated and hand-curated. Each action is dispatched via HTTP POST to `http://localhost:<port>` with JSON body `{ "namespace": "<ns>", "action": "<action>", "params": { ... } }`, or via the MCP `tools/list` surface that AI clients see at session start.
 >
 > For the most current param schemas, call `monolith_discover("<namespace>")` at runtime — it returns live schemas straight out of the plugin. This document is a curated reference, not a source-of-truth substitute.
+>
+> **0.15.0:** the namespace counts in the Table of Contents and the per-namespace body sections below were regenerated against live `monolith_discover()` on 2026-05-23 — the 0.14.8 → 0.15.0 additions are reflected (the `bulk_fill` / `describe` framework, the blueprint dataset read/edit pack, the UI/Blueprint gap-closure actions, `monolith_guide`, `editor` Python/PIE/console verbs, the `level_sequence` namespace, and the audio MetaSound document-introspection actions). Body sections list every action by category; deep-dive param tables cover the high-traffic ones. For the exhaustive live param schema of any action, call `monolith_discover("<namespace>")` or `describe_query("action_schema", ...)`.
 
 ---
 
@@ -16,23 +18,26 @@ Live editor introspection on a fully loaded project (with sibling plugins presen
 
 | Namespace | Actions | Description |
 |-----------|---------|-------------|
-| [monolith](#monolith) | 4 | Core server tools (discover, status, update, reindex) |
-| [blueprint](#blueprint) | 89 | Blueprint read/write, variable/component/graph CRUD, node ops, compile, auto-layout, spawn actors |
+| [monolith](#monolith) | 5 | Core server tools (discover, status, update, reindex, guide) |
+| [blueprint](#blueprint) | 111 | Blueprint read/write, variable/component/graph CRUD, node ops, compile, auto-layout, spawn actors, dataset read/edit pack (DataTable/CurveTable/StringTable + `seed_data_asset`), cross-class property access, parent-function overrides |
 | [material](#material) | 63 | Material graph editing, inspection, CRUD, material functions, PBR pipeline |
-| [animation](#animation) | 118 | Curves, bone tracks, sync markers, root motion, compression, blend spaces, ABPs, montages, skeletons, PoseSearch, IKRig, Control Rig |
-| [niagara](#niagara) | 109 | Niagara VFX (emitters, modules, params, renderers, HLSL, dynamic inputs, event handlers, sim stages, NPC, effect types) |
-| [editor](#editor) | 24 | Live Coding builds, compile output capture, editor logs, scene capture, texture import, map creation, module status, automation test list/run |
+| [animation](#animation) | 125 | Curves, bone tracks, sync markers, root motion, compression, blend spaces, ABPs (incl. custom anim-graph nodes), montages, skeletons, PoseSearch, IKRig, Control Rig |
+| [niagara](#niagara) | 109 | Niagara VFX (emitters, modules, params, renderers, HLSL, dynamic inputs, event handlers, sim stages, effect types, event-aware summaries + validate_system event-chain reasoning) |
+| [editor](#editor) | 29 | Live Coding builds, compile output capture, editor logs, scene capture, texture import, map creation, module status, automation test list/run, Python escape-hatch, persistent-level swap |
 | [config](#config) | 6 | INI config inspection and search |
 | [project](#project) | 7 | Project-wide asset index (SQLite + FTS5) |
 | [source](#source) | 11 | Unreal Engine C++ source code navigation |
-| [mesh](#mesh) | 239 | Mesh inspection, scene manipulation, spatial queries, blockout, GeometryScript, procedural geo, lighting, audio, performance, town gen (experimental — +45 town gen registers only with `bEnableProceduralTownGen=true`) |
-| [ui](#ui) | 121 | UMG widget CRUD, templates, styling, animation v1+v2, EffectSurface, Spec Builder, Type Registry, settings scaffolding, accessibility, CommonUI, GAS UI bindings |
+| [mesh](#mesh) | 194 | Mesh inspection, scene manipulation, spatial queries, blockout, GeometryScript, procedural geo, lighting, audio, performance, mesh import (incl. skeletal + animation). +45 town gen registers only with `bEnableProceduralTownGen=true` (experimental, not in the public count) |
+| [ui](#ui) | 138 | UMG widget CRUD, templates, styling, animation v1+v2, EffectSurface, Spec Builder, Type Registry, settings scaffolding, headline scaffolders, navigation/conversion gap-closure, accessibility, CommonUI, GAS UI bindings |
 | [gas](#gas) | 135 | Gameplay Ability System: abilities, attributes, effects, ASC, tags, cues, targeting, input, inspect, scaffold |
 | [combograph](#combograph) | 13 | ComboGraph melee combo authoring (conditional on `WITH_COMBOGRAPH`) |
 | [ai](#ai) | 221 | Behavior Trees, State Trees, EQS, Blackboards, AI Controllers, Perception, Smart Objects, Navigation, Mass, Zone Graph, runtime PIE inspection, scaffolds |
 | [logicdriver](#logicdriver) | 66 | Logic Driver Pro state machines: graph CRUD, runtime PIE control, scaffolds, dialogue (conditional on `WITH_LOGICDRIVER`) |
-| [audio](#audio) | 86 | Sound Cue + MetaSound graph CRUD, attenuation/class/mix/submix/concurrency, batch ops, Sound Cue templates, perception bindings |
-| **In-tree subtotal** | **1271** | (all default-active; +45 experimental town gen → 1316 when registered) |
+| [audio](#audio) | 98 | Sound Cue + MetaSound graph CRUD + document introspection, attenuation/class/mix/submix/concurrency, batch ops, Sound Cue templates, perception bindings |
+| [level_sequence](#level_sequence) | 8 | Level Sequence inspection: binding inventory (legacy + UE 5.7 custom bindings), Director Blueprint functions/variables, event-track bindings, cross-sequence reverse lookup |
+| [bulk_fill](#bulk_fill) | 2 | Reflection-walker bulk property fill across 12 per-namespace adapters (`apply`, `list_namespaces`) |
+| [describe](#describe) | 3 | Read-only schema introspection for the same 12 adapters (`schema`, `list_targets`, `action_schema`) |
+| **In-tree subtotal** | **1344** | (all default-active; +45 experimental town gen → 1389 when registered) |
 | [Sibling plugins](#sibling-plugins) | varies | Separate plugins, separate distribution |
 
 ---
@@ -55,6 +60,25 @@ The Phase J retrofit cycle added five new actions and tightened param validation
 | `gas` UI binding response | Shape change (Phase J F5) | Returns `{ bindings: [...], count: N }` instead of a bare array. Wrap your client parsers. |
 
 The aliased GAS UI binding actions live in **both** `ui::*` and `gas::*` namespaces — same handler, two callable paths. Pick whichever reads better from your client.
+
+## Recent API Changes (v0.14.8 → v0.15.0)
+
+These releases added the `level_sequence` namespace, the `bulk_fill` / `describe` ergonomics framework, a blueprint dataset read/edit pack, a UI/Blueprint gap-closure sweep, `monolith_guide`, and editor automation verbs. The per-namespace body sections below now document these; full param schemas for everything are also live via `monolith_discover("<namespace>")`.
+
+| Action | Change | Reason |
+|--------|--------|--------|
+| `bulk_fill_query("apply" / "list_namespaces")` | **NEW namespace** (0.15.0) | Reflection-walker bulk property fill across 12 per-namespace adapters, with `dry_run` previews. |
+| `describe_query("schema" / "list_targets" / "action_schema")` | **NEW namespace** (0.15.0) | Read-only schema introspection for the same adapters; `action_schema` returns any registered action's full param schema. |
+| `monolith.guide` | **NEW** (0.15.0) | Section-keyed onboarding guide for AI agents (onboarding / recipes / decisions / errors / skills_map / gotchas) with a live registry overlay. |
+| `blueprint` dataset pack (17 actions) | **NEW** (0.15.0) | DataTable (8), CurveTable (5), StringTable (3), `seed_data_asset` (1) — read with row-struct schema inline, bulk upsert with dry-run, row CRUD, JSON/CSV import/export. |
+| `blueprint.add_property_access` / `override_parent_function` / `save_dirty_assets` | **NEW** (0.15.0) | Cross-class UPROPERTY get/set, value-returning parent-function override, batch save of dirty BP/Widget packages. |
+| `ui` scaffolders + gap-closure (Tier 2/3/4 + Phase 3/4) | **NEW** (0.15.0) | `scaffold_main_menu`, `scaffold_settings_panel_with_tabs`, `scaffold_pause_menu`, `build_menu_from_spec`, `rename_widget`, `audit_focus_chain`, `set_widget_navigation_bulk`, `dump_widget_navigation`, `convert_border_to_common`, `reparent_widget_root`, `set_widget_is_variable`, and more. |
+| `animation.add_anim_graph_node` | Param widened (0.15.0) | Optional `node_class` resolves arbitrary concrete custom `UAnimGraphNode_Base` classes by path/name; built-in `node_type` aliases preserved. |
+| `niagara.get_system_summary` / `get_emitter_summary` | Param added (0.15.0, PR #60 @middle233) | Optional `detail_level: "compact" \| "full"` for event-aware payloads. `validate_system` now reasons about inter-emitter event chains. |
+| `niagara.get_emitter_summary` `event_handlers[]` | **REMOVED — breaking** (0.15.0, PR #60) | Superseded by `consumed_events[]` (compact + full) and `incoming_events[]` (full only). Migrate `event_handlers[].source_emitter_id` → `incoming_events[].source_emitter_id`. |
+| `mesh.import_mesh` | Params added (0.15.0, PR #58 @4698to) | Optional `import_as_skeletal` + `import_animations` widen the importer to `USkeletalMesh` + bundled `UAnimSequence` assets. |
+| UserDefinedEnum-in-UserDefinedStruct schema | Fixed (0.15.0) | Now surfaces `enum_values` and accepts display-name writes instead of reporting a bare `int32`. Affects `read_data_table`, `describe_data_table_schema`, every bulk_fill/describe adapter, and `describe_query("schema")`. |
+| `blueprint.create_user_defined_enum` | Fixed (0.15.0) | No longer drops the last enumerator of every enum it creates. |
 
 ---
 
@@ -103,9 +127,21 @@ Re-index the Monolith project database. Incremental by default (delta only). Pas
 
 ---
 
+### `monolith.guide`
+
+Section-keyed editorial onboarding guide for your AI agent — an onboarding script, worked cross-namespace recipes, X-vs-Y decision matrices, error-to-recovery maps, a skills map, and Monolith-specific gotchas. Hand-authored markdown plus a **live registry overlay**, so the action counts and version it reports always match your running build. New in 0.15.0. Built for users with no project `CLAUDE.md` or private skills — point your AI at it and it self-onboards. Offline parity via `monolith_query.exe monolith guide`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `section` | string | optional | One of `onboarding`, `recipes`, `decisions`, `errors`, `skills_map`, `gotchas`. Omit for the full index + all sections. An unknown value returns a validation error listing the valid keys. |
+
+**Returns:** The requested section (or full guide) as markdown, plus the live per-namespace action counts and plugin version.
+
+---
+
 ## blueprint
 
-Full read/write access to Blueprint graphs, variables, components, functions, nodes, pins, interfaces, timelines, comments, CDOs, and spawn-time actor placement. **89 actions.**
+Full read/write access to Blueprint graphs, variables, components, functions, nodes, pins, interfaces, timelines, comments, CDOs, spawn-time actor placement, and dataset read/edit (DataTable / CurveTable / StringTable round-trip + `seed_data_asset`). **111 actions.**
 
 > For full param schemas, call `monolith_discover("blueprint")` at runtime. The action surface is too broad to enumerate here without bloat — high-traffic actions are documented below; the rest are listed and discoverable.
 
@@ -123,6 +159,11 @@ Full read/write access to Blueprint graphs, variables, components, functions, no
 | Timelines | 4 | `add_timeline`, `add_timeline_track`, `set_timeline_keys`, `get_timeline_data` |
 | Compile / validate | 3 | `compile_blueprint`, `validate_blueprint`, `get_dependencies` |
 | Asset CRUD | 8 | `create_blueprint`, `duplicate_blueprint`, `save_asset`, `create_user_defined_struct`, `create_user_defined_enum`, `create_data_table`, `add_data_table_row`, `get_data_table_rows`, `create_data_asset` |
+| Dataset — DataTable (0.15.0) | 8 | `read_data_table`, `describe_data_table_schema`, `set_data_table_rows`, `remove_data_table_row`, `rename_data_table_row`, `duplicate_data_table_row`, `export_data_table`, `import_data_table` |
+| Dataset — CurveTable (0.15.0) | 5 | `read_curve_table`, `set_curve_table_keys`, `add_curve_table_row`, `remove_curve_table_row`, `rename_curve_table_row` |
+| Dataset — StringTable (0.15.0) | 3 | `read_string_table`, `set_string_table_entries`, `remove_string_table_entry` |
+| Dataset — DataAsset (0.15.0) | 1 | `seed_data_asset` (create + bulk-fill in one atomic call) |
+| Cross-class / overrides (0.15.0) | 3 | `add_property_access`, `override_parent_function`, `save_dirty_assets` |
 | CDO | 2 | `get_cdo_properties`, `set_cdo_property` |
 | Templates / spec | 4 | `build_blueprint_from_spec`, `apply_template`, `list_templates`, `compare_blueprints` |
 | Layout | 2 | `auto_layout`, `export_graph` |
@@ -160,6 +201,107 @@ The crown jewel — author an entire Blueprint (parent class, variables, compone
 | `rotation` | array | optional | `[pitch, yaw, roll]` |
 | `scale` | array | optional | `[x, y, z]` |
 | `folder_path` | string | optional | Outliner folder. **Recommended** — all spawned actors should set a folder path |
+
+### Dataset read/edit pack (0.15.0)
+
+LLM-friendly read → edit → write loop for DataTables, CurveTables, and StringTables, plus `seed_data_asset` for DataAssets. Engine-generic (reflection + string class/struct resolution), zero sibling-plugin coupling. Reuses the MonolithCore reflection framework — reads inline an `FSchemaDescriptor`-shaped schema; writes return an `FDryRunReport`-shaped per-field result. All write actions take `save` (default `false`) to persist the package; reads never mutate.
+
+#### `blueprint.read_data_table`
+
+Read a DataTable's full contents plus its inline row schema. Supersedes `get_data_table_rows` by inlining the schema with the data.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `asset_path` | string | **required** | DataTable asset path (e.g. `/Game/Data/DT_Weapons`) |
+| `include_schema` | boolean | optional | Include the inline row-field schema array. Default: `true` |
+| `row_name` | string | optional | Return only this row; otherwise return all rows |
+
+Returns `{ row_struct, row_struct_path, total_rows, schema:[{type_name, import_text_form, enum_values, range, children}], rows:[{row_name, values}] }`. Companion: `describe_data_table_schema` (schema only, no row data).
+
+#### `blueprint.set_data_table_rows`
+
+Bulk add/update DataTable rows in one call. Fires one editor-refresh broadcast at the end.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `asset_path` | string | **required** | DataTable asset path |
+| `rows` | array | **required** | Array of `{row_name, values:{field:value}, mode?}` — mode is `upsert` (default), `add`, or `update` |
+| `dry_run` | boolean | optional | Validate only — emit would-be writes but do not persist. Default: `false` |
+| `strict` | boolean | optional | Promote silent drops / unknown fields / enum misses to hard errors. Default: `false` |
+| `save` | boolean | optional | Save the package after applying. Default: `false` |
+
+Returns an `FDryRunReport`-shaped per-field `{path, current, proposed, ok, reason}`.
+
+#### Remaining dataset actions
+
+| Action | Key params | Notes |
+|--------|-----------|-------|
+| `describe_data_table_schema` | `asset_path` | Row schema only, no data |
+| `remove_data_table_row` | `asset_path`, `row_name`, `save?` | Row delete |
+| `rename_data_table_row` | `asset_path`, `old_name`, `new_name`, `save?` | Row rename |
+| `duplicate_data_table_row` | `asset_path`, `source_row`, `new_name`, `save?` | Row copy |
+| `export_data_table` | `asset_path`, `format?` (`json`/`csv`), `use_json_objects?`, `simple_text?` | Round-trippable text blob |
+| `import_data_table` | `asset_path`, `text`, `format?`, `mode` (`replace` only), `save?` | **REPLACES** all rows; RowStruct must already be set |
+| `read_curve_table` | `asset_path`, `row_name?` | Returns `mode` (`rich`/`simple`/`empty`) + per-key data |
+| `set_curve_table_keys` | `asset_path`, `row_name`, `keys[{time,value}]`, `mode?`, `interp_mode?`, `save?` | First write locks rich-vs-simple; `cubic` → rich, others → simple |
+| `add_curve_table_row` | `asset_path`, `row_name`, `interp_mode?`, `save?` | Empty curve row |
+| `remove_curve_table_row` / `rename_curve_table_row` | `asset_path`, `row_name` / `old_name`+`new_name`, `save?` | Curve row CRUD |
+| `read_string_table` | `asset_path`, `include_meta?` | Returns namespace + `entries:[{key, source_string, meta?}]` |
+| `set_string_table_entries` | `asset_path`, `entries[{key, source_string}]`, `mode?` (`upsert`/`replace`), `namespace?`, `save?` | Upsert or full replace |
+| `remove_string_table_entry` | `asset_path`, `key`, `save?` | Entry delete |
+
+#### `blueprint.seed_data_asset`
+
+Create AND populate a `UObject` DataAsset in one atomic call — `create_data_asset`'s body plus a reflection-walker fill of the supplied property `tree`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `save_path` | string | **required** | Asset save path (e.g. `/Game/Data/DA_HealingPotion`) |
+| `class_name` | string | **required** | `UObject` class name (same resolution as `create_data_asset`) |
+| `tree` | object | **required** | Nested JSON of properties to walk against the new asset's reflection schema |
+| `dry_run` | boolean | optional | Validate the tree against the class WITHOUT creating the asset. Default: `false` |
+| `strict` | boolean | optional | Promote silent drops / unknown fields / enum misses to hard errors. Default: `false` |
+| `skip_save` | boolean | optional | Skip synchronous package save. Default: `false` |
+
+Existing DataAssets otherwise round-trip through `bulk_fill_query("apply")` + `describe_query("schema")`.
+
+### Cross-class access + parent overrides (0.15.0)
+
+#### `blueprint.add_property_access`
+
+Author a `VariableGet` (or `VariableSet` if `is_setter`) node that reads/writes a UPROPERTY on an **arbitrary foreign class** — not just the Blueprint's own variables. `member_class` is resolved by string, then `VariableReference.SetExternalMember()` binds the member so the value pin resolves to the property's real type (unlike `node_type='VariableGet'`, which is self-context only and produces a wildcard 0-pin node for foreign properties).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `asset_path` | string | **required** | Blueprint asset path |
+| `member_class` | string | **required** | Class that owns the property (e.g. `Item`, `UItem`, `AActor`). Resolved native-first; accepts `U`/`A` prefix or bare name |
+| `member_name` | string | **required** | Name of the UPROPERTY to read/write |
+| `graph_name` | string | optional | Graph name (defaults to EventGraph) |
+| `is_setter` | bool | optional | `true` creates a `VariableSet` (write) node; otherwise a `VariableGet` (read). Default: `false` |
+| `position` | array | optional | `[x, y]` (default `[0, 0]`) |
+
+Returns `node_id`, `value_pin_id`, and `target_pin_id` (the object/self input the caller wires via `connect_pins` to supply the instance).
+
+#### `blueprint.override_parent_function`
+
+Author a Blueprint override of an overridable parent function (`BlueprintImplementableEvent` / `BlueprintNativeEvent`), **including those that RETURN a value** (e.g. `UCommonActivatableWidget::BP_GetDesiredFocusTarget` → `UWidget*`). `add_function` cannot do this and the event-node form has no ReturnValue pin.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `asset_path` | string | **required** | Blueprint asset path |
+| `parent_function_name` | string | **required** | Name of the overridable parent function |
+
+Returns `graph_name`, `entry_node_id`, `return_pin_id`/`name`, `override_class`, `has_return_value`.
+
+#### `blueprint.save_dirty_assets`
+
+Save ALL currently-dirty Blueprint and Widget Blueprint packages in one sweep — closes the data-loss window after a batch of edits that dirty but do not persist packages.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path_prefix` | string | optional | Only save assets whose package path starts with this prefix. Default: `/Game`. Empty string = all dirty BP/Widget packages |
+
+Returns `saved[]`, `failed[]`, `count`.
 
 See `Plugins/Monolith/Docs/specs/SPEC_MonolithBlueprint.md` for the deep dive.
 
@@ -202,7 +344,7 @@ See `Plugins/Monolith/Docs/specs/SPEC_MonolithMaterial.md` for full graph_spec s
 
 ## animation
 
-Animation curves, bone tracks, sync markers, root motion, compression, blend spaces, ABPs, montages, skeletons, PoseSearch, IKRig, Control Rig. **118 actions** total — 96 baseline + 13 PoseSearch + 5 ABP write + 3 Control Rig write + 1 layout.
+Animation curves, bone tracks, sync markers, root motion, compression, blend spaces, ABPs, montages, skeletons, PoseSearch, IKRig, Control Rig. **125 actions** total — the 118 baseline (96 core + 13 PoseSearch + 5 ABP write + 3 Control Rig write + 1 layout) plus the v0.14.9/v0.14.10 PR pack: `copy_bone_pose_between_sequences`, `list_bone_tracks`, `get_skeleton_preview_attached_assets`, `get_bone_ref_pose`, and the three `*_compatible_skeleton` actions.
 
 > For full param schemas, call `monolith_discover("animation")` at runtime.
 
@@ -211,16 +353,17 @@ Animation curves, bone tracks, sync markers, root motion, compression, blend spa
 | Category | Actions | Examples |
 |----------|---------|----------|
 | Sequence ops | 12 | `get_sequence_info`, `get_sequence_notifies`, `set_sequence_properties`, `set_additive_settings`, `set_compression_settings`, `set_root_motion_settings`, `create_sequence`, `duplicate_sequence`, `build_sequence_from_poses` |
-| Bone tracks | 4 | `add_bone_track`, `remove_bone_track`, `set_bone_track_keys`, `get_bone_track_keys` |
+| Bone tracks | 6 | `add_bone_track`, `remove_bone_track`, `set_bone_track_keys`, `get_bone_track_keys`, `list_bone_tracks`, `copy_bone_pose_between_sequences` |
 | Curves | 6 | `add_curve`, `remove_curve`, `set_curve_keys`, `get_curve_keys`, `list_curves`, `get_skeleton_curves` |
 | Notifies | 9 | `add_notify`, `add_notify_state`, `remove_notify`, `set_notify_time`, `set_notify_duration`, `set_notify_track`, `set_notify_properties`, `bulk_add_notify`, `clone_notify_setup` |
 | Sync markers | 4 | `get_sync_markers`, `add_sync_marker`, `remove_sync_marker`, `rename_sync_marker` |
 | Skeleton | 5 | `get_skeleton_info`, `get_skeletal_mesh_info`, `add_socket`, `remove_socket`, `set_socket_transform`, `get_skeleton_sockets`, `add_virtual_bone`, `remove_virtual_bones`, `compare_skeletons` |
+| Skeleton (read/compat, v0.14.10) | 5 | `get_skeleton_preview_attached_assets`, `get_bone_ref_pose`, `get_compatible_skeletons`, `add_compatible_skeleton`, `remove_compatible_skeleton` |
 | Montages | 9 | `get_montage_info`, `create_montage`, `set_montage_blend`, `add_montage_section`, `delete_montage_section`, `set_section_next`, `set_section_time`, `add_montage_slot`, `set_montage_slot`, `add_montage_anim_segment`, `create_montage_from_sections` |
 | Blend spaces | 8 | `get_blend_space_info`, `create_blend_space`, `create_blend_space_1d`, `create_aim_offset`, `create_aim_offset_1d`, `add_blendspace_sample`, `edit_blendspace_sample`, `delete_blendspace_sample`, `set_blend_space_axis` |
 | ABPs | 9 | `get_abp_info`, `create_anim_blueprint`, `get_state_machines`, `get_state_info`, `get_transitions`, `get_blend_nodes`, `get_linked_layers`, `get_graphs`, `get_nodes`, `get_abp_variables`, `get_abp_linked_assets` |
 | State machines (write) | 3 | `add_state_to_machine`, `add_transition`, `set_transition_rule` |
-| ABP graph (write) | 5 | `add_anim_graph_node`, `connect_anim_graph_pins`, `set_state_animation`, `add_variable_get`, `set_anim_graph_node_property` |
+| ABP graph (write) | 5 | `add_anim_graph_node` (aliases or generic `UAnimGraphNode_Base` class path/name via `node_type` / `node_class`), `connect_anim_graph_pins`, `set_state_animation`, `add_variable_get`, `set_anim_graph_node_property` |
 | Composites | 3 | `get_composite_info`, `add_composite_segment`, `remove_composite_segment`, `create_composite` |
 | IKRig / Retarget | 6 | `get_ikrig_info`, `add_ik_solver`, `get_retargeter_info`, `set_retarget_chain_mapping`, `add_retarget_chain`, `remove_retarget_chain`, `set_retarget_chain_bones` |
 | Control Rig | 7 | `get_control_rig_info`, `get_control_rig_variables`, `add_control_rig_element`, `get_control_rig_graph`, `add_control_rig_node`, `connect_control_rig_pins` |
@@ -266,7 +409,7 @@ See `Plugins/Monolith/Docs/specs/SPEC_MonolithNiagara.md`.
 
 ## editor
 
-Live Coding builds, compile output capture, editor log capture, scene capture, texture import, asset deletion, viewport info, GIF capture, **map creation** and **module status** (Phase J F8). **22 actions.**
+Live Coding builds, compile output capture, editor log capture, scene capture, texture import, asset deletion, viewport info, GIF capture, **map creation** and **module status** (Phase J F8), plus the **PIE / console / Python automation** verbs (`run_console_command`, `start_pie`, `stop_pie`, `run_python`, `load_level` — v0.14.9/v0.14.10). **29 actions.**
 
 ### `editor.trigger_build` / `editor.live_compile`
 
@@ -384,6 +527,37 @@ Report plugin-enabled + module-loaded status for Monolith (or arbitrary) modules
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `module_names` | array | optional | Module name strings. Omit to query all Monolith modules. Unknown names return `enabled=false, loaded=false` (no error). |
+
+### `editor.run_console_command` · NEW in v0.14.10
+
+Execute a console command. Routes to the first PIE `PlayerController` found (so exec UFUNCTIONs on the possessed pawn fire); falls back to `GEngine->Exec` on the editor world when no PIE session is active. Returns which world type was used (`pie` / `editor`) and whether the PC path was taken.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `command` | string | **required** | Console command string (e.g. `BowLoop 1`, `WalkLoop`, `Cam3P 1`) |
+
+### `editor.start_pie` · `editor.stop_pie` · NEW in v0.14.10
+
+`start_pie` queues an in-viewport Play-In-Editor session (refuses to queue a duplicate when a PIE world is already alive); response includes `mode: 'in_viewport'`. `stop_pie` calls `RequestEndPlayMap` when a PIE world exists, no-op (`stopped: false`) otherwise. Both take *no parameters*. Pairs with `run_python` / `load_level` for fully automated in-game test flows.
+
+### `editor.run_python` · NEW in v0.14.9
+
+Execute a Python command, statement, or file via `IPythonScriptPlugin::ExecPythonCommandEx`. Returns success, captured Python stdout/stderr (typed info/warning/error), and (for `evaluate_statement` mode) the evaluated result. Requires `PythonScriptPlugin` (engine-shipped Experimental, enabled by `Monolith.uplugin`).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `command` | string | **required** | Python source — inline code, single statement, or a file path with optional space-separated args (when `mode=execute_file`) |
+| `mode` | string | optional | `execute_file` (default), `execute_statement`, or `evaluate_statement` |
+| `unattended` | bool | optional | Set `GIsRunningUnattendedScript=true` to suppress UI dialogs. Default: `false` |
+| `file_scope` | string | optional | Scope for `execute_file`: `private` (isolated, default) or `public` (shared with REPL console) |
+
+### `editor.load_level` · NEW in v0.14.9
+
+Close the current persistent level (without saving) and load the specified level by `/Game/...` asset path. Wraps `ULevelEditorSubsystem::LoadLevel`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | **required** | Asset path of the level to load (e.g. `/Game/Maps/L_Backyard`). Must exist. |
 
 ---
 
@@ -575,7 +749,7 @@ Unreal Engine C++ source code navigation. 1M+ symbols indexed. **11 actions.**
 
 ## mesh
 
-Mesh inspection, scene manipulation, spatial queries, level blockout, GeometryScript, procedural geometry, lighting, audio, performance, and **experimental** procedural town generation. **240 actions** total — 195 core (always registered) + 45 experimental town gen (gated on `bEnableProceduralTownGen=true`, default `false`).
+Mesh inspection, scene manipulation, spatial queries, level blockout, GeometryScript, procedural geometry, lighting, audio, performance, mesh import (incl. skeletal + animation, PR #58), and **experimental** procedural town generation. **194 actions** (always registered, in the public count) + 45 experimental town gen (gated on `bEnableProceduralTownGen=true`, default `false`) = 239 when town-gen is on.
 
 > For full param schemas, call `monolith_discover("mesh")` at runtime. The action surface is too broad for full enumeration — see categories below.
 
@@ -596,6 +770,7 @@ Mesh inspection, scene manipulation, spatial queries, level blockout, GeometrySc
 | Templates / presets | `list_room_templates`, `get_room_template`, `apply_room_template`, `create_room_template`, `list_storytelling_patterns`, `create_storytelling_pattern`, `list_acoustic_profiles`, `create_acoustic_profile`, `create_tension_profile`, `list_genre_presets`, `export_genre_preset`, `import_genre_preset` |
 | Validation | `validate_game_ready`, `suggest_lod_strategy`, `batch_validate`, `compare_lod_chain`, `validate_naming_conventions`, `batch_rename_assets` |
 | GeometryScript | `mesh_boolean`, `mesh_simplify`, `mesh_remesh`, `generate_collision`, `generate_lods`, `fill_holes`, `compute_uvs`, `mirror_mesh` |
+| Mesh import / export | `import_mesh` (static or `import_as_skeletal` + `import_animations`, PR #58), `export_mesh` (FBX, PR #41) |
 | Procedural meshes | `create_parametric_mesh`, `create_horror_prop`, `create_structure`, `create_building_shell`, `create_maze`, `create_pipe_network`, `create_fragments`, `create_terrain_patch` |
 | Cache | `list_cached_meshes`, `clear_cache`, `validate_cache`, `get_cache_stats` |
 | Handles | `create_handle`, `release_handle`, `list_handles`, `save_handle` |
@@ -621,31 +796,40 @@ See `Plugins/Monolith/Docs/specs/SPEC_MonolithMesh.md` for the full action catal
 
 ## ui
 
-UMG widget Blueprint CRUD, templates, styling, animation, settings scaffolding, accessibility, **CommonUI**, and GAS UI bindings. **96 actions** = 42 UMG baseline + 50 CommonUI + 4 GAS UI binding aliases.
+UMG widget Blueprint CRUD, templates, styling, animation (v1 + v2), the schema-driven **Spec / EffectSurface** architecture, settings scaffolding, accessibility, **CommonUI**, and GAS UI bindings. **138 actions** — the UMG + Spec/EffectSurface baseline (66 always-on, incl. the v0.15.0 navigation/conversion gap-closure + headline scaffolders) + 51 CommonUI (registered when `WITH_COMMONUI=1`) + 4 GAS UI binding aliases. The four CommonUI-surface gap-closure actions (`convert_border_to_common`, `convert_textblock_to_common`, `set_action_bar_button_class`, `apply_token_binding`) are `#if WITH_COMMONUI`-gated.
 
-> For full param schemas, call `monolith_discover("ui")` at runtime.
+> For full param schemas, call `monolith_discover("ui")` at runtime. The surface is large — categories below; the v0.15.0-new actions are flagged.
 
-**Action categories (UMG baseline, always registered):**
+**Action categories (UMG + Spec baseline, always registered):**
 
 | Category | Actions | Examples |
 |----------|---------|----------|
-| Widget CRUD | 7 | `create_widget_blueprint`, `get_widget_tree`, `add_widget`, `remove_widget`, `set_widget_property`, `compile_widget`, `list_widget_types` |
+| Widget CRUD | 9 | `create_widget_blueprint`, `get_widget_tree`, `add_widget`, `remove_widget`, `set_widget_property` (accepts `value` alias), `compile_widget` (returns `errors[]`/`warnings[]`), `list_widget_types`, `rename_widget`, `dump_blueprint_compile_log` |
+| Variable flags (v0.15.0) | 3 | `add_widget_variable`, `set_widget_is_variable`, `list_widget_property_enums` |
+| Root / reparent (v0.15.0) | 1 | `reparent_widget_root` |
 | Slot / layout | 4 | `set_slot_property`, `set_anchor_preset`, `move_widget`, `set_brush` |
 | Styling | 6 | `set_font`, `set_color_scheme`, `batch_style`, `set_text`, `set_image`, `setup_list_view` |
 | Templates / scaffolds | 13 | `create_hud_element`, `create_menu`, `create_settings_panel`, `create_dialog`, `create_notification_toast`, `create_loading_screen`, `create_inventory_grid`, `create_save_slot_list`, `scaffold_game_user_settings`, `scaffold_save_game`, `scaffold_save_subsystem`, `scaffold_audio_settings`, `scaffold_input_remapping` |
-| Animation | 5 | `list_animations`, `get_animation_details`, `create_animation`, `add_animation_keyframe`, `remove_animation` |
+| Headline scaffolders (v0.15.0) | 3 | `scaffold_main_menu`, `scaffold_settings_panel_with_tabs`, `scaffold_pause_menu` |
+| Animation v1 | 5 | `list_animations`, `get_animation_details`, `create_animation`, `add_animation_keyframe`, `remove_animation` |
+| Animation v2 | 5 | `create_animation_v2`, `add_bezier_eased_segment`, `bake_spring_animation`, `add_animation_event_track`, `bind_animation_to_event` |
 | Inspection | 3 | `list_widget_events`, `list_widget_properties`, `get_widget_bindings` |
-| Accessibility | 5 | `scaffold_accessibility_subsystem`, `audit_accessibility`, `set_colorblind_mode`, `set_text_scale`, `apply_high_contrast_variant` |
+| Design import | 4 | `import_texture_from_bytes`, `import_font_family`, `set_rounded_corners`, `create_gradient_mid_from_spec` |
+| EffectSurface (provider-gated, `-32010` when absent) | 13 | `apply_box_shadow`, `set_effect_surface_corners`, `set_effect_surface_fill`, `set_effect_surface_border`, `set_effect_surface_dropShadow`, `set_effect_surface_innerShadow`, `set_effect_surface_glow`, `set_effect_surface_filter`, `set_effect_surface_backdropBlur`, `set_effect_surface_insetHighlight`, `apply_effect_surface_preset` |
+| Spec round-trip | 4 | `build_ui_from_spec`, `dump_ui_spec`, `dump_ui_spec_schema`, `build_menu_from_spec` (v0.15.0) |
+| Accessibility | 6 | `scaffold_accessibility_subsystem`, `audit_accessibility`, `set_colorblind_mode`, `set_text_scale`, `apply_high_contrast_variant`, `set_text_scale_binding` |
+| Allowlist / diagnostics | 2 | `dump_property_allowlist`, `dump_style_cache_stats` |
 
 **Action categories (CommonUI, registered when `WITH_COMMONUI=1`):**
 
 | Category | Actions | Examples |
 |----------|---------|----------|
 | Activatable widgets | 8 | `create_activatable_widget`, `create_activatable_stack`, `create_activatable_switcher`, `configure_activatable`, `push_to_activatable_stack`, `pop_activatable_stack`, `get_activatable_stack_state`, `set_activatable_transition` |
-| Common buttons / styles | 6 | `convert_button_to_common`, `configure_common_button`, `create_common_button_style`, `create_common_text_style`, `create_common_border_style`, `apply_style_to_widget`, `batch_retheme` |
+| Common buttons / styles | 7 | `convert_button_to_common`, `configure_common_button`, `create_common_button_style`, `create_common_text_style`, `create_common_border_style`, `apply_style_to_widget`, `batch_retheme` |
 | Common config | 2 | `configure_common_text`, `configure_common_border` |
+| Conversion gap-closure (v0.15.0) | 4 | `convert_textblock_to_common`, `convert_border_to_common`, `set_action_bar_button_class`, `apply_token_binding` |
 | Input | 7 | `create_input_action_data_table`, `add_input_action_row`, `bind_common_action_widget`, `create_bound_action_bar`, `get_active_input_type`, `set_input_type_override`, `list_platform_input_tables` |
-| Navigation / focus | 5 | `set_widget_navigation`, `set_initial_focus_target`, `force_focus`, `get_focus_path`, `request_refresh_focus`, `enforce_focus_ring` |
+| Navigation / focus | 9 | `set_widget_navigation`, `set_widget_navigation_bulk` (v0.15.0), `dump_widget_navigation` (v0.15.0), `set_initial_focus_target`, `force_focus`, `get_focus_path`, `request_refresh_focus`, `audit_focus_chain`, `enforce_focus_ring` |
 | Lists / tabs / groups | 4 | `setup_common_list_view`, `create_tab_list_widget`, `register_tab`, `create_button_group` |
 | Carousels / switcher | 2 | `configure_animated_switcher`, `create_widget_carousel` |
 | Hardware | 1 | `create_hardware_visibility_border` |
@@ -653,8 +837,8 @@ UMG widget Blueprint CRUD, templates, styling, animation, settings scaffolding, 
 | Lazy / load guard | 2 | `create_lazy_image`, `create_load_guard` |
 | Modals / messages | 2 | `show_common_message`, `configure_modal_overlay` |
 | Audit / report | 2 | `audit_commonui_widget`, `export_commonui_report` |
-| Reload | 1 | `hot_reload_styles`, `dump_action_router_state` |
-| Reduce motion | 1 | `wrap_with_reduce_motion_gate`, `set_text_scale_binding` |
+| Reload / diagnostics | 2 | `hot_reload_styles`, `dump_action_router_state` |
+| Reduce motion | 1 | `wrap_with_reduce_motion_gate` |
 
 **GAS UI binding aliases (4 — same handlers as `gas::*` versions):**
 
@@ -785,9 +969,9 @@ See `Plugins/Monolith/Docs/specs/SPEC_MonolithLogicDriver.md`.
 
 ## audio
 
-Sound Cue + MetaSound graph CRUD, attenuation/class/mix/submix/concurrency, batch ops, Sound Cue templates, perception bindings, and a small batch of test helpers. **86 actions.**
+Sound Cue + MetaSound graph CRUD + on-disk document introspection, attenuation/class/mix/submix/concurrency, batch ops, Sound Cue templates, perception bindings, and a small batch of test helpers. **98 actions.**
 
-> For full param schemas, call `monolith_discover("audio")` at runtime. MetaSound graph actions are conditional on `#if WITH_METASOUND` — projects without MetaSound get Sound Cue + CRUD + batch actions but no MetaSound graph building.
+> For full param schemas, call `monolith_discover("audio")` at runtime. MetaSound graph + document actions are conditional on `#if WITH_METASOUND` — projects without MetaSound get Sound Cue + CRUD + batch actions but no MetaSound graph building or document walk. The 12 document-introspection actions (PR #18, v0.14.10) read **on-disk document state** for arbitrary assets without an active builder session — distinct from the Builder-side graph actions which read live builder state during mutation.
 
 **Action categories:**
 
@@ -806,8 +990,9 @@ Sound Cue + MetaSound graph CRUD, attenuation/class/mix/submix/concurrency, batc
 | Perception bindings | 4 | `bind_sound_to_perception`, `unbind_sound_from_perception`, `get_sound_perception_binding`, `list_perception_bound_sounds` |
 | MetaSound assets | 3 | `create_metasound_source`, `create_metasound_patch`, `create_metasound_preset` |
 | MetaSound graph | 12 | `add_metasound_node`, `remove_metasound_node`, `connect_metasound_nodes`, `disconnect_metasound_nodes`, `add_metasound_input`, `add_metasound_output`, `set_metasound_input_default`, `add_metasound_interface`, `get_metasound_graph`, `list_metasound_connections`, `add_metasound_variable`, `set_metasound_node_location` |
-| MetaSound discovery | 6 | `list_available_metasound_nodes`, `get_metasound_node_info`, `find_metasound_node_inputs`, `find_metasound_node_outputs`, `get_metasound_input_names` |
-| MetaSound spec / templates | 6 | `build_metasound_from_spec`, `create_oneshot_sfx`, `create_looping_ambient_metasound`, `create_synthesized_tone`, `create_interactive_metasound` |
+| MetaSound discovery (Builder-side) | 6 | `list_available_metasound_nodes`, `get_metasound_node_info`, `find_metasound_node_inputs`, `find_metasound_node_outputs`, `get_metasound_input_names` |
+| MetaSound document introspection (v0.14.10, PR #18) | 12 | `list_metasounds`, `list_metasound_documents`, `get_metasound_document`, `get_metasound_summary`, `inspect_metasound_node_instance`, `get_metasound_document_connections`, `get_metasound_document_variables`, `get_metasound_user_parameters`, `search_metasound_document_nodes`, `get_metasound_info`, `get_metasound_dependencies`, `validate_metasound` |
+| MetaSound spec / templates | 6 | `build_metasound_from_spec`, `create_oneshot_sfx`, `create_looping_ambient_metasound`, `create_synthesized_tone`, `create_interactive_metasound`, `create_metasound_preset` |
 
 ### `audio.create_test_wave` · NEW in Phase J F18
 
@@ -837,6 +1022,83 @@ Stamp a `UMonolithSoundPerceptionUserData` onto a `USoundBase` (Cue / MetaSoundS
 > **Phase J F11:** `loudness <= 0`, `max_range < 0`, and unknown `sense_class` values now reject up-front instead of writing junk userdata.
 
 See `Plugins/Monolith/Docs/specs/SPEC_MonolithAudio.md`.
+
+---
+
+## level_sequence
+
+Level Sequence inspection — binding inventory (legacy possessables/spawnables + UE 5.7 custom bindings), Director Blueprint functions/variables, event-track bindings, and cross-sequence reverse lookup. **8 actions.** Backed by a dedicated SQLite indexer (`MonolithLevelSequence` module, PR #45). Read-only.
+
+| Action | Key params | Notes |
+|--------|-----------|-------|
+| `ping` | — | Smoke test; returns `{status:ok, module:MonolithLevelSequence}` |
+| `list_directors` | `asset_path_filter?` (glob) | Level Sequences with a Director BP + function/variable counts |
+| `get_director_info` | `asset_path` | Function counts by kind (`user`/`custom_event`/`sequencer_endpoint`), variable count, event-binding counts, sample of up to 10 functions |
+| `list_director_functions` | `asset_path`, `kind?` | Own functions filtered by `user`/`custom_event`/`sequencer_endpoint`/`event`/`all` (own-only, matching the blueprint convention) |
+| `list_director_variables` | `asset_path` | Director `NewVariables` (name + K2-schema type) in declaration order |
+| `list_event_bindings` | `asset_path` | Event-track bindings grouped by binding GUID (possessable/spawnable/master) + the sections that fire Director functions |
+| `list_bindings` | `asset_path`, `kind?` | **ALL** bindings regardless of event tracks — `possessable`/`spawnable`/`replaceable`/`custom`. Catches UE 5.7 `UMovieSceneCustomBinding` rows that `list_event_bindings` misses |
+| `find_director_function_callers` | `function_name`, `asset_path_filter?` (glob) | Cross-sequence reverse lookup: every event-track section across the project that fires a given Director function |
+
+See `Plugins/Monolith/Docs/specs/SPEC_MonolithLevelSequence.md`.
+
+---
+
+## bulk_fill
+
+Reflection-walker bulk property fill across 12 per-namespace adapters. **2 actions.** Framework dispatcher in `MonolithCore` (0.15.0); each adapter self-registers from its owning module — zero compile-time linkage from core into adapter modules.
+
+### `bulk_fill_query.apply`
+
+Apply a JSON-tree fill to an asset via the target namespace's adapter. Walks the target's reflection schema, supports preview-without-persist and strict promotion of silent drops.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `target_namespace` | string | **required** | Adapter namespace: `blueprint`, `gas`, `ui`, `ai`, `niagara`, `material`, `audio`, `mesh`, `animation`, `logicdriver`, `combograph` (plus the sibling `inventory` adapter when present) |
+| `target` | string | **required** | Asset path or adapter-defined target (e.g. `/Game/Items/DA_HealingPotion`) |
+| `tree` | object | **required** | Nested JSON of properties to walk against the target's reflection schema |
+| `dry_run` | boolean | optional | Validate only — emit would-be writes but do not persist. Default: `false` |
+| `strict` | boolean | optional | Promote silent drops / clamps / unknown-fields to hard errors. Default: `false` |
+
+Returns an `FDryRunReport`-shaped result (`FieldWrites` / `SilentDrops` / `Clamps` / `Errors`).
+
+### `bulk_fill_query.list_namespaces`
+
+List `target_namespace` values the bulk_fill registry currently knows about (one row per registered adapter). *No parameters.*
+
+---
+
+## describe
+
+Read-only schema introspection for the same 12 adapters, plus action-param introspection. **3 actions.** Companion to `bulk_fill` (0.15.0).
+
+### `describe_query.schema`
+
+Return a rich `FSchemaDescriptor` tree (type names, ImportText forms, enum-value lists, clamp ranges, nested children) for an asset/action via its namespace adapter.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `target_namespace` | string | **required** | Adapter namespace whose schema should be introspected |
+| `target` | string | **required** | Asset path or action name to describe |
+
+### `describe_query.list_targets`
+
+List the asset paths / action names the describe adapter can introspect for a given `target_namespace`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `target_namespace` | string | **required** | Adapter namespace whose introspection inventory should be listed |
+
+### `describe_query.action_schema`
+
+Return a registered ACTION's param schema (names, types, required, defaults, aliases, descriptions) by `(target_namespace, action)` — so callers stop trial-and-erroring param names.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `target_namespace` | string | **required** | Namespace that owns the action (e.g. `blueprint`, `ui`) |
+| `action` | string | **required** | Action name whose param schema to return (e.g. `add_nodes_bulk`) |
+
+See the per-system SPECs' "Bulk Fill & Describe Surface" sections for each adapter's `fill_kind` catalogue.
 
 ---
 

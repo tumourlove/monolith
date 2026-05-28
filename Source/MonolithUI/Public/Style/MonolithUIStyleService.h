@@ -170,10 +170,23 @@ public:
     /**
      * Compute the canonical content hash for a properties bag against a
      * specific style class. Exposed for tests so they can verify two-bag
-     * equivalence without going through the resolver.
+     * equivalence without going through the resolver. Two-arg form retained
+     * for backward compatibility — calls the three-arg overload with an empty
+     * AssetName (NOT recommended for cache-lookup paths post Bug #1 fix).
      */
     static uint32 ComputeContentHash(
         UClass* StyleClass,
+        const TSharedPtr<FJsonObject>& Properties);
+
+    /**
+     * Three-arg overload: mixes the asset_name into the canonical buffer so
+     * two empty-property-bag requests under different names produce distinct
+     * hashes. Bug #1 fix (2026-05-16 UI gap audit) — see implementation for
+     * the failure-mode write-up.
+     */
+    static uint32 ComputeContentHash(
+        UClass* StyleClass,
+        const FString& AssetName,
         const TSharedPtr<FJsonObject>& Properties);
 
     /**

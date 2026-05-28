@@ -71,4 +71,47 @@
 |--------|--------|
 | `create_material_function` | Added `type` parameter — supports `MaterialLayer` and `MaterialLayerBlend` in addition to standard material functions |
 
+### Bulk Fill & Describe Surface (2026-05-11)
+
+`MonolithMaterialBulkFillAdapter` registers under `FMonolithBulkFillRegistry` for the `material` namespace, exposed via the framework-level `bulk_fill_query("apply", ...)` and `describe_query("schema", ...)` dispatchers. Phase 5 of the MCP ergonomics rollout (design spec `Docs/plans/2026-05-11-monolith-mcp-ergonomics-design.md`).
+
+**Surface summary.** `bulk_fill_query("apply", target_namespace="material", target="<asset_path>", tree={...})` covers two distinct fanout paths: MIC parameter sheets (the RL_LWSkin_Array_DCR class of pain — 80-120 params per MIC) and a v1 audit-only wrapper over `build_material_graph`. `describe_query("schema", target_namespace="material", target="<asset_path>")` returns the writable parameter surface — groups, ranges, defaults, sampler types per MIC parent.
+
+**fill_kind catalogue (2 — enumerated against `MonolithMaterialBulkFillAdapter.cpp`):**
+
+| `fill_kind` | Target shape | Walks |
+|---|---|---|
+| `MICParameters` | `UMaterialInstanceConstant` | Four canonical param maps written in one transaction: `scalars:{}`, `vectors:{}`, `textures:{}`, `switches:{}`. Replaces the 30-80 JSON round-trips per MIC |
+| `BuildMaterialGraph` | `UMaterial` | **v1 audit-only** wrapper for `material_query("build_material_graph")`. Surfaces the silent-drop list (`VectorParameter.DefaultValue` ignored, `material_outputs` block no-ops, `clear_existing:false` sometimes clears) in the dry-run report. Writes still flow through the existing `build_material_graph` action — this fill_kind does NOT replace it |
+
+**Sample tree (MICParameters, design spec Appendix B.5):**
+
+```json
+{
+  "target": "/Game/Characters/RL_LWSkin_Array_DCR_Body",
+  "tree": {
+    "fill_kind": "MICParameters",
+    "scalars": {"SubsurfaceRadius": 0.5, "Roughness": 0.45},
+    "vectors": {"SubsurfaceColor": [0.9, 0.7, 0.6, 1.0]},
+    "textures": {"BaseColorMap": "/Game/Characters/T_BodyAlbedo"},
+    "switches": {"UseDetailNormal": true}
+  },
+  "dry_run": true
+}
+```
+
+**Adapter-specific quirks.**
+
+- **`build_material_graph` wrapper requires nested `graph_spec`.** Existing wrapper-shape gotcha carries: `material_query("build_material_graph")` requires `{ "graph_spec": { ... } }` not bare spec. The `BuildMaterialGraph` fill_kind preserves the same wrapper — `tree:{ "fill_kind":"BuildMaterialGraph", "graph_spec":{ ... } }` — and the dry-run surfaces the wrapper validator's diagnostics.
+- **Silent-drop catalogue surfaced in dry-run.** `VectorParameter.DefaultValue` writes that the underlying action ignores show up as `silent_drops:[{path: "...", reason: "VectorParameter.DefaultValue ignored by build_material_graph"}]`. Same treatment for `material_outputs` block no-ops and `clear_existing:false` partial-clear cases — the audit-only fill_kind catches these without committing changes.
+- **`MaterialAttributeLayers` reflection-hostile — `(WISHLIST-rejected)`.** Per design Cross-Cutting Engine Quirks, MaterialAttributeLayers cannot be walked via reflection in v1. Schema returns `unsupported: true` for any layer fields.
+- **MaterialX permutation invisible — `(WISHLIST)`.** MaterialX-derived permutations of base materials are invisible to the reflection walker; schema flags the parent material with `materialx_permutations_invisible: true` if any are detected.
+- **`v1 BuildMaterialGraph fill_kind is audit-only — write still through existing `material_query("build_material_graph")`.** Cited verbatim from the design spec; the adapter explicitly refuses to commit graph writes and points callers at the existing action.
+
+**Limitations / v1.1 follow-ups.**
+
+- CSV / JSON-array / sibling-MIC bulk-fill from template source — covered minimally by MICParameters' four-map shape in v1; CSV path stub `(WISHLIST v1.1)` per Q2.
+- Graph-write fill_kind (non-audit) — `(v1.1)` blocked until `build_material_graph`'s silent-drop set is fully enumerated and the wrapper can refuse-on-drop in strict mode.
+- Diff_material_graph companion — `(WISHLIST)` per design Three Framework Primitives dry-run section.
+
 ---

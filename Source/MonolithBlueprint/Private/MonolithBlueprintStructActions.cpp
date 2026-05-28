@@ -3,6 +3,8 @@
 #include "MonolithJsonUtils.h"
 #include "MonolithParamSchema.h"
 #include "MonolithAssetUtils.h"
+#include "MonolithBulkFillTypes.h"
+#include "Reflection/MonolithReflectionWalker.h"
 #include "Kismet2/StructureEditorUtils.h"
 #include "Kismet2/EnumEditorUtils.h"
 #include "UserDefinedStructure/UserDefinedStructEditorData.h"
@@ -71,6 +73,18 @@ void FMonolithBlueprintStructActions::RegisterActions(FMonolithToolRegistry& Reg
 			.Required(TEXT("save_path"),  TEXT("string"),  TEXT("Asset save path, e.g. /Game/Data/DA_ResponseMap"))
 			.Required(TEXT("class_name"), TEXT("string"),  TEXT("UObject class name, e.g. CarnageFXResponseMap, MaterialParameterCollection, PhysicalMaterial, CurveFloat. Can also use full path /Script/Module.ClassName for disambiguation"))
 			.Optional(TEXT("skip_save"),  TEXT("boolean"), TEXT("Skip synchronous package save (default: false)"), TEXT("false"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("seed_data_asset"),
+		TEXT("Create AND populate a UObject DataAsset in one call: create_data_asset's body plus a reflection-walker fill of the supplied property 'tree'. Supports dry_run (validate before creating) and strict. Returns asset_path, actual_class, and FDryRunReport-shaped field_writes."),
+		FMonolithActionHandler::CreateStatic(&HandleSeedDataAsset),
+		FParamSchemaBuilder()
+			.Required(TEXT("save_path"),  TEXT("string"),  TEXT("Asset save path, e.g. /Game/Data/DA_HealingPotion"))
+			.Required(TEXT("class_name"), TEXT("string"),  TEXT("UObject class name (same resolution as create_data_asset)."))
+			.Required(TEXT("tree"),       TEXT("object"),  TEXT("Nested JSON object of properties to walk against the new asset's reflection schema."))
+			.Optional(TEXT("dry_run"),    TEXT("boolean"), TEXT("If true, validate the tree against the class WITHOUT creating the asset."), TEXT("false"))
+			.Optional(TEXT("strict"),     TEXT("boolean"), TEXT("If true, promote silent drops / unknown fields / enum misses to hard errors."), TEXT("false"))
+			.Optional(TEXT("skip_save"),  TEXT("boolean"), TEXT("Skip synchronous package save (default: false)."), TEXT("false"))
 			.Build());
 }
 
@@ -297,10 +311,16 @@ FMonolithActionResult FMonolithBlueprintStructActions::HandleCreateUserDefinedEn
 		return FMonolithActionResult::Error(FString::Printf(TEXT("FEnumEditorUtils::CreateUserDefinedEnum failed for: %s"), *AssetName));
 	}
 
-	// CreateUserDefinedEnum creates one default entry plus the hidden _MAX.
-	// We need to add (N - 1) more enumerators for N total values.
+	// FEnumEditorUtils::CreateUserDefinedEnum seeds the enum via SetEnums(EmptyNames),
+	// which leaves ZERO user enumerators plus the auto-appended _MAX sentinel
+	// (NumEnums() == 1, index 0 == _MAX). It does NOT create a default user entry.
+	// AddNewEnumeratorForUserDefinedEnum appends exactly ONE real enumerator each call
+	// (it copies the existing entries without _MAX, adds one, then re-appends _MAX).
+	// So for N requested values we must Add exactly N times — the previous loop ran
+	// (N-1) times, authoring only N-1 real enumerators and leaving the last requested
+	// value's SetEnumeratorDisplayName to land on the _MAX sentinel slot (orphaned).
 	int32 NumValues = ValuesArray->Num();
-	for (int32 i = 1; i < NumValues; i++)
+	for (int32 i = 0; i < NumValues; i++)
 	{
 		FEnumEditorUtils::AddNewEnumeratorForUserDefinedEnum(Enum);
 	}
@@ -618,6 +638,23 @@ FMonolithActionResult FMonolithBlueprintStructActions::HandleAddDataTableRow(con
 		}
 
 		void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(RowData);
+
+		// UserDefinedEnum fields inside a UserDefinedStruct compile to a plain
+		// numeric FProperty (no FEnumProperty), so a friendly/authored enum name
+		// would fail the numeric ImportText below. Resolve such tokens to the
+		// enum's integer value first via the shared walker helper; bare integers
+		// return false and fall through to the existing ImportText path.
+		int64 ResolvedEnumValue = 0;
+		if (FMonolithReflectionWalker::ResolveUserDefinedEnumToken(Prop, ValueStr, ResolvedEnumValue))
+		{
+			if (FNumericProperty* NumProp = CastField<FNumericProperty>(Prop))
+			{
+				NumProp->SetIntPropertyValue(ValuePtr, ResolvedEnumValue);
+				SetFields.Add(FieldName);
+				continue;
+			}
+		}
+
 		const TCHAR* ImportResult = Prop->ImportText_Direct(*ValueStr, ValuePtr, nullptr, PPF_None);
 		if (ImportResult)
 		{
@@ -872,6 +909,233 @@ FMonolithActionResult FMonolithBlueprintStructActions::HandleCreateDataAsset(con
 	Root->SetStringField(TEXT("class_name"), ClassName);
 	Root->SetStringField(TEXT("actual_class"), ResolvedClass->GetName());
 	Root->SetStringField(TEXT("class_path"), ResolvedClass->GetPathName());
+	Root->SetBoolField(TEXT("saved"), bSaved);
+	Root->SetBoolField(TEXT("success"), true);
+	return FMonolithActionResult::Success(Root);
+}
+
+// ============================================================
+//  seed_data_asset  (create + populate in one call)
+// ============================================================
+
+namespace MonolithSeedDataAssetInternal
+{
+	// Serialise an FDryRunReport's field writes into the response (same shape as
+	// FMonolithDryRunGuard::ReportToJson, inlined here to avoid extra includes).
+	static void AppendFieldWrites(const TSharedPtr<FJsonObject>& Root, const FDryRunReport& Report)
+	{
+		TArray<TSharedPtr<FJsonValue>> Writes;
+		for (const FBulkFillFieldWrite& W : Report.FieldWrites)
+		{
+			TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+			O->SetStringField(TEXT("path"), W.Path);
+			O->SetStringField(TEXT("current"), W.CurrentValue);
+			O->SetStringField(TEXT("proposed"), W.ProposedValue);
+			O->SetBoolField(TEXT("ok"), W.bOk);
+			if (!W.bOk) { O->SetStringField(TEXT("reason"), W.Reason); }
+			Writes.Add(MakeShared<FJsonValueObject>(O));
+		}
+		Root->SetArrayField(TEXT("field_writes"), Writes);
+		Root->SetNumberField(TEXT("errors"), Report.Errors);
+	}
+}
+
+FMonolithActionResult FMonolithBlueprintStructActions::HandleSeedDataAsset(const TSharedPtr<FJsonObject>& Params)
+{
+	using namespace MonolithSeedDataAssetInternal;
+
+	FString SavePath = Params->GetStringField(TEXT("save_path"));
+	if (SavePath.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: save_path"));
+	}
+
+	FString ClassName = Params->GetStringField(TEXT("class_name"));
+	if (ClassName.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: class_name"));
+	}
+
+	const TSharedPtr<FJsonObject>* TreePtr = nullptr;
+	if (!Params->TryGetObjectField(TEXT("tree"), TreePtr) || !TreePtr || !(*TreePtr).IsValid())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: tree (JSON object of property->value)"));
+	}
+	TSharedPtr<FJsonObject> Tree = *TreePtr;
+
+	bool bDryRun = false;
+	bool bStrict = false;
+	bool bSkipSave = false;
+	Params->TryGetBoolField(TEXT("dry_run"), bDryRun);
+	Params->TryGetBoolField(TEXT("strict"), bStrict);
+	Params->TryGetBoolField(TEXT("skip_save"), bSkipSave);
+
+	// Extract asset name from save path
+	int32 LastSlash;
+	if (!SavePath.FindLastChar(TEXT('/'), LastSlash))
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Invalid save_path — must contain at least one '/': %s"), *SavePath));
+	}
+	FString AssetName = SavePath.Mid(LastSlash + 1);
+	if (AssetName.IsEmpty())
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("save_path must not end with '/': %s"), *SavePath));
+	}
+
+	// Resolve class_name → UClass* (same resolution as create_data_asset).
+	UClass* ResolvedClass = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::NativeFirst);
+	if (!ResolvedClass)
+	{
+		ResolvedClass = FindFirstObject<UClass>(*(TEXT("U") + ClassName), EFindFirstObjectOptions::NativeFirst);
+	}
+	if (!ResolvedClass)
+	{
+		ResolvedClass = FindFirstObject<UClass>(*(TEXT("A") + ClassName), EFindFirstObjectOptions::NativeFirst);
+	}
+	if (!ResolvedClass)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Class not found: '%s'. Tried as-is, with 'U' prefix, and with 'A' prefix. "
+				 "Use full path (e.g. /Script/Module.ClassName) for disambiguation."), *ClassName));
+	}
+
+	// Guard: reject Blueprint / BlueprintGeneratedClass.
+	if (ResolvedClass->IsChildOf(UBlueprint::StaticClass()) ||
+		ResolvedClass->IsChildOf(UBlueprintGeneratedClass::StaticClass()))
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Class '%s' is a Blueprint class. Use create_blueprint instead."), *ResolvedClass->GetName()));
+	}
+
+	// Guard: reject abstract / deprecated / superseded.
+	if (ResolvedClass->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists))
+	{
+		FString Reason;
+		if (ResolvedClass->HasAnyClassFlags(CLASS_Abstract)) Reason = TEXT("abstract");
+		else if (ResolvedClass->HasAnyClassFlags(CLASS_Deprecated)) Reason = TEXT("deprecated");
+		else Reason = TEXT("superseded by a newer version");
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Cannot instantiate class '%s': it is %s."), *ResolvedClass->GetName(), *Reason));
+	}
+
+	// Guard: reject Actor-derived.
+	if (ResolvedClass->IsChildOf(AActor::StaticClass()))
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Class '%s' is Actor-derived. Actors must live in a ULevel — use spawn_actor or create_blueprint instead."),
+			*ResolvedClass->GetName()));
+	}
+
+	FBulkFillSpec Spec;
+	Spec.TargetNamespace = TEXT("blueprint");
+	Spec.TargetAsset = SavePath;
+	Spec.Tree = Tree;
+	Spec.bDryRun = bDryRun;
+	Spec.bStrict = bStrict;
+
+	// Dry-run: validate the tree against the class CDO without creating anything.
+	if (bDryRun)
+	{
+		UObject* CDO = ResolvedClass->GetDefaultObject(true);
+		FDryRunReport Report = FMonolithReflectionWalker::InspectTree(Tree, ResolvedClass, CDO, Spec);
+		Report.bWouldApply = false;
+
+		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+		Root->SetStringField(TEXT("asset_path"), SavePath);
+		Root->SetStringField(TEXT("actual_class"), ResolvedClass->GetName());
+		Root->SetStringField(TEXT("class_path"), ResolvedClass->GetPathName());
+		AppendFieldWrites(Root, Report);
+		Root->SetBoolField(TEXT("would_apply"), Report.Errors == 0);
+		Root->SetBoolField(TEXT("dry_run"), true);
+		Root->SetBoolField(TEXT("saved"), false);
+		Root->SetBoolField(TEXT("success"), true);
+		return FMonolithActionResult::Success(Root);
+	}
+
+	// Guard against existing asset (2-tier: Asset Registry + FindObject).
+	IAssetRegistry& AR = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+	FAssetData ExistingAsset = AR.GetAssetByObjectPath(FSoftObjectPath(SavePath + TEXT(".") + AssetName));
+	if (ExistingAsset.IsValid())
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Asset already exists at '%s'. Delete it first."), *SavePath));
+	}
+	if (FindObject<UObject>(nullptr, *(SavePath + TEXT(".") + AssetName)))
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Asset already exists in memory at '%s'. Delete it first."), *SavePath));
+	}
+
+	// Create package + instance.
+	UPackage* Package = CreatePackage(*SavePath);
+	if (!Package)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create package at path: %s"), *SavePath));
+	}
+	Package->FullyLoad();
+
+	UObject* NewAsset = NewObject<UObject>(Package, ResolvedClass, FName(*AssetName), RF_Public | RF_Standalone);
+	if (!NewAsset)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("NewObject failed for class '%s' at path '%s'."), *ResolvedClass->GetName(), *SavePath));
+	}
+
+	// Engine edit cradle + walker fill (mirror MonolithBlueprintBulkFillAdapter).
+	NewAsset->SetFlags(RF_Transactional);
+	FScopedTransaction Transaction(NSLOCTEXT("MonolithBlueprintStructActions",
+		"SeedDataAsset", "Monolith Seed Data Asset"));
+	NewAsset->Modify();
+	NewAsset->PreEditChange(nullptr);
+
+	FDryRunReport Report = FMonolithReflectionWalker::WriteTree(Tree, ResolvedClass, NewAsset, NewAsset, Spec);
+
+	// Strict + errors: cancel so the half-written asset never lands.
+	if (!Report.bWouldApply)
+	{
+		Transaction.Cancel();
+		// The asset was created in-package; mark transient so it is GC'd rather
+		// than persisted. (No FAssetRegistryModule::AssetCreated was fired.)
+		NewAsset->ClearFlags(RF_Public | RF_Standalone);
+		NewAsset->SetFlags(RF_Transient);
+
+		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+		Root->SetStringField(TEXT("asset_path"), SavePath);
+		Root->SetStringField(TEXT("actual_class"), ResolvedClass->GetName());
+		AppendFieldWrites(Root, Report);
+		Root->SetBoolField(TEXT("would_apply"), false);
+		Root->SetBoolField(TEXT("saved"), false);
+		Root->SetBoolField(TEXT("success"), false);
+		return FMonolithActionResult::Success(Root);
+	}
+
+	// Post-write cradle for the top-level fields the tree touched.
+	for (const auto& KV : Tree->Values)
+	{
+		FProperty* TopProp = FMonolithReflectionWalker::FindPropertyForwarding(ResolvedClass, KV.Key);
+		if (TopProp)
+		{
+			MonolithEditCradle::ReparentTransientInstancedSubobjects(NewAsset, TopProp);
+			MonolithEditCradle::FireFullCradle(NewAsset, TopProp);
+		}
+	}
+
+	Package->MarkPackageDirty();
+	FAssetRegistryModule::AssetCreated(NewAsset);
+
+	bool bSaved = false;
+	if (!bSkipSave)
+	{
+		bSaved = UEditorAssetLibrary::SaveLoadedAsset(NewAsset, false);
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), SavePath);
+	Root->SetStringField(TEXT("class_name"), ClassName);
+	Root->SetStringField(TEXT("actual_class"), ResolvedClass->GetName());
+	Root->SetStringField(TEXT("class_path"), ResolvedClass->GetPathName());
+	AppendFieldWrites(Root, Report);
+	Root->SetBoolField(TEXT("would_apply"), true);
 	Root->SetBoolField(TEXT("saved"), bSaved);
 	Root->SetBoolField(TEXT("success"), true);
 	return FMonolithActionResult::Success(Root);

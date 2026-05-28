@@ -8,8 +8,6 @@
 #include "BlueprintAssistUtils.h"
 #include "EdGraph/EdGraph.h"
 
-DECLARE_LOG_CATEGORY_EXTERN(LogMonolithBABridge, Log, All);
-
 bool FMonolithBAFormatterImpl::SupportsGraph(UEdGraph* Graph) const
 {
 	if (!Graph)

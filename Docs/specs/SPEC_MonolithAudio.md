@@ -75,6 +75,54 @@ Companion deep indexer: `FMetaSoundIndexer` lives in `MonolithIndex/Private/Inde
 >
 > **Template cues and MetaSounds.** Pre-built audio patterns: `create_random_sound_cue` (randomized selection with weights), `create_layered_sound_cue` (simultaneous playback), `create_looping_ambient_cue`, `create_distance_crossfade_cue`, `create_switch_sound_cue`, `create_oneshot_sfx`, `create_looping_ambient_metasound`, `create_synthesized_tone`, `create_interactive_metasound`.
 
+### Bulk Fill & Describe Surface (2026-05-11)
+
+`MonolithAudioBulkFillAdapter` registers under `FMonolithBulkFillRegistry` for the `audio` namespace, exposed via the framework-level `bulk_fill_query("apply", ...)` and `describe_query("schema", ...)` dispatchers. Phase 5 of the MCP ergonomics rollout (design spec `Docs/plans/2026-05-11-monolith-mcp-ergonomics-design.md`).
+
+**Surface summary.** `bulk_fill_query("apply", target_namespace="audio", target="<asset_path>", tree={...})` walks JSON against an attenuation / concurrency / MetaSound asset and commits atomically. `describe_query("schema", target_namespace="audio", target="<asset_path>")` returns the writable field tree — units, enum values, defaults, the 50-field USoundAttenuation surface, MetaSound input polymorphic dispatch hints.
+
+**fill_kind catalogue (3 — enumerated against `MonolithAudioBulkFillAdapter.cpp`):**
+
+| `fill_kind` | Target shape | Walks | Gate |
+|---|---|---|---|
+| `Attenuation` | `USoundAttenuation` | `properties:{}` against the ~50-field attenuation tree — falloff, focus, occlusion, reverb send, submix send | gate-free |
+| `Concurrency` | `USoundConcurrency` | `properties:{}` against MaxCount / ResolutionRule / VolumeScale / EvictionPriority etc. | gate-free |
+| `MetaSoundInputs` | `UMetaSoundSource` / `UMetaSoundPatch` | `inputs:{}` written to the user-facing input surface via Builder API | **`#if WITH_METASOUND`** |
+
+**Sample tree (Attenuation):**
+
+```json
+{
+  "target": "/Game/Audio/Attenuations/SA_Footsteps",
+  "tree": {
+    "fill_kind": "Attenuation",
+    "properties": {
+      "FalloffDistance": 2000.0,
+      "AttenuationShape": "Sphere",
+      "bEnableOcclusion": true,
+      "OcclusionLowPassFilterFrequency": 800.0,
+      "SubmixSends": [{"Submix": "/Game/Audio/Submixes/SM_Combat", "SendLevel": 0.6}]
+    }
+  },
+  "dry_run": true
+}
+```
+
+**Adapter-specific quirks.**
+
+- **`#if WITH_METASOUND` gate is INSIDE the adapter — M6 invariant.** Vanilla paths (`Attenuation`, `Concurrency`) compile and dispatch regardless of MetaSound presence. The `MetaSoundInputs` fill_kind compiles inert when `WITH_METASOUND=0` and returns a clean error `"audio adapter: MetaSoundInputs fill_kind requires MetaSound (WITH_METASOUND=0 in this build). Vanilla paths (Attenuation, Concurrency) remain available."`. Schema descriptor surfaces the MetaSoundInputs row with `(unavailable — WITH_METASOUND=0)` in release builds so `discover` parity stays symmetrical across configurations.
+- **MetaSound builder lifecycle.** Builder handles die on editor restart. For `MetaSoundInputs` fills, the adapter calls `FindOrBeginBuilding()` per transaction — if a prior in-flight builder handle has expired, the adapter rebuilds the handle within the same transaction (matches the existing `build_metasound_from_spec` recommendation).
+- **Private USoundWave fields are reflection-only.** `CompressionQuality`, `SoundAssetCompressionType` and similar private UPROPERTY fields are walkable via reflection but not via direct getter. Schema marks them `private_reflection_only: true`. Bulk_fill currently DOES NOT target USoundWave — this is a `(WISHLIST)` follow-up since SoundWaves are imported, not authored.
+- **MetaSound input polymorphic dispatch.** Inputs are typed (`Float`, `Int32`, `Bool`, `String`, `Trigger`, `Object`) — the adapter's MetaSoundInputs handler dispatches per type. Mismatched types (e.g. number JSON passed to a `String` input) surface as `field_writes:[{path:"inputs.X", ok:false, reason:"type mismatch: input is String, got number"}]` in the dry-run report.
+- **MCP authoring inside PIE.** Dispatcher gates all audio writes out of PIE per existing cross-cutting quirk; dry-run still works in PIE for read-only schema inspection.
+
+**Limitations / v1.1 follow-ups.**
+
+- USoundNode property opacity across 22 node types — `(WISHLIST v1.1)` — Sound Cue node-property fill_kind not implemented this phase.
+- USoundClass / USoundMix / USoundSubmix bulk_fill — `(WISHLIST v1.1)` — extend `apply_audio_template` pattern.
+- MetaSound graph-edge bulk_fill — `(WISHLIST)` — node/edge graph writes still through `build_metasound_from_spec`.
+- CSV ingest — `(WISHLIST v1.1)` per Q2.
+
 ### Notes
 
 > **Sound Cue connection semantics.** `from` is the child (data source), `to` is the parent (consumer). This matches the `ChildNodes[]` model where the parent holds references to its inputs.

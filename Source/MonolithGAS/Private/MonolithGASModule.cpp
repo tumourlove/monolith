@@ -12,6 +12,7 @@
 #include "MonolithGASInspectActions.h"
 #include "MonolithGASScaffoldActions.h"
 #include "MonolithGASUIBindingActions.h"
+#include "MonolithGASBulkFillAdapter.h"
 
 DEFINE_LOG_CATEGORY(LogMonolithGAS);
 
@@ -38,6 +39,14 @@ void FMonolithGASModule::StartupModule()
 	FMonolithGASScaffoldActions::RegisterActions(Registry);
 	FMonolithGASUIBindingActions::RegisterActions(Registry);
 
+	// Phase 2 (MCP Ergonomics) — register the gas adapter on the central
+	// FMonolithBulkFillRegistry. The Register() call ALWAYS runs (H5 invariant)
+	// regardless of WITH_GBA so `monolith_discover("gas")` action surface stays
+	// identical across dev + release builds; the adapter BODY switches on
+	// WITH_GBA and returns a clean "GAS not available" error when the optional
+	// dep is absent. See MonolithGASBulkFillAdapter.cpp for the split.
+	FMonolithGASBulkFillAdapter::Register();
+
 	int32 ActionCount = Registry.GetActions(TEXT("gas")).Num();
 	const TCHAR* GbaStatus =
 #if WITH_GBA
@@ -50,6 +59,7 @@ void FMonolithGASModule::StartupModule()
 
 void FMonolithGASModule::ShutdownModule()
 {
+	FMonolithGASBulkFillAdapter::Unregister();
 	FMonolithToolRegistry::Get().UnregisterNamespace(TEXT("gas"));
 }
 

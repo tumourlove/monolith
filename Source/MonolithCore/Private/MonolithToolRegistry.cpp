@@ -51,7 +51,7 @@ bool FMonolithParamSchema::ApplyAliases(
 			if (bCanonicalPresent)
 			{
 				OutCollision = FString::Printf(
-					TEXT("Param collision: both canonical '%s' and alias '%s' supplied. Use only one."),
+					TEXT("Param collision: both canonical '%s' and alias '%s' supplied. Use only one. — supply either the canonical param OR its alias, never both."),
 					*Canonical, *Alias);
 				return false;
 			}
@@ -194,7 +194,7 @@ FMonolithActionResult FMonolithToolRegistry::ExecuteAction(
 	if (!RegAction)
 	{
 		return FMonolithActionResult::Error(
-			FString::Printf(TEXT("Unknown action: %s.%s"), *Namespace, *Action),
+			FString::Printf(TEXT("Unknown action: %s.%s — call monolith_discover(\"%s\") to enumerate valid actions in this namespace."), *Namespace, *Action, *Namespace),
 			FMonolithJsonUtils::ErrMethodNotFound
 		);
 	}
@@ -202,7 +202,7 @@ FMonolithActionResult FMonolithToolRegistry::ExecuteAction(
 	if (!RegAction->Handler.IsBound())
 	{
 		return FMonolithActionResult::Error(
-			FString::Printf(TEXT("Action handler not bound: %s"), *Key),
+			FString::Printf(TEXT("Action handler not bound: %s — this is a Monolith bug; the action is registered but its handler delegate is null. Report at github.com/tumourlove/monolith."), *Key),
 			FMonolithJsonUtils::ErrInternalError
 		);
 	}
@@ -250,7 +250,7 @@ FMonolithActionResult FMonolithToolRegistry::ExecuteAction(
 			TArray<FString> Provided;
 			for (const auto& P : EffectiveParams->Values) Provided.Add(P.Key);
 			return FMonolithActionResult::Error(
-				FString::Printf(TEXT("Missing required param(s): [%s]. Provided keys: [%s]"),
+				FString::Printf(TEXT("Missing required param(s): [%s]. Provided keys: [%s] — inspect the action's parameter schema via monolith_discover(\"<namespace>\") and supply all required fields."),
 					*FString::Join(Missing, TEXT(", ")),
 					*FString::Join(Provided, TEXT(", "))));
 		}
@@ -274,7 +274,7 @@ FMonolithActionResult FMonolithToolRegistry::ExecuteAction(
 			if (FMonolithParamSchema::IsStrictParamsEnabled())
 			{
 				return FMonolithActionResult::Error(
-					FString::Printf(TEXT("STRICT_PARAMS=1: rejected action '%s:%s' due to unknown params: [%s]"),
+					FString::Printf(TEXT("STRICT_PARAMS=1: rejected action '%s:%s' due to unknown params: [%s] — unset STRICT_PARAMS or remove the unknown params from the call."),
 						*Namespace, *Action, *FString::Join(Unknown, TEXT(", "))),
 					FMonolithJsonUtils::ErrInvalidParams);
 			}

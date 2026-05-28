@@ -389,6 +389,18 @@ void UMonolithUIRegistrySubsystem::RegisterCuratedMappings()
     AddMappingTo(TypeRegistry, FName(TEXT("Button")), TEXT("ClickMethod"),           TEXT("ClickMethod"),           TEXT("EButtonClickMethod token."));
     AddMappingTo(TypeRegistry, FName(TEXT("Button")), TEXT("IsFocusable"),           TEXT("IsFocusable"),           TEXT("Whether the button accepts focus."));
 
+    // CommonButtonBase — CommonUI action-bar wiring properties.
+    //
+    // Bug #2 fix (2026-05-16 UI gap audit): these two properties were the
+    // hottest "needs raw_mode=true" papercut for callers wiring action-bar
+    // bindings. Both ship on the curated allowlist now so the standard
+    // set_widget_property path works without the raw-mode bypass.
+    //
+    // Token comes from MakeTokenFromClassName(UCommonButtonBase::StaticClass())
+    // which strips the leading 'U' and returns "CommonButtonBase".
+    AddMappingTo(TypeRegistry, FName(TEXT("CommonButtonBase")), TEXT("TriggeringInputAction"), TEXT("TriggeringInputAction"), TEXT("FDataTableRowHandle pointing at the CommonInputActionDataBase row this button binds."));
+    AddMappingTo(TypeRegistry, FName(TEXT("CommonButtonBase")), TEXT("bDisplayInActionBar"),   TEXT("bDisplayInActionBar"),   TEXT("Whether this button surfaces in a bound action bar."));
+
     // ProgressBar — value + style.
     AddMappingTo(TypeRegistry, FName(TEXT("ProgressBar")), TEXT("Percent"),     TEXT("Percent"),     TEXT("Fill percent (0..1)."));
     AddMappingTo(TypeRegistry, FName(TEXT("ProgressBar")), TEXT("FillColorAndOpacity"), TEXT("FillColorAndOpacity"), TEXT("Color of the fill region."));

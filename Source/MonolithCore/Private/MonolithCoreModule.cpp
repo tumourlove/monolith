@@ -4,6 +4,7 @@
 #include "MonolithJsonUtils.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithCoreTools.h"
+#include "Actions/MonolithBulkFillActions.h"
 #include "Misc/FileHelper.h"
 #include "GenericPlatform/GenericPlatformProcess.h"
 #include "Interfaces/IPluginManager.h"
@@ -38,6 +39,11 @@ void FMonolithCoreModule::StartupModule()
 	// Register core discovery/status tools
 	RegisterCoreTools();
 
+	// Phase 0: register bulk_fill + describe central dispatchers. Per-namespace
+	// adapters self-register from their own module's StartupModule via
+	// FMonolithBulkFillRegistry::RegisterAdapter — those land in Phases 1-5.
+	FMonolithBulkFillActions::RegisterAll();
+
 	// Start HTTP server (gated on bMcpServerEnabled — Issue #38 kill-switch)
 	const UMonolithSettings* Settings = UMonolithSettings::Get();
 	if (Settings && !Settings->bMcpServerEnabled)
@@ -71,6 +77,7 @@ void FMonolithCoreModule::ShutdownModule()
 	}
 
 	FMonolithToolRegistry::Get().UnregisterNamespace(TEXT("monolith"));
+	FMonolithBulkFillActions::UnregisterAll();
 
 	UE_LOG(LogMonolith, Log, TEXT("Monolith — Core module shut down"));
 }

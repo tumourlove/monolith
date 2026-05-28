@@ -86,7 +86,7 @@ void FMonolithMeshTechArtActions::RegisterActions(FMonolithToolRegistry& Registr
 {
 	// 16.1 import_mesh
 	Registry.RegisterAction(TEXT("mesh"), TEXT("import_mesh"),
-		TEXT("Import FBX/glTF mesh files via automated import. Configure static vs skeletal, collision, material import, scale."),
+		TEXT("Import FBX/glTF mesh files via automated import. Use import_as_skeletal=true for rigged characters; optional import_animations for FBX animation clips."),
 		FMonolithActionHandler::CreateStatic(&FMonolithMeshTechArtActions::ImportMesh),
 		FParamSchemaBuilder()
 			.Required(TEXT("files"), TEXT("array"), TEXT("Array of absolute file paths to import"))
@@ -97,6 +97,8 @@ void FMonolithMeshTechArtActions::RegisterActions(FMonolithToolRegistry& Registr
 			.Optional(TEXT("auto_generate_collision"), TEXT("boolean"), TEXT("Generate collision on import"), TEXT("true"))
 			.Optional(TEXT("normal_import_method"), TEXT("string"), TEXT("Normal import: ImportNormals, ImportNormalsAndTangents, ComputeNormals"), TEXT("ImportNormalsAndTangents"))
 			.Optional(TEXT("material_import"), TEXT("string"), TEXT("Material import: create_new, find_existing, skip"), TEXT("create_new"))
+			.Optional(TEXT("import_as_skeletal"), TEXT("boolean"), TEXT("Import as SkeletalMesh with skeleton (character FBX)"), TEXT("false"))
+			.Optional(TEXT("import_animations"), TEXT("boolean"), TEXT("Import animation sequences alongside the skeletal mesh. Forces import_as_skeletal=true if not already set."), TEXT("false"))
 			.Build());
 
 	// 16.1b export_mesh
@@ -230,10 +232,29 @@ FMonolithActionResult FMonolithMeshTechArtActions::ImportMesh(const TSharedPtr<F
 	{
 		FbxUI = NewObject<UFbxImportUI>();
 
+		bool bImportAsSkeletal = false;
+		Params->TryGetBoolField(TEXT("import_as_skeletal"), bImportAsSkeletal);
+		bool bImportAnimations = false;
+		Params->TryGetBoolField(TEXT("import_animations"), bImportAnimations);
+		if (bImportAnimations)
+		{
+			bImportAsSkeletal = true;
+		}
+
 		// Core mesh settings (5.7-compatible subset)
 		FbxUI->bImportMesh = true;
-		FbxUI->bImportAsSkeletal = false;
-		FbxUI->MeshTypeToImport = FBXIT_StaticMesh;
+		if (bImportAsSkeletal)
+		{
+			FbxUI->bImportAsSkeletal = true;
+			FbxUI->MeshTypeToImport = FBXIT_SkeletalMesh;
+			FbxUI->bImportAnimations = bImportAnimations;
+		}
+		else
+		{
+			FbxUI->bImportAsSkeletal = false;
+			FbxUI->MeshTypeToImport = FBXIT_StaticMesh;
+			FbxUI->bImportAnimations = false;
+		}
 
 		// Material import
 		FString MatImport = Params->HasField(TEXT("material_import"))
@@ -248,9 +269,6 @@ FMonolithActionResult FMonolithMeshTechArtActions::ImportMesh(const TSharedPtr<F
 			FbxUI->bImportMaterials = true;
 			FbxUI->bImportTextures = true;
 		}
-
-		// Animation off for mesh import
-		FbxUI->bImportAnimations = false;
 
 		// Set the FBX factory instance for proper import settings
 		UFbxFactory* FbxFactory = NewObject<UFbxFactory>();

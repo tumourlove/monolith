@@ -1,4 +1,5 @@
 #include "MonolithCoreTools.h"
+#include "MonolithGuideTool.h"
 #include "MonolithCoreModule.h"
 #include "MonolithJsonUtils.h"
 #include "MonolithHttpServer.h"
@@ -96,6 +97,10 @@ void FMonolithCoreTools::RegisterAll()
 			FMonolithActionHandler::CreateStatic(&FMonolithCoreTools::HandleReindex)
 		);
 	}
+
+	// monolith_guide — editorial cross-namespace workflow guide (separate tool file,
+	// one-tool-per-file; registers into the "monolith" namespace).
+	FMonolithGuideTool::RegisterAll();
 }
 
 FMonolithActionResult FMonolithCoreTools::HandleDiscover(const TSharedPtr<FJsonObject>& Params)
@@ -266,6 +271,7 @@ FMonolithActionResult FMonolithCoreTools::HandleDiscover(const TSharedPtr<FJsonO
 
 		Result->SetArrayField(TEXT("namespaces"), NsArray);
 		Result->SetNumberField(TEXT("total_actions"), Registry.GetActionCount());
+		Result->SetStringField(TEXT("guide_hint"), TEXT("Call monolith_guide() for editorial cross-namespace workflow recipes, decision matrices, and error-recovery maps. Section-keyed to bound context cost."));
 	}
 
 	return FMonolithActionResult::Success(Result);

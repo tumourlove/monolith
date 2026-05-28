@@ -1118,15 +1118,18 @@ FMonolithActionResult FMonolithAISmartObjectActions::HandlePlaceSmartObjectActor
 		return FMonolithActionResult::Error(TEXT("Failed to spawn actor"));
 	}
 
+	NewActor->Modify();
+
 	// Set label
 	FString Label = FString::Printf(TEXT("SO_%s"), *SODef->GetName());
 	NewActor->SetActorLabel(Label);
 
 	// Add a scene root component (AActor has no root by default)
-	USceneComponent* RootComp = NewObject<USceneComponent>(NewActor, TEXT("RootComponent"));
+	USceneComponent* RootComp = NewObject<USceneComponent>(NewActor, USceneComponent::StaticClass(), TEXT("RootComponent"), RF_Transactional);
 	RootComp->SetWorldLocation(Location);
 	RootComp->SetWorldRotation(Rotation);
 	NewActor->SetRootComponent(RootComp);
+	NewActor->AddInstanceComponent(RootComp);
 	RootComp->RegisterComponent();
 
 	// Add SmartObject component
@@ -1137,6 +1140,8 @@ FMonolithActionResult FMonolithAISmartObjectActions::HandlePlaceSmartObjectActor
 	SOComp->SetupAttachment(RootComp);
 	SOComp->RegisterComponent();
 	NewActor->AddInstanceComponent(SOComp);
+
+	NewActor->MarkPackageDirty();
 
 	// Folder path — MUST organize in World Outliner
 	FString FolderPath = Params->GetStringField(TEXT("folder_path"));

@@ -10,6 +10,7 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "UObject/Class.h"
 #include "UObject/UObjectIterator.h"
+#include "UObject/UObjectHash.h"
 #include "K2Node_CustomEvent.h"
 #include "K2Node_FunctionResult.h"
 #include "K2Node_CreateDelegate.h"
@@ -45,10 +46,11 @@ void FMonolithBlueprintActions::RegisterActions()
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("get_variables"),
-		TEXT("Get all variables defined in a Blueprint"),
+		TEXT("Get all variables defined in a Blueprint. Set include_bind_widgets=true on a Widget Blueprint to also enumerate, under a 'bind_widgets' array, both C++ BindWidget/BindWidgetOptional references (source=bind_widget_meta) and pure-Blueprint tree widgets exposed as variables (source=tree_variable). Neither kind appears in NewVariables."),
 		FMonolithActionHandler::CreateStatic(&HandleGetVariables),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
+			.Optional(TEXT("include_bind_widgets"), TEXT("boolean"), TEXT("Widget Blueprints only: also list designer-bound widgets in 'bind_widgets' -- C++ BindWidget refs (source=bind_widget_meta) and bIsVariable tree widgets (source=tree_variable) (default false)"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("get_execution_flow"),
@@ -417,6 +419,112 @@ FMonolithActionResult FMonolithBlueprintActions::HandleGetVariables(const TShare
 			(Var.PropertyFlags & CPF_Transient) != 0);
 
 		VarsArr.Add(MakeShared<FJsonValueObject>(VObj));
+	}
+
+	// Optional: also surface designer-bound widget-tree references for Widget
+	// Blueprints. These are NOT in BP->NewVariables. Two distinct kinds are
+	// enumerated into a single 'bind_widgets' array, distinguished by 'source':
+	//   - "bind_widget_meta": C++ FObjectProperty fields on the generated class
+	//     carrying BindWidget/BindWidgetOptional metadata (the parent-class case).
+	//   - "tree_variable": pure-Blueprint UWidgets in the WidgetTree marked
+	//     "Is Variable" (UWidget::bIsVariable == true). This is the common case
+	//     for a Widget Blueprint whose parent class declares no BindWidget props.
+	// Both passes are reflection-only (FObjectProperty/FBoolProperty + a
+	// string-resolved UWidget base + GetObjectsWithOuter), so this module needs
+	// no UMG link dependency and references no sibling/marketplace widget type.
+	bool bIncludeBindWidgets = false;
+	Params->TryGetBoolField(TEXT("include_bind_widgets"), bIncludeBindWidgets);
+	if (bIncludeBindWidgets && GenClass)
+	{
+		// Resolve UMG's base widget class by path without compile-time UMG dep.
+		UClass* WidgetBase = FindObject<UClass>(nullptr, TEXT("/Script/UMG.Widget"));
+		if (!WidgetBase)
+		{
+			WidgetBase = FindFirstObject<UClass>(TEXT("Widget"), EFindFirstObjectOptions::NativeFirst);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> BindArr;
+		// Names already emitted as bind_widget_meta, so a tree widget that is also
+		// a C++ BindWidget property is not reported twice.
+		TSet<FString> EmittedNames;
+		if (WidgetBase)
+		{
+			for (TFieldIterator<FObjectProperty> PropIt(GenClass); PropIt; ++PropIt)
+			{
+				FObjectProperty* ObjProp = *PropIt;
+				if (!ObjProp || !ObjProp->PropertyClass || !ObjProp->PropertyClass->IsChildOf(WidgetBase))
+				{
+					continue;
+				}
+
+				// BindWidget (required) or BindWidgetOptional mark designer-bound refs.
+				const bool bHasBindWidget         = ObjProp->HasMetaData(TEXT("BindWidget"));
+				const bool bHasBindWidgetOptional = ObjProp->HasMetaData(TEXT("BindWidgetOptional"));
+				if (!bHasBindWidget && !bHasBindWidgetOptional)
+				{
+					continue;
+				}
+
+				const bool bOptional =
+					bHasBindWidgetOptional || ObjProp->GetBoolMetaData(TEXT("OptionalWidget"));
+
+				TSharedPtr<FJsonObject> BObj = MakeShared<FJsonObject>();
+				BObj->SetStringField(TEXT("name"), ObjProp->GetName());
+				BObj->SetStringField(TEXT("widget_class"), ObjProp->PropertyClass->GetName());
+				BObj->SetBoolField(TEXT("optional"), bOptional);
+				BObj->SetStringField(TEXT("category"), ObjProp->GetMetaData(TEXT("Category")));
+				BObj->SetStringField(TEXT("source"), TEXT("bind_widget_meta"));
+				BObj->SetBoolField(TEXT("is_bind_widget"), true);
+				BindArr.Add(MakeShared<FJsonValueObject>(BObj));
+				EmittedNames.Add(ObjProp->GetName());
+			}
+
+			// Second pass: bIsVariable widgets in the authoring WidgetTree. The
+			// tree is a UPROPERTY (UBaseWidgetBlueprint::WidgetTree) reachable by
+			// reflection off the Blueprint asset itself, and every UWidget it owns
+			// is outered to it -- so GetObjectsWithOuter collects them without any
+			// UMG-typed call. bIsVariable is a reflected FBoolProperty on UWidget.
+			if (FObjectProperty* TreeProp = CastField<FObjectProperty>(BP->GetClass()->FindPropertyByName(TEXT("WidgetTree"))))
+			{
+				UObject* WidgetTreeObj = TreeProp->GetObjectPropertyValue_InContainer(BP);
+				if (WidgetTreeObj)
+				{
+					TArray<UObject*> TreeChildren;
+					GetObjectsWithOuter(WidgetTreeObj, TreeChildren, /*bIncludeNestedObjects=*/true);
+					for (UObject* Child : TreeChildren)
+					{
+						if (!Child || !Child->IsA(WidgetBase))
+						{
+							continue;
+						}
+
+						const FBoolProperty* IsVarProp =
+							CastField<FBoolProperty>(Child->GetClass()->FindPropertyByName(TEXT("bIsVariable")));
+						if (!IsVarProp || !IsVarProp->GetPropertyValue_InContainer(Child))
+						{
+							continue;
+						}
+
+						const FString WidgetName = Child->GetName();
+						if (EmittedNames.Contains(WidgetName))
+						{
+							continue;
+						}
+
+						TSharedPtr<FJsonObject> TObj = MakeShared<FJsonObject>();
+						TObj->SetStringField(TEXT("name"), WidgetName);
+						TObj->SetStringField(TEXT("widget_class"), Child->GetClass()->GetName());
+						TObj->SetBoolField(TEXT("optional"), false);
+						TObj->SetStringField(TEXT("category"), FString());
+						TObj->SetStringField(TEXT("source"), TEXT("tree_variable"));
+						TObj->SetBoolField(TEXT("is_bind_widget"), false);
+						BindArr.Add(MakeShared<FJsonValueObject>(TObj));
+						EmittedNames.Add(WidgetName);
+					}
+				}
+			}
+		}
+		Root->SetArrayField(TEXT("bind_widgets"), BindArr);
 	}
 
 	Root->SetArrayField(TEXT("variables"), VarsArr);

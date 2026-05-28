@@ -70,6 +70,18 @@ public:
 	static FMonolithActionResult HandleStitchFlipbook(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleDeleteAssets(const TSharedPtr<FJsonObject>& Params);
 
+	// --- Inspect actions (Phase 2: 2026-05-26-monolith-editor-preview-expansion plan) ---
+	// Structured-data introspection — no render path. Bodies live in
+	// MonolithEditorInspectActions.cpp.
+	static FMonolithActionResult HandleInspectMaterialPBR(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleInspectTextureChannels(const TSharedPtr<FJsonObject>& Params);
+
+	// --- Composite-capture actions (Phase 3: 2026-05-26-monolith-editor-preview-expansion plan) ---
+	// Multi-asset / show-flag overlay capture. Bodies live in
+	// MonolithEditorPreviewActions.cpp.
+	static FMonolithActionResult HandleCaptureMaterialGrid(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleCaptureWithOverlay(const TSharedPtr<FJsonObject>& Params);
+
 	// --- Automation tests ---
 	static FMonolithActionResult HandleRunAutomationTests(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleListAutomationTests(const TSharedPtr<FJsonObject>& Params);

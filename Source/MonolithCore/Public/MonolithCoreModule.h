@@ -3,7 +3,7 @@
 #include "Modules/ModuleManager.h"
 #include "MonolithHttpServer.h"
 
-#define MONOLITH_VERSION TEXT("0.14.10")
+#define MONOLITH_VERSION TEXT("0.16.0")
 
 class MONOLITHCORE_API FMonolithCoreModule : public IModuleInterface
 {

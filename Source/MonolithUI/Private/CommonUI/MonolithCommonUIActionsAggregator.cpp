@@ -16,6 +16,9 @@ namespace MonolithCommonUIContent        { void Register(FMonolithToolRegistry&)
 namespace MonolithCommonUIDialog         { void Register(FMonolithToolRegistry&); }
 namespace MonolithCommonUIAudit          { void Register(FMonolithToolRegistry&); }
 namespace MonolithCommonUIAccessibility  { void Register(FMonolithToolRegistry&); }
+// Phase 3 (2026-05-16 UI Gap Audit) — Tier-3 headline scaffolders
+// (scaffold_main_menu / scaffold_settings_panel_with_tabs / scaffold_pause_menu).
+namespace MonolithCommonUITemplate        { void Register(FMonolithToolRegistry&); }
 
 void FMonolithCommonUIActions::RegisterAll(FMonolithToolRegistry& Registry)
 {
@@ -28,6 +31,7 @@ void FMonolithCommonUIActions::RegisterAll(FMonolithToolRegistry& Registry)
 	MonolithCommonUIDialog::Register(Registry);
 	MonolithCommonUIAudit::Register(Registry);
 	MonolithCommonUIAccessibility::Register(Registry);
+	MonolithCommonUITemplate::Register(Registry);
 }
 
 #endif // WITH_COMMONUI

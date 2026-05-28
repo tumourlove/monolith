@@ -12,6 +12,12 @@
 #include "MonolithAudioMetaSoundIntrospectionActions.h"
 #endif
 
+// Phase 5 Step 4 (MCP Ergonomics, 2026-05-11) — bulk_fill / describe adapter.
+// H5 stub-adapter invariant: Register() ALWAYS runs from StartupModule regardless
+// of WITH_METASOUND. M6 invariant: MetaSound paths are #if WITH_METASOUND gated
+// INSIDE the adapter; vanilla USoundAttenuation/USoundConcurrency paths run gate-free.
+#include "MonolithAudioBulkFillAdapter.h"
+
 void FMonolithAudioModule::StartupModule()
 {
 	const UMonolithSettings* Settings = GetDefault<UMonolithSettings>();
@@ -33,6 +39,11 @@ void FMonolithAudioModule::StartupModule()
 	FMonolithAudioMetaSoundIntrospectionActions::RegisterActions(Registry);
 #endif
 
+	// Phase 5 Step 4 — register the audio adapter on the central
+	// FMonolithBulkFillRegistry. H5 invariant: this call runs unconditionally;
+	// the BODY splits per fill_kind with WITH_METASOUND gating MetaSound paths only.
+	FMonolithAudioBulkFillAdapter::Register();
+
 	int32 ActionCount = Registry.GetActions(TEXT("audio")).Num();
 	const TCHAR* MetaSoundStatus =
 #if WITH_METASOUND
@@ -45,6 +56,7 @@ void FMonolithAudioModule::StartupModule()
 
 void FMonolithAudioModule::ShutdownModule()
 {
+	FMonolithAudioBulkFillAdapter::Unregister();
 	FMonolithToolRegistry::Get().UnregisterNamespace(TEXT("audio"));
 }
 

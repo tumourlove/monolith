@@ -11,7 +11,7 @@
 **Dependencies:** Core, CoreUObject, Engine, MonolithCore, UnrealEd, UMGEditor, UMG, Slate, SlateCore, Json, JsonUtilities, KismetCompiler, MovieScene, MovieSceneTracks, DeveloperSettings, AssetTools, ImageWrapper, ImageCore, Kismet, MaterialEditor, EditorSubsystem (Public — `UMonolithUIRegistrySubsystem` is exported), CommonUI (optional — `#if WITH_COMMONUI`)
 
 **The optional EffectSurface provider is NOT a build-system dependency** (decoupled 2026-04-27). EffectSurface support is delivered via UClass-by-name reflection through `MonolithUI::GetEffectSurfaceClass()` — see § "Optional Dep Probe API" and § "Error Contract — Optional EffectSurface Provider Absence (-32010)". External providers may depend on MonolithUI for registry/spec structs, but MonolithUI must not depend on them.
-**Total actions in `ui::` namespace:** **117** when `WITH_COMMONUI=1` (66 always-on owned by this module + 50 CommonUI owned by this module conditional on `WITH_COMMONUI` + 1 inline diagnostic `dump_style_cache_stats` registered from `MonolithUIModule.cpp` under the same gate) + **4 GAS UI binding aliases owned by `MonolithGAS`** (also registered into `ui::`, conditional on `WITH_GBA`). Without `WITH_COMMONUI`, the namespace registers **66** actions; without `WITH_GBA` the four bridge aliases are absent.
+**Total actions in `ui::` namespace:** **130** when `WITH_COMMONUI=1` (72 always-on owned by this module + 57 CommonUI owned by this module conditional on `WITH_COMMONUI` + 1 inline diagnostic `dump_style_cache_stats` registered from `MonolithUIModule.cpp` under the same gate) + **4 GAS UI binding aliases owned by `MonolithGAS`** (also registered into `ui::`, conditional on `WITH_GBA`). Without `WITH_COMMONUI`, the namespace registers **72** actions; without `WITH_GBA` the four bridge aliases are absent. Phase 3 of the 2026-05-16 UI Gap Audit (2026-05-16) landed 4 actions: 3 CommonUI scaffolders (`scaffold_main_menu`, `scaffold_settings_panel_with_tabs`, `scaffold_pause_menu`) + 1 always-on multi-screen menu builder (`build_menu_from_spec`).
 **Settings toggle:** `bEnableUI` (default: True)
 **MCP tool:** `ui_query`
 **Namespace:** `ui`
@@ -20,7 +20,7 @@
 
 | Category | Count | Source file(s) | Conditional? |
 |----------|-------|----------------|--------------|
-| Widget CRUD | 7 | `MonolithUIActions.cpp` | always |
+| Widget CRUD | 9 | `MonolithUIActions.cpp` | always — Phase 2 (2026-05-16) added `rename_widget`, `dump_blueprint_compile_log` |
 | Slot | 3 | `MonolithUISlotActions.cpp` | always |
 | Templates | 8 | `MonolithUITemplateActions.cpp` | always |
 | Styling | 6 | `MonolithUIStylingActions.cpp` | always |
@@ -32,24 +32,25 @@
 | Accessibility (non-CommonUI) | 4 | `MonolithUIAccessibilityActions.cpp` | always |
 | Hoisted Design Import | 5 | `Actions/Hoisted/{TextureIngest,FontIngest,RoundedCorner,Shadow,Gradient}Actions.cpp` | always — `import_texture_from_bytes`, `import_font_family`, `set_rounded_corners`, `apply_box_shadow`, `create_gradient_mid_from_spec` |
 | Effect Surface Actions | 10 | `Actions/MonolithUIEffectActions.cpp` | always |
-| Spec Builder + Serializer | 3 | `Actions/MonolithUISpecActions.cpp` | always — `build_ui_from_spec`, `dump_ui_spec_schema`, `dump_ui_spec` |
-| Type Registry diagnostic | 1 | `MonolithUIRegistryActions.cpp` | always — `dump_property_allowlist` |
-| **Always-on subtotal** | **66** | | |
+| Spec Builder + Serializer | 4 | `Actions/MonolithUISpecActions.cpp` | always — `build_ui_from_spec`, `dump_ui_spec_schema`, `dump_ui_spec`, plus Phase 3 (2026-05-16) `build_menu_from_spec` |
+| Type Registry diagnostic | 4 | `MonolithUIRegistryActions.cpp` | always — `dump_property_allowlist`, plus Phase 2 (2026-05-16) `add_widget_variable`, `list_widget_property_enums`, plus Phase 4 (2026-05-23) `set_widget_is_variable` |
+| **Always-on subtotal** | **72** | | |
 | CommonUI Activatables | 8 | `CommonUI/MonolithCommonUIActivatableActions.cpp` | `WITH_COMMONUI` |
-| CommonUI Buttons + Styling | 9 | `CommonUI/MonolithCommonUIButtonActions.cpp` | `WITH_COMMONUI` |
+| CommonUI Buttons + Styling | 14 | `CommonUI/MonolithCommonUIButtonActions.cpp` | `WITH_COMMONUI` — Phase 2 (2026-05-16) added `apply_token_binding`, `convert_textblock_to_common`, `set_action_bar_button_class`; Phase 3 (2026-05-23) added `convert_border_to_common`, `reparent_widget_root` |
 | CommonUI Input | 7 | `CommonUI/MonolithCommonUIInputActions.cpp` | `WITH_COMMONUI` |
-| CommonUI Navigation/Focus | 5 | `CommonUI/MonolithCommonUINavigationActions.cpp` | `WITH_COMMONUI` |
+| CommonUI Navigation/Focus | 8 | `CommonUI/MonolithCommonUINavigationActions.cpp` | `WITH_COMMONUI` — Phase 2 (2026-05-16) added `audit_focus_chain`; Phase 3 (2026-05-23) added `set_widget_navigation_bulk`, `dump_widget_navigation` |
 | CommonUI Lists/Tabs/Groups | 7 | `CommonUI/MonolithCommonUIListActions.cpp` | `WITH_COMMONUI` |
 | CommonUI Content widgets | 4 | `CommonUI/MonolithCommonUIContentActions.cpp` | `WITH_COMMONUI` |
 | CommonUI Dialogs | 2 | `CommonUI/MonolithCommonUIDialogActions.cpp` | `WITH_COMMONUI` |
 | CommonUI Audit + Lint | 4 | `CommonUI/MonolithCommonUIAuditActions.cpp` | `WITH_COMMONUI` |
 | CommonUI Accessibility | 4 | `CommonUI/MonolithCommonUIAccessibilityActions.cpp` | `WITH_COMMONUI` |
+| CommonUI Scaffolders | 3 | `CommonUI/MonolithCommonUITemplateActions.cpp` | `WITH_COMMONUI` — Phase 3 (2026-05-16) `scaffold_main_menu`, `scaffold_settings_panel_with_tabs`, `scaffold_pause_menu` |
 | Style Service Diagnostics | 1 | inline lambda in `MonolithUIModule.cpp` | `WITH_COMMONUI` — `dump_style_cache_stats` |
-| **CommonUI subtotal** | **51** | | conditional |
-| **MonolithUI total** | **117** | | full configuration |
+| **CommonUI subtotal** | **62** | | conditional |
+| **MonolithUI total** | **134** | | full configuration |
 | GAS UI binding aliases | 4 | `MonolithGAS/Private/MonolithGASUIBindingActions.cpp` | `WITH_GBA` — registered cross-namespace into `ui::` |
 
-Counts re-verified against `RegisterAction(TEXT("ui"), ...)` call sites on 2026-04-26 (Phase L). Production registration sites only — Tests/ excluded.
+Counts re-verified against `RegisterAction(TEXT("ui"), ...)` call sites on 2026-04-26 (Phase L). Phase 2 of the 2026-05-16 UI Gap Audit landed 8 additional actions (4 always-on + 4 CommonUI-gated) bringing the totals to 70 / 55 / 125. Phase 3 of the 2026-05-16 UI Gap Audit landed 4 more (1 always-on `build_menu_from_spec` + 3 CommonUI-gated scaffolders) bringing the totals to 71 / 58 / 129. Phase 3 of the 2026-05-22 UI Blueprint Gap Audit landed 4 more CommonUI-gated actions (`set_widget_navigation_bulk`, `dump_widget_navigation`, `convert_border_to_common`, `reparent_widget_root`) bringing the totals to 71 / 62 / 133. Phase 4 of the 2026-05-22 UI Blueprint Gap Audit (2026-05-23) landed 1 always-on action (`set_widget_is_variable`) bringing the totals to 72 / 62 / 134 (CommonUI subtotal unchanged). Production registration sites only — Tests/ excluded.
 
 ### Classes
 
@@ -67,7 +68,8 @@ Counts re-verified against `RegisterAction(TEXT("ui"), ...)` call sites on 2026-
 | `FMonolithUIRegistryActions` | Registers `dump_property_allowlist` (Phase B diagnostic) |
 | `MonolithUI::FTextureIngestActions` / `FFontIngestActions` / `FAnimationCoreActions` / `FAnimationEventActions` / `FRoundedCornerActions` / `FShadowActions` / `FGradientActions` | Hoisted Design Import + Animation v2 verbs (Phase D, 2026-04-26) |
 | `MonolithUI::FEffectSurfaceActions` | EffectSurface sub-bag setters + preset (Phase F, 2026-04-26) |
-| `MonolithUI::FSpecActions` | `build_ui_from_spec` + `dump_ui_spec_schema` + `dump_ui_spec` (Phases H + J, 2026-04-26) |
+| `MonolithUI::FSpecActions` | `build_ui_from_spec` + `dump_ui_spec_schema` + `dump_ui_spec` (Phases H + J, 2026-04-26) + `build_menu_from_spec` (Phase 3 of the 2026-05-16 UI Gap Audit, MVP-STUB) |
+| `MonolithCommonUITemplate::Register` | CommonUI headline scaffolders: `scaffold_main_menu` / `scaffold_settings_panel_with_tabs` / `scaffold_pause_menu` (Phase 3 of the 2026-05-16 UI Gap Audit). File-static handlers in `CommonUI/MonolithCommonUITemplateActions.cpp` — `WITH_COMMONUI` only |
 | `UMonolithUIRegistrySubsystem` (UEditorSubsystem) | Live type registry + per-type property allowlist (Phase B) |
 | `FUITypeRegistry` / `FUIPropertyAllowlist` / `FUIPropertyPathCache` / `FUIReflectionHelper` | Registry data model + safe reflection write surface (Phases B + C) |
 | `FUISpecValidator` / `FUISpecBuilder` / `FUISpecSerializer` | Spec-driven UI generator + inverse roundtrip (Phases A + H + J) |
@@ -77,18 +79,20 @@ Counts re-verified against `RegisterAction(TEXT("ui"), ...)` call sites on 2026-
 
 ---
 
-## Actions — UMG Baseline (42 — namespace: "ui")
+## Actions — UMG Baseline (44 — namespace: "ui")
 
-**Widget CRUD (7)**
+**Widget CRUD (9)**
 | Action | Params | Description |
 |--------|--------|-------------|
 | `create_widget_blueprint` | `save_path`, `parent_class` | Create a new Widget Blueprint asset |
-| `get_widget_tree` | `asset_path` | Get the full widget hierarchy tree |
+| `get_widget_tree` | `asset_path` | Get the full widget hierarchy tree. An empty/missing `asset_path` now returns a clear `missing required asset_path parameter` error instead of a confusing downstream "not found" (2026-05-23). |
 | `add_widget` | `asset_path`, `widget_class`, `parent_slot` | Add a widget to the widget tree |
 | `remove_widget` | `asset_path`, `widget_name` | Remove a widget from the widget tree |
-| `set_widget_property` | `asset_path`, `widget_name`, `property_name`, `value` | Set a property on a widget via reflection |
-| `compile_widget` | `asset_path` | Compile the Widget Blueprint and return errors/warnings |
+| `set_widget_property` | `asset_path`, `widget_name`, `property_name`, `value` (alias: `property_value`) | Set a property on a widget via reflection. Allowlist-gated unless `raw_mode=true`. `value` and `property_value` are accepted as aliases since the 2026-05-16 Bug #6 fix. |
+| `compile_widget` | `asset_path` | Compile the Widget Blueprint. Returns `errors[]`, `warnings[]`, `notes[]`, `error_count`, `warning_count` on success — shape mirrors `blueprint_query::compile_blueprint`. On BS_Error, the diagnostic list is packed into `valid_options[]` of the structured error (Bug #5 fix, 2026-05-16). |
 | `list_widget_types` | none | List all available widget classes that can be instantiated |
+| `rename_widget` | `wbp_path`, `old_name`, `new_name` | Rename a UWidget's FName in a WBP's tree. Uniqueness check runs against the full WidgetTree before the rename. Recompiles via `FKismetEditorUtilities::CompileBlueprint`. If `bIsVariable=true`, also walks `FBlueprintEditorUtils::RenameMemberVariable` so the BPVAR entry stays consistent with the new FName. Phase 2 Item #7 (2026-05-16 UI Gap Audit). |
+| `dump_blueprint_compile_log` | `asset_path` | Re-drive a compile and return `last_compile_status` (EBlueprintStatus → string) + `errors[]` / `warnings[]` / `notes[]`. Accepts both `UWidgetBlueprint` and plain `UBlueprint` paths so the action serves as a general-purpose "last status + messages" probe. Shape mirrors `compile_widget` on success. Phase 2 Item #14 (2026-05-16 UI Gap Audit). |
 
 **Slot Operations (3)**
 | Action | Params | Description |
@@ -156,7 +160,7 @@ Counts re-verified against `RegisterAction(TEXT("ui"), ...)` call sites on 2026-
 
 ---
 
-## Actions — CommonUI (50 — namespace: "ui", conditional on `WITH_COMMONUI`)
+## Actions — CommonUI (62 — namespace: "ui", conditional on `WITH_COMMONUI`)
 
 Shipped M0.5, v0.14.0 (2026-04-19). Tested M0.5.1 (2026-04-25): 50/50 editor-time actions PASS, 8 bugs found and fixed. 11 actions marked [RUNTIME] need PIE testing.
 
@@ -187,7 +191,9 @@ Class-as-data: style creators (`create_common_button_style`, `create_common_text
 | `get_activatable_stack_state` | `stack_widget` | [RUNTIME] Query the stack: active widget, depth, transition state |
 | `set_activatable_transition` | `asset_path`, `transition_type`, `duration` | Configure push/pop transition animations |
 
-### Category B: Buttons + Styling (9 actions)
+### Category B: Buttons + Styling (14 actions)
+
+> **Allowlist note (2026-05-16):** `CommonButtonBase` token now has `TriggeringInputAction` (FDataTableRowHandle) and `bDisplayInActionBar` (bool) on its curated allowlist. `set_widget_property` writes these without requiring `raw_mode=true` (Bug #2 fix).
 
 | Action | Params | Description |
 |--------|--------|-------------|
@@ -200,6 +206,11 @@ Class-as-data: style creators (`create_common_button_style`, `create_common_text
 | `batch_retheme` | `asset_path`, `style_map` | Retheme multiple widgets in a single transaction |
 | `configure_common_text` | `asset_path`, `widget_name`, `properties` | Set `UCommonTextBlock` properties (style, scroll speed, auto-collapse) |
 | `configure_common_border` | `asset_path`, `widget_name`, `properties` | Set `UCommonBorder` properties (style, opacity, etc.) |
+| `apply_token_binding` | `wbp_path`, `widget_name`, `target_property`, `token_key` | **MVP-STUB.** Bind a widget property to a UI design token sourced from `TokenforgeRuntime`. Returns `-32011 ErrTokenforgeRuntimeUnavailable` when the plugin is absent (see § Error Contract — Optional Tokenforge Provider Absence (-32011)). Successful response carries `status:"stub"` — param validation + Tokenforge probe are FULL, BP-graph node-write into NativeConstruct is deferred to a follow-up. Phase 2 Item #10 (2026-05-16 UI Gap Audit). |
+| `convert_textblock_to_common` | `wbp_path`, `widget_name` | Replace a `UTextBlock` with a `UCommonTextBlock` while preserving the variable identity (FName + `bIsVariable`), parent slot, and authored text/font/colour/shadow state. Style left at engine default — chain `apply_style_to_widget` with a `UCommonTextStyle` reference to complete the rethemed migration. Mirrors the reconciliation pattern from `convert_button_to_common` (variable identity preserved Y). Phase 2 Item #12 (2026-05-16 UI Gap Audit). |
+| `set_action_bar_button_class` | `wbp_path`, `widget_name`, `button_class` | Set `UCommonBoundActionBar::ActionButtonClass` on an existing bar widget. Writes through BOTH the authoring tree (`Wbp->WidgetTree`) AND the generated class's archetype tree (`UWidgetBlueprintGeneratedClass::GetWidgetTreeArchetype()`) so the value survives subsequent `compile_blueprint` passes. `button_class` must resolve to a `UCommonButtonBase` subclass. Mirrors the FClassProperty reflection pattern from Phase 1 Bug #4 (`MonolithCommonUIInputActions.cpp:265-282`). Phase 2 Item #13 (2026-05-16 UI Gap Audit). |
+| `convert_border_to_common` | `wbp_path` (alias `asset_path`), `widget_name` | Replace a `UBorder` with a `UCommonBorder`, preserving the variable identity (FName + `bIsVariable`), parent slot (or tree-root position), and the single content child. `UCommonBorder` is concrete, so no `target_class` is needed. Style left at engine default — chain `apply_style_to_widget` with a `UCommonBorderStyle` to finish the rethemed migration. Mirrors the reconciliation pattern from `convert_button_to_common` / `convert_textblock_to_common`. Phase 3 (2026-05-23 UI Blueprint Gap Audit). |
+| `reparent_widget_root` | `wbp_path` (alias `asset_path`), `new_class` | Replace a WBP's root widget with a new `UPanelWidget`-derived class resolved BY STRING (`/Script/Module.ClassName`, a `/Game/..._C` path, or a loaded class name), migrating the old root's children onto the new root. `new_class` must resolve to a concrete `UPanelWidget` subclass. Phase 3 (2026-05-23 UI Blueprint Gap Audit). |
 
 ### Category C: Input/Actions/Glyphs (7 actions)
 
@@ -208,17 +219,20 @@ Class-as-data: style creators (`create_common_button_style`, `create_common_text
 | `create_input_action_data_table` | `save_path`, `table_name` | Create a DataTable for CommonUI input action definitions |
 | `add_input_action_row` | `table_path`, `row_name`, `action_spec` | Add a row to an input action DataTable |
 | `bind_common_action_widget` | `asset_path`, `widget_name`, `action_row` | Bind a `UCommonActionWidget` to display a specific input glyph |
-| `create_bound_action_bar` | `save_path` | Scaffold a WBP containing a `UCommonBoundActionBar` |
+| `create_bound_action_bar` | `wbp_path`, `widget_name`, `parent_widget?`, `action_button_class?` | Add a `UCommonBoundActionBar` to an existing WBP. Writes `ActionButtonClass` (default: `/Game/Monolith/CommonUI/MonolithDefaultCommonButton.MonolithDefaultCommonButton_C`) so the WBP compiles cleanly — bare bars previously failed `ValidateCompiledDefaults` (Bug #4 fix, 2026-05-16). |
 | `get_active_input_type` | none | [RUNTIME] Query the current active input type (gamepad, keyboard, touch) |
 | `set_input_type_override` | `input_type` | [RUNTIME] Force a specific input type for glyph display |
 | `list_platform_input_tables` | none | List all registered platform input DataTables |
 
-### Category D: Navigation/Focus (5 actions)
+### Category D: Navigation/Focus (8 actions)
 
 | Action | Params | Description |
 |--------|--------|-------------|
 | `set_widget_navigation` | `asset_path`, `widget_name`, `nav_rules` | Configure explicit navigation rules (up/down/left/right targets) |
+| `set_widget_navigation_bulk` | `wbp_path` (alias `asset_path`), `entries[]`, `save?` | Apply N navigation-rule writes to a WBP then compile ONCE (vs `set_widget_navigation`'s per-call compile). Each `entries[]` item is `{widget_name, direction(Up\|Down\|Left\|Right\|Next\|Previous), rule(Escape\|Stop\|Wrap\|Explicit\|Custom\|CustomBoundary), explicit_target?}`. Per-entry failures are non-fatal. `save` defaults `false`. Returns `{written, failed[], compiled_once}`. Phase 3 (2026-05-23 UI Blueprint Gap Audit). |
+| `dump_widget_navigation` | `wbp_path` (alias `asset_path`), `widget_name?` | Read-only dump of `UWidget::Navigation` per-direction rules INCLUDING Wrap/Stop/Escape — which `audit_focus_chain` cannot see (it graphs Explicit edges only). Optional `widget_name` filters to one widget. Returns `{navigation:[{widget_name, direction, rule, target?}], count}`. Does not modify or compile. Phase 3 (2026-05-23 UI Blueprint Gap Audit). |
 | `set_initial_focus_target` | `asset_path`, `target_name` | Set the initial focus target for an activatable widget |
+| `audit_focus_chain` | `wbp_path` | Static audit of a WBP's `UWidget::Navigation` graph. Reports `unreachable[]`, `dead_ends[]`, `cycles[]`, `dangling_explicit[]`. Read-only — does not modify the WBP. Reachability BFS runs only when the WBP's CDO exposes `DesiredFocusTargetName` (or `InitialFocusTargetName`) as an FName UPROPERTY; otherwise the audit still reports cycles + dangling-explicit findings (the load-bearing defects) and skips the reachability check. Phase 2 Item #9 (2026-05-16 UI Gap Audit). |
 | `force_focus` | `widget_name` | [RUNTIME] Force focus to a specific widget |
 | `get_focus_path` | none | [RUNTIME] Query the current focus path (widget chain) |
 | `request_refresh_focus` | none | [RUNTIME] Request CommonUI to recalculate focus |
@@ -269,6 +283,20 @@ Class-as-data: style creators (`create_common_button_style`, `create_common_text
 | `set_text_scale_binding` | `asset_path`, `widget_name`, `binding_spec` | Bind text scale to an accessibility setting |
 | `apply_high_contrast_variant` | `asset_path`, `style_map` | Apply high-contrast color overrides to CommonUI styled widgets |
 
+### Category J: Scaffolders (3 actions — Phase 3 of the 2026-05-16 UI Gap Audit)
+
+Headline one-shot scaffolders that compose Phase 1 + Phase 2 primitives (allowlist fixes, `create_bound_action_bar`, `add_widget_variable`, `set_action_bar_button_class`, `convert_textblock_to_common`) into single-call workflows for the three most common menu shapes. All three follow the same pipeline: `CreatePackage` → `UWidgetBlueprintFactory` (parent = `UTokenforgeActivatableWidget` if the TokenforgeRuntime plugin is enabled, else `UCommonActivatableWidget`; override with `parent_class`) → widget tree → `UCommonBoundActionBar` with `ActionButtonClass` reflection-write → `DesiredFocusTargetName` UPROPERTY stamp → nav-rule wiring → compile + `FCompilerResultsLog` capture → manifest return.
+
+Source: `CommonUI/MonolithCommonUITemplateActions.cpp`. Registered via `MonolithCommonUITemplate::Register` from `MonolithCommonUIActionsAggregator.cpp`.
+
+| Action | Params | Description |
+|--------|--------|-------------|
+| `scaffold_main_menu` | `save_path`, `button_names?`, `parent_class?`, `action_button_class?`, `action_table?`, `default_style_palette?` | Main-menu WBP: Overlay + Title + VerticalBox of `UCommonButtonBase` per `button_names[]` (default `["Continue","NewGame","Options","Quit"]`) + `UCommonBoundActionBar`. First button receives initial focus; Up/Down nav links adjacent buttons; last button's Down points at the action bar. |
+| `scaffold_settings_panel_with_tabs` | `save_path`, `tab_names?`, `parent_class?`, `action_table?`, `action_button_class?` | Settings panel WBP: Overlay + Title + `UCommonTabListWidgetBase` + `UCommonAnimatedSwitcher` with one stateless `UVerticalBox` content placeholder per tab (default `["Gameplay","Audio","Video","Accessibility","Controls"]`) + `UCommonBoundActionBar`. Initial focus → TabList. |
+| `scaffold_pause_menu` | `save_path`, `action_table`, `button_names?`, `parent_class?`, `action_button_class?`, `settings_class?`, `inventory_class?` | Pause-menu WBP: Overlay + UBorder backdrop + Title + VerticalBox of `UCommonButtonBase` per `button_names[]` (default `["Resume","Settings","Inventory","Quit"]`) + `UCommonBoundActionBar`. Resume = initial focus; Quit gets `SetRequiresHold(true)` (Phase 1.5 allowlist makes this writable without `raw_mode`). |
+
+**Return shape (all three):** `{ wbp_path, parent_class, used_tokenforge, action_button_class, action_button_class_was_default, focus_target_variable_ready, focus_target_stamped, compile_status, widgets_created[], errors[], warnings[] }`. `compile_status` is the `EBlueprintStatus` enum (`BS_UpToDate` / `BS_UpToDateWithWarnings` / `BS_Dirty` / `BS_Error`).
+
 ---
 
 ## GAS Bridge Aliases (4 — namespace: "ui", source: `MonolithGAS`)
@@ -294,6 +322,50 @@ The MonolithGAS module also registers four cross-namespace aliases under `ui::` 
 2. `set_initial_focus_target` requires the target WBP to expose a `DesiredFocusTargetName` or `InitialFocusTargetName` FName UPROPERTY and override `NativeGetDesiredFocusTarget`. Action errors out if neither property exists.
 3. `show_common_message` is fire-and-forward — async result-binding (Yes/No) requires the dialog WBP to handle internally. No MCP-side delegate routing yet.
 4. `dump_action_router_state` cannot read `UCommonUIActionRouterBase::CurrentInputLocks` (private-transient in engine). Engine PR candidate (M0.7).
+
+### Resolved (2026-05-16 UI Gap Audit — Phase 1 Tier 1)
+
+The following correctness bugs were fixed in the 2026-05-16 sprint (plan: [`Docs/plans/2026-05-16-monolith-ui-gap-audit.md`](../../../../Docs/plans/2026-05-16-monolith-ui-gap-audit.md)):
+
+- **Bug #1 — `create_common_*_style` hash-cache mis-keying.** `FMonolithUIStyleService::ComputeContentHash` now mixes `AssetName` into the canonical buffer. Two empty-property-bag requests under different names previously collided on the Step-3 hash cache and returned the wrong asset on the second call. New three-arg `ComputeContentHash(StyleClass, AssetName, Properties)` overload is the cache-lookup path; the two-arg overload is retained for legacy tests verifying property-bag equivalence.
+- **Bug #2 — CommonUI button allowlist coverage.** `TriggeringInputAction` (FDataTableRowHandle) and `bDisplayInActionBar` (bool) are now on the curated allowlist for the `CommonButtonBase` token. Callers wiring action-bar bindings no longer need `raw_mode=true`.
+- **Bug #3 — `wrap_with_reduce_motion_gate` silent skip.** Now returns a `skipped[]` array with `{wbp, reason, missing_property, suggested_parent_classes[]}` per entry. The legacy `missing_property[]` array is preserved one release for backwards compatibility.
+- **Bug #4 — `create_bound_action_bar` BS_Error.** Action now writes `ActionButtonClass` on the constructed `UCommonBoundActionBar` so the WBP compiles cleanly. New optional `action_button_class` param (string, defaults to `/Game/Monolith/CommonUI/MonolithDefaultCommonButton.MonolithDefaultCommonButton_C`).
+- **Bug #5 — `compile_widget` diagnostics.** Action now returns `errors[]`, `warnings[]`, `notes[]`, `error_count`, `warning_count` on success. On BS_Error, the diagnostic list is packed into `valid_options[]` of the FUISpecError so the LLM still receives every message text on a failed call. Shape mirrors `blueprint_query("compile_blueprint")`.
+- **Bug #6 — `set_widget_property` schema clarification.** The new value can now be supplied as `value` OR `property_value` (alias). Missing-value error preserves `wbp_path`, `widget_name`, `property_name` in the message body for caller-side context.
+
+---
+
+## CommonUI Property Allowlist Coverage
+
+**Purpose:** `set_widget_property`'s default (non-`raw_mode`) path gates writes through a per-type curated allowlist. This section documents which CommonUI properties have curated mappings (work without `raw_mode=true`) versus which require the legacy `raw_mode=true` bypass. Seed source: `Source/MonolithUI/Private/Registry/MonolithUIRegistrySubsystem.cpp:393-403` (CommonButtonBase curated block, expanded by Phase 1 Bug #2).
+
+### Curated CommonUI properties (no `raw_mode` required)
+
+| Class token | Curated property | Type | requires raw_mode? | Notes |
+|-------------|------------------|------|--------------------|-------|
+| `CommonButtonBase` | `TriggeringInputAction` | `FDataTableRowHandle` | No | Phase 1 Bug #2 — row handle into `CommonInputActionDataBase` driving the action-bar binding. |
+| `CommonButtonBase` | `bDisplayInActionBar` | `bool` | No | Phase 1 Bug #2 — whether the button surfaces in a bound action bar. |
+
+The token comes from `MakeTokenFromClassName(UCommonButtonBase::StaticClass())` which strips the leading `U` and returns `CommonButtonBase`. Subclasses inherit via the per-class walk in `FMonolithUIRegistrySubsystem::ResolveCuratedPropertyMapping`.
+
+### Non-curated CommonUI properties (require `raw_mode=true`)
+
+All other CommonUI UPROPERTYs not listed above (e.g. `Style`, `ClickMethod`, `TouchMethod`, `bSelectable`, `bToggleable`, `bLocked`, `InputType`, `GamepadInputType`, custom `UCommonActivatableWidget` properties, etc.) currently route through `raw_mode=true` only. The catch-all rationale:
+
+1. `raw_mode=true` opens the unconditional `ImportText_Direct` path — every CDO-reachable UPROPERTY is writeable regardless of allowlist membership.
+2. Curated entries are added on a needs-basis when an LLM-driven authoring pipeline trips the "needs `raw_mode`" papercut twice or more.
+3. Curated mode also runs ParseFailed / TypeMismatch diagnostics from `FUIReflectionApplyResult` — raw_mode skips those, so per-property curation is preferred where reachable.
+
+### Adding a new CommonUI curated entry
+
+In `MonolithUIRegistrySubsystem.cpp::SeedCuratedAllowlist()` (the function that calls `AddMappingTo` at the lines cited above), append:
+
+```cpp
+AddMappingTo(TypeRegistry, FName(TEXT("<ClassToken>")), TEXT("<PropertyName>"), TEXT("<EngineFieldName>"), TEXT("<doc string>"));
+```
+
+The token MUST match `MakeTokenFromClassName(UYourClass::StaticClass())` (strip leading `U` from the C++ class name). The third arg is the property-name the caller sends; the fourth arg is the engine-reflection field name (usually identical unless the curated alias differs from the engine name — e.g. `Style` -> `WidgetStyle` for `UButton`).
 
 ---
 
@@ -371,6 +443,27 @@ ui::build_ui_from_spec({
 ```
 
 **`ui::dump_ui_spec_schema`** returns a JSON-Schema-style description of `FUISpecDocument` plus the live allowlist projection per widget type. LLMs use it to build valid spec inputs without crawling our headers.
+
+### Menu Spec Builder (M5 — Phase 3 of the 2026-05-16 UI Gap Audit)
+
+**Status:** MVP-STUB landed 2026-05-16. Per-screen `spec` builds run **FULL** via `FUISpecBuilder`. Cross-screen aggregation (`layers[]` activatable-stack hierarchy, `focus_table[]` CDO writes, `nav_overrides[]` propagation) is **DEFERRED** to issue #3-18b — captured entries echo back in the response under `deferred_aggregation` so user-space tooling can post-process.
+
+**Action surface:** `ui::build_menu_from_spec` (always-on — registered from `Actions/MonolithUISpecActions.cpp`, not WITH_COMMONUI-gated; per-screen builders may construct CommonUI widgets but the dispatch surface itself is engine-side).
+
+**Document shape:**
+
+```
+{
+  layers:        [{ id, screens: ["..."] }, ...],
+  screens:       [{ id, asset_path, spec?, kind? }, ...],
+  focus_table:   [{ screen, target }, ...],
+  nav_overrides: [{ screen, widget, direction, target }, ...]
+}
+```
+
+**Modes preserved from `build_ui_from_spec`:** `dry_run`, `treat_warnings_as_errors`, `raw_mode`, `overwrite`, `request_id`. Per-screen builds receive `<request_id>:<screen.id>` so consumers can correlate aggregate vs per-screen calls.
+
+**Response shape:** `{ bSuccess, status, request_id?, screens[], aggregate_node_counts, errors?, warnings?, deferred_aggregation? }` where each `screens[N]` entry includes a full `build_result` object (same shape as `build_ui_from_spec`'s response). `status` is `ok` when all screens succeeded and no `layers/focus_table/nav_overrides` entries were supplied; `partial_stub` when those deferred surfaces had caller-supplied entries; `validation_failed` on structural errors.
 
 ### Spec Serializer (M5 — Phase J, landed 2026-04-26)
 
@@ -627,11 +720,14 @@ Mappings are explicit, NOT auto-generated from `UPROPERTY` reflection. Auto-walk
 
 Slot.* paths (`Slot.Padding`, `Slot.HAlign`, `Slot.VAlign`, `Slot.Anchors`, `Slot.Position`, `Slot.Size`, `Slot.SizeRule`, `Slot.FillWeight`, `Slot.Alignment`, `Slot.AutoSize`, `Slot.ZOrder`) are attached to the COMMON child widgets (TextBlock, Image, Button, Border, SizeBox, ProgressBar, the box panels, ScrollBox, RoundedBorder). The reflection helper performs per-parent-slot validation at write time — the allowlist is the generous outer envelope.
 
-### Diagnostic action
+### Diagnostic actions (4)
 
 | Action | Params | Description |
 |--------|--------|-------------|
 | `dump_property_allowlist` | `widget_type` (string) | Returns `{type, registered, container_kind, max_children, widget_class, allowed_paths:[...], allowed_path_count}`. Unknown types return `registered:false` with a hint that the type isn't in the registry. |
+| `add_widget_variable` | `wbp_path`, `var_name`, `var_type`, `default_value?`, `var_category?` | Wraps `FBlueprintEditorUtils::AddMemberVariable` to stamp a user-variable onto a WBP. `var_type` accepts the MCP-friendly token grammar (`bool`/`int`/`int64`/`float`/`double`/`string`/`name`/`text`/`byte`/`object:Class`/`class:Class`/`struct:Name`/`enum:Name`/`softobject:Class`/`softclass:Class`/`exec`/`wildcard`, with container prefixes `array:`/`set:`/`map:Key:Value`). AddMemberVariable defaults flags `CPF_Edit | CPF_BlueprintVisible | CPF_DisableEditOnInstance` — matches the editor's "add variable" affordance. Phase 2 Item #8 (2026-05-16 UI Gap Audit). |
+| `list_widget_property_enums` | `wbp_path?`, `widget_class?`, `property_name?` | Walks a widget class (or WBP's generated class) and returns every enum-typed property with its enumerator names. Surfaces both `FEnumProperty` (modern `enum class`) AND `FByteProperty` with non-null `Enum` (legacy `TEnumAsByte<EFoo>`). Use to discover the legal value set for `set_widget_property` writes against enum fields. At least one of `wbp_path`/`widget_class` is required. Phase 2 Item #11 (2026-05-16 UI Gap Audit). |
+| `set_widget_is_variable` | `wbp_path` (alias `asset_path`), `widget_name`, `is_variable` (bool) | First-class flip of `UWidget::bIsVariable` — marks or unmarks a tree widget as an exposed Blueprint variable. Calls `Modify()` + a direct member write, then recompiles. Returns `{widget_name, is_variable, changed}` (`changed=false` when the flag already matched). Always-on (not `WITH_COMMONUI`-gated). Phase 4 (2026-05-23 UI Blueprint Gap Audit). |
 
 ### Hot-reload behaviour
 
@@ -840,6 +936,76 @@ The probe / error-code / handler / serializer / test / builder sextuple is the c
 4. Serializer silent-no-op on null UClass (no `Context.Errors` entry).
 5. Tests skip-with-warning + `return true`.
 6. Builder leans on the type-resolver's existing `FUISpecError` Category="Type" path.
+
+---
+
+## Error Contract — Optional Tokenforge Provider Absence (-32011)
+
+**Status:** Shipped 2026-05-16 as part of Phase 2 of the UI Gap Audit (Item #10 — `apply_token_binding`). Mirrors the §-32010 EffectSurface contract above for a different optional provider: `TokenforgeRuntime`.
+
+### Error code allocation
+
+`-32011` is the FIRST allocation from the reserved range `-32011..-32019` (left open by the original `-32010` design specifically for future sibling-plugin codes — see § Error Contract — Optional EffectSurface Provider Absence (-32010), "Error code allocation"). Distinct from `-32010` so consumers can branch on **which** optional provider is missing without string-matching the message body.
+
+| Constant | Value | Use site |
+|----------|-------|----------|
+| (inline `-32011`) | `-32011` | `Plugins/Monolith/Source/MonolithUI/Private/CommonUI/MonolithCommonUIButtonActions.cpp` (`HandleApplyTokenBinding`) |
+
+The code is inline (not yet promoted to a `FMonolithJsonUtils::Err*` constant) because Tokenforge is the only consumer for now. If a second `apply_*_binding` style action joins later, promote `-32011` to `FMonolithJsonUtils::ErrTokenforgeRuntimeUnavailable` so both handlers reference the same identifier.
+
+### Action-handler contract — LOUD
+
+Trigger: `ui::apply_token_binding` invoked when `IPluginManager::Get().FindPlugin("TokenforgeRuntime")` returns null OR `->IsEnabled() == false`.
+
+Behaviour: probe runs FIRST in `HandleApplyTokenBinding` (before parsing `widget_name`, `target_property`, or `token_key`). On unavailable, returns a structured error inline-built in the handler.
+
+Canonical response shape:
+
+```jsonc
+{
+  "bSuccess": false,
+  "ErrorCode": -32011,
+  "ErrorMessage": "apply_token_binding unavailable — TokenforgeRuntime plugin not enabled. Install/enable the plugin in <Project>.uproject, or use create_common_*_style for project-static style classes instead.",
+  "Result": {
+    "dep_name":     "TokenforgeRuntime",
+    "widget_type":  "ApplyTokenBinding",
+    "alternative":  "create_common_*_style + apply_style_to_widget",
+    "category":     "OptionalDepUnavailable"
+  }
+}
+```
+
+The `category` value (`"OptionalDepUnavailable"`) matches the `-32010` shape, so LLM consumers can grep ONE category label across both error codes. Differentiation is via the numeric `ErrorCode` field, NOT the message body.
+
+Invariants: NEVER a crash. NEVER a silent success. NEVER a different code. The literal substring `"TokenforgeRuntime plugin not enabled"` is byte-stable across releases — tests assert that substring only, not the full message.
+
+### Implementation status (Phase 2 MVP-STUB)
+
+The Tokenforge availability probe and the structured -32011 error path are **FULL** as of 2026-05-16. The action's full responsibility — writing BP-graph nodes into the WBP's `NativeConstruct` event graph that call `UUISubsystem::GetColor` / `GetFont` / etc. and pipe the result into the target property's setter — is **DEFERRED** to a follow-up (tracked as issue #2-10b in the Phase 2 plan).
+
+Successful responses (Tokenforge IS available) carry `status:"stub"` + a `reason` string explaining the partial state, so callers can branch deterministically on "wired vs registered-only":
+
+```jsonc
+{
+  "bSuccess": true,
+  "Result": {
+    "wbp_path": "/Game/UI/WBP_MainMenu",
+    "widget_name": "Title",
+    "target_property": "ColorAndOpacity",
+    "token_key": "color.surface.default",
+    "tokenforge_available": true,
+    "tokenforge_version": "<version>",
+    "status": "stub",
+    "reason": "BP-graph node-write surface deferred. Param validation + Tokenforge probe FULL — node construction in NativeConstruct event graph awaits issue #2-10b follow-up. Action is registered + discoverable so callers can branch on status='stub'."
+  }
+}
+```
+
+Why register an MVP-STUB: keeping the action in the registry with a deterministic `status:"stub"` signal lets downstream tooling (LLM-driven UI authoring pipelines) discover the surface, validate inputs end-to-end, and write fail-soft branches NOW — without waiting for the BP-graph node-writer to land. When the follow-up ships, `status` flips to `"applied"` and the response payload gains a `bindings_written[]` array.
+
+### Pattern reusability
+
+This is the second optional-provider error code shipped (after `-32010`). The pattern stays the same: probe at handler entry, return structured payload with `dep_name`/`widget_type`/`alternative`/`category` fields, allocate a numeric code from the `-3201X..-32019` range, document the literal substring contract for tests, keep `category:"OptionalDepUnavailable"` stable across all codes for cross-cutting greps.
 
 ---
 
@@ -1053,7 +1219,81 @@ These are tracked drift / deferred work that did not block Phase L closure:
 | 9 | JSON-path → engine-path helper migration | Phase F per-handler `FEffectSurfaceActions::ApplyPath` is now a thin wrapper around `FUIReflectionHelper::ApplyJsonPath` (the Phase H hoist). Other handlers can migrate at leisure — the wrapper-and-hoist pattern is canonical going forward. |
 | 10 | Preset-literal drift detector (post-decouple R2.9) | The R2.9 metadata table in `MonolithUIEffectActions.cpp` (6 named presets — `rounded-rect`, `pill`, `circle`, `glass`, `glowing-button`, `neon`) and the provider's canonical presets MUST stay byte-aligned. Currently relies on manual diff in PR review. Future automation: a provider-side unit test that round-trips each preset name through both code paths and asserts pixel-identical render. Tracked here so the next post-decouple audit picks it up. |
 | 11 | EEffectSurfaceFeature drift detector (post-decouple R2.5) | Raw `int32` constants `EffectFeature_RoundedCorners = 1<<0` … `EffectFeature_InsetHighlight = 1<<10` in `MonolithUIEffectActions.cpp` shadow the provider's canonical feature enum. Same drift class as #10 — manual diff today; would be neat to gate with a provider-side static assert. |
+| 12 | Editor-down semantic distinction (2026-05-16 UI gap audit Item #22) | Editor-down semantic distinction: when MCP transport drops, agents get a generic disconnect. Wrapper distinguishing 'editor crashed' vs 'MCP proxy crashed' + auto-suggest offline `monolith_query.exe` fallback. Out of scope for MonolithUI; lives in MCP proxy / transport layer. Captured for visibility — separate Monolith MCP proxy ticket. |
 
-Items 4 + 5 are the only Phase L deprecation markers; items 10 + 11 were added by the optional provider decouple (2026-04-27). The rest are drift the audit caught while sweeping the spec but predate the relevant phase.
+Items 4 + 5 are the only Phase L deprecation markers; items 10 + 11 were added by the optional provider decouple (2026-04-27); item 12 was added by the 2026-05-16 UI gap audit. The rest are drift the audit caught while sweeping the spec but predate the relevant phase.
+
+---
+
+## Bulk-Row DataTable Authoring + Slot-Aware Describe (Phase 4 — 2026-05-11)
+
+Phase 4 of the Monolith MCP Ergonomics framework (`Docs/plans/2026-05-11-monolith-mcp-ergonomics.md`) wired `MonolithUI` into the cross-namespace `bulk_fill` / `describe` registry. The adapter (`Source/MonolithUI/Private/MonolithUIBulkFillAdapter.{h,cpp}`) is registered unconditionally from `FMonolithUIModule::StartupModule` per the **H5 stub-adapter invariant** — `monolith_discover("ui")` exposes the same surface in dev and release builds.
+
+### SINGLE-TRANSACTION INVARIANT — the 2026-04-25 crash fix
+
+The 40-row sequential CRASH that surfaced on 2026-04-25 from parallel JSON-RPC bursts against the input-action DataTable is closed by Phase 4: **ALL row-batch writes (input-action DT + vanilla DT) commit via ONE `FScopedTransaction` + ONE `Modify()` + N `AddRow` + ONE `MarkPackageDirty`.** A process-wide `FCriticalSection` (`GUIBulkFillCriticalSection` in `MonolithUIBulkFillAdapter.cpp`) serialises concurrent UI bulk_fill calls so parallel bursts can no longer race against the editor's DataTable mutation cradle. Strict-mode + any error → `Transaction->Cancel()` rolls back the whole batch.
+
+### M5 invariant — split happens INSIDE the adapter
+
+| Path | `WITH_COMMONUI` gate | fill_kind |
+|------|----------------------|-----------|
+| Vanilla UDataTable row-batch (any `FTableRowBase`) | none | `DataTableRows` |
+| UMG widget UPROPERTY writes (resolved via WBP `WidgetTree`) | none | `WidgetProperties` |
+| Slot-prop describe (parent-panel-class scoped) | none | (`describe.schema` only) |
+| CommonUI input-action DT (`FCommonInputActionDataBase` rows) | `#if WITH_COMMONUI` | `InputActionDataTable` |
+
+The `#else` branch on the gated path returns a clean stub error (`"CommonUI not available — WITH_COMMONUI=0 in this build"`) so the discover surface stays identical across build flavours.
+
+### Tree shapes
+
+`bulk_fill.apply` tree (CommonUI input-action DT — 40 rows in ONE call):
+
+```json
+{
+  "target_namespace": "ui",
+  "target_asset": "/Game/UI/Input/DT_InputActions40",
+  "tree": {
+    "fill_kind": "InputActionDataTable",
+    "rows": {
+      "Inventory_Open": {
+        "DefaultDisplayName": "Open Inventory",
+        "KeyboardInputTypeInfo": { "Key": "I" },
+        "GamepadInputTypeInfo":  { "Key": "Gamepad_FaceButton_Top" }
+      }
+    }
+  }
+}
+```
+
+`describe.schema` compound key (slot-prop describe scoped to PARENT panel class):
+
+| `target_asset` | Returns |
+|----------------|---------|
+| `""` | Top-level fill_kind catalogue |
+| `/Game/UI/DT_Foo` | UDataTable row-struct schema (per-field FProperty walk) |
+| `/Game/UI/WBP_Foo\|widget_name=MyButton` | Slot-prop tree for the resolved widget's PARENT panel class (default: `kind=slot`) |
+| `/Game/UI/WBP_Foo\|widget_name=MyButton\|kind=widget` | Widget UPROPERTY tree on the widget's UClass |
+
+### Slot-prop describe — solving the per-parent pain
+
+Slot props live on the slot CLASS, not the widget. A `UButton` parented to a `UCanvasPanel` has a `UCanvasPanelSlot` with `Anchors`/`Offsets`/`ZOrder`; the SAME button parented to a `UVerticalBox` has a `UVerticalBoxSlot` with `Padding`/`Size`/`HAlign`/`VAlign`. The adapter resolves the widget inside the WBP `WidgetTree`, follows `UWidget::Slot → UPanelSlot::Parent → UPanelWidget`, and emits a descriptor SCOPED to the parent's slot class. Inherited `UPanelSlot::Parent`/`Content` bookkeeping fields are filtered — only editor-surfaced slot props appear.
+
+Supported parent panels (UE 5.7 stock): `UCanvasPanelSlot`, `UVerticalBoxSlot`, `UHorizontalBoxSlot`, `UOverlaySlot`, `UUniformGridSlot`, `UStackBoxSlot`. Numeric `UIMin`/`UIMax`/`ClampMin`/`ClampMax` meta → `FSchemaDescriptor::RangeMin`/`RangeMax` (Q3 design contract). `FEnumProperty` fields enumerate all legal value strings in `EnumValues`.
+
+### Action surface
+
+`bulk_fill` + `describe` are framework-level namespaces (not counted in the per-module surface). The Phase 4 adapter does not add any new `ui::*` action — `monolith_discover("ui")` count is unchanged. The `monolith_discover("bulk_fill")` / `monolith_discover("describe")` rolls now includes `{namespace: "ui", available: true, stub: false}` in dev builds and `{namespace: "ui", available: true, stub_branch: "WITH_COMMONUI=0 disables InputActionDataTable only"}` in release builds.
+
+### Source layout
+
+| Path | Contents |
+|------|----------|
+| `Source/MonolithUI/Private/MonolithUIBulkFillAdapter.h` | `FMonolithUIBulkFillAdapter` static-API declaration |
+| `Source/MonolithUI/Private/MonolithUIBulkFillAdapter.cpp` | Adapter impl: `UIBulkFill`, `UIDescribe`, `Register`, `Unregister`. Process-wide `GUIBulkFillCriticalSection` lives at TU scope. |
+| `Source/MonolithUI/Private/MonolithUIModule.cpp` | `FMonolithUIBulkFillAdapter::Register()` from `StartupModule`, `Unregister()` from `ShutdownModule` (both unconditional per H5) |
+
+### Build.cs deps added by Phase 4
+
+None. `UMG` + `UMGEditor` + `Json` + `JsonUtilities` + `UnrealEd` + `MonolithCore` were already present.
 
 ---

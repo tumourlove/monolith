@@ -17,4 +17,7 @@ public:
 
 	// Raw UObject asset creation (not Blueprint)
 	static FMonolithActionResult HandleCreateDataAsset(const TSharedPtr<FJsonObject>& Params);
+
+	// Create + populate a DataAsset in one call (create_data_asset body + reflection-walker fill).
+	static FMonolithActionResult HandleSeedDataAsset(const TSharedPtr<FJsonObject>& Params);
 };

@@ -188,6 +188,16 @@ namespace MonolithCommonUIInput
 
 	// ----- 2.C.4 create_bound_action_bar ---------------------------------------
 
+	// Bug #4 fix (2026-05-16 UI gap audit): WBPs containing a freshly-created
+	// UCommonBoundActionBar failed to compile (BS_Error: "ActionBar has no
+	// ActionButtonClass specified") because nothing wired the REQUIRED
+	// ActionButtonClass property. The validator is at
+	// CommonBoundActionBar.cpp:91 (ValidateCompiledDefaults). We now accept an
+	// optional action_button_class param and default to the Monolith stock
+	// button class when omitted. UE 5.7 API verified: TSubclassOf<UCommonButtonBase>
+	// ActionButtonClass at CommonBoundActionBar.h:68 (orchestrator-cleared).
+	static const FString DefaultActionButtonClassPath = TEXT("/Game/Monolith/CommonUI/MonolithDefaultCommonButton.MonolithDefaultCommonButton_C");
+
 	static FMonolithActionResult HandleCreateBoundActionBar(const TSharedPtr<FJsonObject>& Params)
 	{
 		FString WidgetName, ParentWidgetName;
@@ -198,6 +208,32 @@ namespace MonolithCommonUIInput
 		if (WbpPath.IsEmpty())
 			return FMonolithActionResult::Error(TEXT("wbp_path (or asset_path) required"));
 		Params->TryGetStringField(TEXT("parent_widget"), ParentWidgetName);
+
+		// Resolve the button class up front so we can surface a clean error
+		// before mutating the widget tree. The caller's explicit path wins;
+		// otherwise we fall back to the Monolith default. LoadClass with the
+		// `_C` suffix is the standard UE 5.7 idiom for grabbing a Blueprint's
+		// generated class.
+		FString ButtonClassPath;
+		const bool bExplicitClass = Params->TryGetStringField(TEXT("action_button_class"), ButtonClassPath);
+		if (!bExplicitClass || ButtonClassPath.IsEmpty())
+		{
+			ButtonClassPath = DefaultActionButtonClassPath;
+		}
+
+		UClass* ResolvedButtonClass = LoadClass<UCommonButtonBase>(nullptr, *ButtonClassPath);
+		if (!ResolvedButtonClass)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Failed to resolve action_button_class '%s' (must be a UCommonButtonBase subclass path with _C suffix). Default Monolith button is at '%s' — ensure it exists or pass an explicit action_button_class."),
+				*ButtonClassPath, *DefaultActionButtonClassPath));
+		}
+		if (!ResolvedButtonClass->IsChildOf(UCommonButtonBase::StaticClass()))
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("action_button_class '%s' does not derive from UCommonButtonBase"),
+				*ButtonClassPath));
+		}
 
 		UWidgetBlueprint* Wbp = LoadObject<UWidgetBlueprint>(nullptr, *WbpPath);
 		if (!Wbp || !Wbp->WidgetTree)
@@ -221,6 +257,30 @@ namespace MonolithCommonUIInput
 			UCommonBoundActionBar::StaticClass(), FName(*WidgetName));
 		if (!Bar) return FMonolithActionResult::Error(TEXT("ConstructWidget returned null"));
 
+		// CRITICAL: write the ActionButtonClass BEFORE AddChild + compile so
+		// the validator (CommonBoundActionBar::ValidateCompiledDefaults at
+		// CommonBoundActionBar.cpp:91) sees the assigned class and accepts the
+		// blueprint. Without this, every WBP shipped with a fresh action bar
+		// previously compiled BS_Error.
+		//
+		// UCommonBoundActionBar::ActionButtonClass is a private UPROPERTY
+		// (CommonBoundActionBar.h:67-68, EditAnywhere) -- direct assignment
+		// fails C2248. Use the canonical FClassProperty reflection-write
+		// idiom (mirrors MonolithCommonUIListActions.cpp:67-70 setting
+		// UListView::EntryWidgetClass).
+		if (FClassProperty* ActionButtonClassProp = FindFProperty<FClassProperty>(
+			UCommonBoundActionBar::StaticClass(), TEXT("ActionButtonClass")))
+		{
+			ActionButtonClassProp->SetObjectPropertyValue(
+				ActionButtonClassProp->ContainerPtrToValuePtr<void>(Bar),
+				ResolvedButtonClass);
+		}
+		else
+		{
+			return FMonolithActionResult::Error(TEXT(
+				"Failed to resolve UCommonBoundActionBar::ActionButtonClass FClassProperty via reflection"));
+		}
+
 		Parent->AddChild(Bar);
 
 		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Wbp);
@@ -231,6 +291,8 @@ namespace MonolithCommonUIInput
 		Result->SetStringField(TEXT("wbp_path"), WbpPath);
 		Result->SetStringField(TEXT("widget_name"), WidgetName);
 		Result->SetStringField(TEXT("widget_class"), TEXT("CommonBoundActionBar"));
+		Result->SetStringField(TEXT("action_button_class"), ResolvedButtonClass->GetPathName());
+		Result->SetBoolField(TEXT("action_button_class_was_default"), !bExplicitClass);
 		return FMonolithActionResult::Success(Result);
 	}
 
@@ -391,12 +453,13 @@ namespace MonolithCommonUIInput
 
 		Registry.RegisterAction(
 			TEXT("ui"), TEXT("create_bound_action_bar"),
-			TEXT("Add a UCommonBoundActionBar to an existing WBP's tree (auto-populated action glyph bar)"),
+			TEXT("Add a UCommonBoundActionBar to an existing WBP's tree (auto-populated action glyph bar). Writes ActionButtonClass = action_button_class (default: MonolithDefaultCommonButton_C) so the blueprint compiles cleanly — bare bars fail validation in UCommonBoundActionBar::ValidateCompiledDefaults."),
 			FMonolithActionHandler::CreateStatic(&HandleCreateBoundActionBar),
 			FParamSchemaBuilder()
 				.Required(TEXT("wbp_path"), TEXT("string"), TEXT("Target Widget Blueprint path"))
 				.Required(TEXT("widget_name"), TEXT("string"), TEXT("Name to assign the bar"))
 				.Optional(TEXT("parent_widget"), TEXT("string"), TEXT("Parent panel (default: root)"))
+				.Optional(TEXT("action_button_class"), TEXT("string"), TEXT("Path to a UCommonButtonBase subclass with _C suffix (default: /Game/Monolith/CommonUI/MonolithDefaultCommonButton.MonolithDefaultCommonButton_C). Required to be a UCommonButtonBase subclass."))
 				.Build(),
 			Cat);
 

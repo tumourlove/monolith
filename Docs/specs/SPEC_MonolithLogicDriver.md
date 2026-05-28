@@ -39,6 +39,52 @@ MonolithLogicDriver provides MCP coverage of the Logic Driver Pro marketplace pl
 >
 > **`auto_arrange_graph`.** Automatically lays out SM nodes in the editor graph for readability.
 
+### Bulk Fill & Describe Surface (2026-05-11)
+
+`MonolithLogicDriverBulkFillAdapter` registers under `FMonolithBulkFillRegistry` for the `logicdriver` namespace, exposed via the framework-level `bulk_fill_query("apply", ...)` and `describe_query("schema", ...)` dispatchers. Phase 5 of the MCP ergonomics rollout (design spec `Docs/plans/2026-05-11-monolith-mcp-ergonomics-design.md`).
+
+**Surface summary.** `bulk_fill_query("apply", target_namespace="logicdriver", target="<sm_blueprint>", tree={...})` walks the state / transition surface in one transaction. `describe_query("schema", target_namespace="logicdriver", target="<sm_blueprint>")` returns the exposed-property surface per state class plus the transition predicate surface — replaces the per-property guess-and-check pain.
+
+**fill_kind catalogue (2 — enumerated against `MonolithLogicDriverBulkFillAdapter.cpp`):**
+
+| `fill_kind` | Target shape | Walks |
+|---|---|---|
+| `StatePropertiesBulk` | SM Blueprint | `states:{}` keyed by state-name → property map. Wildcard `"*"` key fans out to all states uniformly |
+| `TransitionPredicatesBulk` | SM Blueprint | `transitions:{}` keyed by transition identifier → predicate property map |
+
+**Sample tree (StatePropertiesBulk with wildcard fanout, design spec Appendix B.8):**
+
+```json
+{
+  "target": "/Game/AI/SM_HorrorEncounter",
+  "tree": {
+    "fill_kind": "StatePropertiesBulk",
+    "states": {
+      "Idle":   {"PatrolSpeed": 200.0, "EnableLookAt": true},
+      "Chase":  {"ChaseSpeed": 600.0, "GiveUpDistance": 4000.0},
+      "*":      {"DebugDrawColor": "FLinearColor(1,0,0,1)"}
+    }
+  },
+  "dry_run": true
+}
+```
+
+**Adapter-specific quirks.**
+
+- **`#if WITH_LOGICDRIVER` stub-adapter pattern.** The adapter ALWAYS registers under `FMonolithBulkFillRegistry` — body is conditionally compiled. When `WITH_LOGICDRIVER=0`, both fill_kinds return the clean error `"logicdriver adapter: LogicDriver not available — WITH_LOGICDRIVER=0 in this build."` and `describe_schema` returns an equivalent stub. This preserves discover-surface symmetry across configurations (matches the existing 3-location Build.cs detection pattern + release-build strip behaviour).
+- **v1 wildcard `*` fanout routes through CDO walker uniformly.** The wildcard handler in `StatePropertiesBulk` enumerates every state in the SM Blueprint and applies the wildcard property map to each via the same reflection walker that handles named states. This is the v1 fanout shape — `(v1.1)` adds per-instanced-state-node fanout where each state instance can be addressed individually rather than by name.
+- **`runtime_*` actions are PIE-only.** Schema descriptors flag the 7 runtime/PIE actions with `pie_blocked: true`. Bulk_fill v1 does NOT target runtime PIE state — only authoring-time SM Blueprint assets.
+- **`compare_state_machines` is value-blind.** The existing `compare_state_machines` action returns structural diff but not exposed-property-value diff. Dry-run reports for `StatePropertiesBulk` partially close this gap by surfacing per-key value diff between current and proposed — but a full-fidelity value-aware `compare_state_machines` is `(WISHLIST)`.
+- **`auto_arrange_graph` is BA-coupled.** Bulk_fill does NOT call layout — callers run `auto_arrange_graph` separately. Schema notes the BA-coupling under that action; bulk_fill stays orthogonal to layout.
+- **Reflection-only architecture preserved.** The adapter uses `FindPropertyByName` + `GetValue_InContainer` against state CDOs and transition CDOs, matching the rest of MonolithLogicDriver's reflection-only stance. No direct linkage against Logic Driver headers.
+
+**Limitations / v1.1 follow-ups.**
+
+- Per-instanced-state-node fanout (vs. by-state-name) — `(v1.1)` — instanced sub-object GUID stability concerns from cross-cutting quirks.
+- `TransitionPredicatesBulk` opacity for predicate types not registered in the reflection map — `(v1.1)` — `describe_exposed_property` companion needed.
+- Value-aware `compare_state_machines` — `(WISHLIST)` — full-fidelity diff blocked at the existing action.
+- `runtime_*` PIE-time bulk_fill — `(WISHLIST)` — runtime SM state mutation while PIE is running not in scope.
+
 ### Notes
 
 > **Precompiled plugin integration.** Logic Driver Pro is a marketplace plugin with precompiled binaries. MonolithLogicDriver uses UObject reflection (`FindPropertyByName`, `FProperty::GetValue_InContainer`) and factory classes discovered via reflection rather than linking against Logic Driver headers. The 3-location Build.cs detection finds SMSystem/SMSystemEditor modules whether installed as a project plugin, engine marketplace plugin, or engine plugin.

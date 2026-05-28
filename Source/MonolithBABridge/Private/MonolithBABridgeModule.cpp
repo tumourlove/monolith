@@ -1,12 +1,8 @@
 #include "Modules/ModuleManager.h"
 #include "IMonolithGraphFormatter.h"
+#include "MonolithBAFormatterImpl.h"
 #include "MonolithSettings.h"
 
-#if WITH_BLUEPRINT_ASSIST
-#include "MonolithBAFormatterImpl.h"
-#endif
-
-DECLARE_LOG_CATEGORY_EXTERN(LogMonolithBABridge, Log, All);
 DEFINE_LOG_CATEGORY(LogMonolithBABridge);
 
 class FMonolithBABridgeModule : public IModuleInterface
