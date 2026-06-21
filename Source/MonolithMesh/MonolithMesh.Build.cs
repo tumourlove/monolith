@@ -116,9 +116,20 @@ public class MonolithMesh : ModuleRules
 			// removing the CouldNotBeLoadedByOS / GetLastError=126 first-build/load race).
 			// Verified: PublicDelayLoadDLLs at ModuleRules.cs:1308 (UE 5.7). Confirm via
 			// dumpbin that these imports move to the Delay Import table.
-			PublicDelayLoadDLLs.Add("UnrealEditor-GeometryScriptingCore.dll");
-			PublicDelayLoadDLLs.Add("UnrealEditor-GeometryFramework.dll");
-			PublicDelayLoadDLLs.Add("UnrealEditor-GeometryCore.dll");
+			//
+			// Windows-only: delay-load is a PE concept, and the hardcoded "UnrealEditor-"
+			// prefix is only valid in a Shared build environment. Under
+			// BuildEnvironment.Unique the engine modules carry the project target prefix
+			// (e.g. "CookingHeartEditor-"), so a hardcoded "UnrealEditor-..." name fails to
+			// resolve at link time (Mac: `ld: library 'UnrealEditor-GeometryScriptingCore.dll'
+			// not found`). On non-Windows the PrivateDependencyModuleNames above already link
+			// these modules with the correctly-decorated name, so no delay-load is needed.
+			if (Target.Platform == UnrealTargetPlatform.Win64)
+			{
+				PublicDelayLoadDLLs.Add("UnrealEditor-GeometryScriptingCore.dll");
+				PublicDelayLoadDLLs.Add("UnrealEditor-GeometryFramework.dll");
+				PublicDelayLoadDLLs.Add("UnrealEditor-GeometryCore.dll");
+			}
 		}
 		else
 		{
