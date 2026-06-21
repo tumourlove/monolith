@@ -8,6 +8,16 @@
 #include "BlueprintAssistUtils.h"
 #include "EdGraph/EdGraph.h"
 
+// BA 4.9.0 moved formatting into FBAFormatRequest, replacing FBAGraphHandler's
+// IsCalculatingNodeSize()/FormatAllEvents()/SimpleFormatAll(). This is a BA-version break (BA ships
+// the same version across engines and exposes no version macro), so detect BA 4.9+ by the
+// presence of its subsystem header rather than by engine version.
+#if __has_include("BAGraphHandler/BAFormatRequest.h")
+#define MONOLITH_BA_4_9_OR_LATER 1
+#else
+#define MONOLITH_BA_4_9_OR_LATER 0
+#endif
+
 bool FMonolithBAFormatterImpl::SupportsGraph(UEdGraph* Graph) const
 {
 	if (!Graph)
@@ -45,7 +55,12 @@ bool FMonolithBAFormatterImpl::FormatGraph(
 	}
 
 	// 2. Check if BA is still caching node sizes
+	// BA 4.9 removed FBAGraphHandler::IsCalculatingNodeSize(); use GetNumberOfPendingNodesToCache().
+#if MONOLITH_BA_4_9_OR_LATER
+	if (Handler->GetNumberOfPendingNodesToCache() > 0)
+#else
 	if (Handler->IsCalculatingNodeSize())
+#endif
 	{
 		OutErrorMessage = TEXT("Blueprint Assist is still caching node sizes. "
 			"Try again in a moment.");
@@ -62,6 +77,11 @@ bool FMonolithBAFormatterImpl::FormatGraph(
 	}
 
 	// 4. Dispatch formatting
+	// BA 4.9 replaced FormatAllEvents()/SimpleFormatAll() with the graph-type-aware
+	// FBAGraphHandler::RequestFormatAll() (FBAFormatRequest is not BLUEPRINTASSIST_API-exported).
+#if MONOLITH_BA_4_9_OR_LATER
+	Handler->RequestFormatAll();
+#else
 	// FormatAllEvents() and SimpleFormatAll() create their own FScopedTransaction
 	// -- do NOT wrap in another transaction.
 	FBAFormatterSettings* Settings = UBASettings::FindFormatterSettings(Graph);
@@ -75,6 +95,7 @@ bool FMonolithBAFormatterImpl::FormatGraph(
 		// Simple/BT formatter
 		Handler->SimpleFormatAll();
 	}
+#endif
 
 	// 5. Report node count
 	OutNodesFormatted = Graph->Nodes.Num();
