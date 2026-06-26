@@ -544,7 +544,7 @@ FMonolithActionResult FMonolithChooserActions::HandleDuplicateChooserTree(const 
 			FString Val;
 			if (Pair.Value.IsValid() && Pair.Value->TryGetString(Val))
 			{
-				Remap.Add(NormalizePackagePath(Pair.Key), Val);
+				Remap.Add(NormalizePackagePath(*Pair.Key), Val);
 			}
 		}
 	}
