@@ -6,6 +6,8 @@
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SkinnedAsset.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/InheritableComponentHandler.h"
 #include "Components/SkinnedMeshComponent.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
@@ -56,7 +58,7 @@ void FMonolithBlueprintComponentActions::RegisterActions(FMonolithToolRegistry& 
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("set_component_property"),
-		TEXT("Set a property on a component template in a Blueprint via text import."),
+		TEXT("Set a property on a component template in a Blueprint via text import. Resolves BP-added SCS components, native CDO subobjects, AND SCS components inherited from a parent Blueprint (auto-creates an Inheritable Component Handler override, keyed by the defining ancestor SCS node). Reports 'source' = scs | cdo_native | ich_override."),
 		FMonolithActionHandler::CreateStatic(&HandleSetComponentProperty),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint asset path"))
@@ -503,6 +505,48 @@ FMonolithActionResult FMonolithBlueprintComponentActions::HandleSetComponentProp
 		}
 	}
 
+	// 3) SCS-inherited components: declared in a PARENT Blueprint's SimpleConstructionScript
+	//    (e.g. BP_StatsComponent / BP_EquipmentComponent defined up on BP_Bot_Active /
+	//    BP_RPG_Character). These are neither in THIS BP's SCS nor native CDO subobjects,
+	//    so steps 1-2 miss them. To override a property per-child BP you must go through
+	//    the Inheritable Component Handler (ICH): find the defining SCS node up the parent
+	//    chain, then get-or-create an override template keyed by that node.
+	bool bICHOverride = false;
+	if (!Template)
+	{
+		USCS_Node* DefiningNode = nullptr;
+		for (UClass* Cur = BP->ParentClass; Cur; Cur = Cur->GetSuperClass())
+		{
+			UBlueprintGeneratedClass* BPGC = Cast<UBlueprintGeneratedClass>(Cur);
+			if (BPGC && BPGC->SimpleConstructionScript)
+			{
+				if (USCS_Node* N = BPGC->SimpleConstructionScript->FindSCSNode(FName(*CompName)))
+				{
+					DefiningNode = N;
+					break;
+				}
+			}
+		}
+
+		if (DefiningNode)
+		{
+			if (UInheritableComponentHandler* ICH = BP->GetInheritableComponentHandler(/*bCreateIfNecessary=*/true))
+			{
+				FComponentKey Key(DefiningNode);
+				UActorComponent* Override = ICH->GetOverridenComponentTemplate(Key);
+				if (!Override)
+				{
+					Override = ICH->CreateOverridenComponentTemplate(Key);
+				}
+				if (Override)
+				{
+					Template = Override;
+					bICHOverride = true;
+				}
+			}
+		}
+	}
+
 	if (!Template)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Component not found: %s"), *CompName));
@@ -654,7 +698,9 @@ FMonolithActionResult FMonolithBlueprintComponentActions::HandleSetComponentProp
 	// MarkBlueprintAsModified alone does NOT re-serialise that CDO override — it silently
 	// reverts on the next reload/recompile. The override only persists if the Blueprint is
 	// structurally modified AND recompiled. SCS-template writes keep the lighter handshake.
-	if (bNativeCdoSubobject)
+	// An ICH override, like a native CDO subobject write, only persists if the Blueprint
+	// is structurally modified AND recompiled — MarkAsModified alone silently reverts it.
+	if (bNativeCdoSubobject || bICHOverride)
 	{
 		BP->Modify();
 		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
@@ -675,6 +721,7 @@ FMonolithActionResult FMonolithBlueprintComponentActions::HandleSetComponentProp
 	Root->SetStringField(TEXT("property"), Prop->GetName());
 	Root->SetStringField(TEXT("old_value"), OldValue);
 	Root->SetStringField(TEXT("new_value"), PostImportValue);
+	Root->SetStringField(TEXT("source"), bICHOverride ? TEXT("ich_override") : (bNativeCdoSubobject ? TEXT("cdo_native") : TEXT("scs")));
 	Root->SetStringField(TEXT("asset_path"), AssetPath);
 
 	return FMonolithActionResult::Success(Root);
