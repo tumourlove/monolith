@@ -17,6 +17,7 @@
 #include "MonolithBlueprintGraphExportActions.h"
 #include "MonolithBlueprintLayoutActions.h"
 #include "MonolithBlueprintSpawnActions.h"
+#include "MonolithBlueprintGraphNodeActions.h"
 #include "MonolithMotionMatchingScaffoldActions.h"
 #include "MonolithBlueprintBulkFillAdapter.h"
 #include "MonolithToolRegistry.h"
@@ -48,6 +49,7 @@ void FMonolithBlueprintModule::StartupModule()
 	FMonolithBlueprintGraphExportActions::RegisterActions(Registry);
 	FMonolithBlueprintLayoutActions::RegisterActions(Registry);
 	FMonolithBlueprintSpawnActions::RegisterActions(Registry);
+	FMonolithBlueprintGraphNodeActions::RegisterActions(Registry);
 
 	// Sprint 5 — Motion Matching Action Pack (Pillar D): character/actor BP scaffolding.
 	FMonolithMotionMatchingScaffoldActions::RegisterActions(Registry);
