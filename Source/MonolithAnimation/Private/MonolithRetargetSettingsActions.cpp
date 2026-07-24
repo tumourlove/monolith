@@ -820,7 +820,9 @@ FMonolithActionResult FMonolithRetargetSettingsActions::HandleSetRetargetRootSet
 	if (Params->TryGetNumberField(TEXT("scale_vertical"), V))          { Settings->ScaleVertical = V; }
 	if (Params->TryGetNumberField(TEXT("affect_ik_horizontal"), V))    { Settings->AffectIKHorizontal = V; }
 	if (Params->TryGetNumberField(TEXT("affect_ik_vertical"), V))      { Settings->AffectIKVertical = V; }
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 	if (Params->TryGetNumberField(TEXT("floor_constraint_weight"), V)) { Settings->FloorConstraintWeight = V; }
+#endif // UE 5.6's FIKRetargetPelvisMotionOpSettings has no floor constraint yet.
 	if (Params->TryGetNumberField(TEXT("rotation_alpha"), V))          { Settings->RotationAlpha = V; }
 	if (Params->TryGetNumberField(TEXT("translation_alpha"), V))       { Settings->TranslationAlpha = V; }
 	if (Params->TryGetNumberField(TEXT("blend_to_source_translation"), V)) { Settings->BlendToSourceTranslation = V; }
@@ -829,7 +831,12 @@ FMonolithActionResult FMonolithRetargetSettingsActions::HandleSetRetargetRootSet
 	if (Params->TryGetObjectField(TEXT("translation_offset_global"), OffsetObjPtr) && OffsetObjPtr->IsValid())
 	{
 		FVector Offset;
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 		if (TryReadVector(*OffsetObjPtr, Offset)) { Settings->TranslationOffsetGlobal = Offset; }
+#else
+		// UE 5.6 only has the (local) TranslationOffset field, no separate "Global" variant.
+		if (TryReadVector(*OffsetObjPtr, Offset)) { Settings->TranslationOffset = Offset; }
+#endif
 	}
 
 	PelvisOp->SetSettings(PelvisBaseSettings);
@@ -856,11 +863,18 @@ FMonolithActionResult FMonolithRetargetSettingsActions::HandleSetRetargetRootSet
 	Root->SetNumberField(TEXT("scale_vertical"), Settings->ScaleVertical);
 	Root->SetNumberField(TEXT("affect_ik_horizontal"), Settings->AffectIKHorizontal);
 	Root->SetNumberField(TEXT("affect_ik_vertical"), Settings->AffectIKVertical);
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 	Root->SetNumberField(TEXT("floor_constraint_weight"), Settings->FloorConstraintWeight);
+#endif // UE 5.6's FIKRetargetPelvisMotionOpSettings has no floor constraint yet.
 	Root->SetNumberField(TEXT("rotation_alpha"), Settings->RotationAlpha);
 	Root->SetNumberField(TEXT("translation_alpha"), Settings->TranslationAlpha);
 	Root->SetNumberField(TEXT("blend_to_source_translation"), Settings->BlendToSourceTranslation);
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 	Root->SetObjectField(TEXT("translation_offset_global"), VectorToJson(Settings->TranslationOffsetGlobal));
+#else
+	// UE 5.6 only has the (local) TranslationOffset field, no separate "Global" variant.
+	Root->SetObjectField(TEXT("translation_offset_global"), VectorToJson(Settings->TranslationOffset));
+#endif
 	Root->SetStringField(TEXT("source_pelvis_bone"), PelvisController->GetSourcePelvisBone().ToString());
 	Root->SetStringField(TEXT("target_pelvis_bone"), PelvisController->GetTargetPelvisBone().ToString());
 	return FMonolithActionResult::Success(Root);

@@ -145,7 +145,11 @@ bool FMonolithUIImportFontFamilyBasicTest::RunTest(const FString& Parameters)
                 (int32)FamilyObj->FontCacheType, (int32)EFontCacheType::Runtime);
 
             // UE 5.7: CompositeFont field is UE_DEPRECATED -- read via the accessor.
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
             const FCompositeFont& Composite = FamilyObj->GetInternalCompositeFont();
+#else
+            const FCompositeFont& Composite = FamilyObj->CompositeFont;
+#endif
             TestEqual(TEXT("DefaultTypeface.Fonts.Num() == 1"),
                 Composite.DefaultTypeface.Fonts.Num(), 1);
             if (Composite.DefaultTypeface.Fonts.Num() == 1)

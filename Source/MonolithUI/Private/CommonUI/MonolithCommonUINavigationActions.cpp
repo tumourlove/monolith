@@ -883,7 +883,16 @@ namespace MonolithCommonUINavigation
 		if (!Found)
 			return FMonolithActionResult::Error(FString::Printf(TEXT("Activatable widget '%s' not found in PIE"), *WidgetName));
 
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 		Found->RequestRefreshFocus();
+#else
+		// UE 5.6 has RequestRefreshFocus() as protected; it's still a BlueprintCallable
+		// UFUNCTION, so invoke it through reflection instead of a direct (illegal) call.
+		if (UFunction* RefreshFn = Found->FindFunction(TEXT("RequestRefreshFocus")))
+		{
+			Found->ProcessEvent(RefreshFn, nullptr);
+		}
+#endif
 
 		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetStringField(TEXT("widget_name"), WidgetName);

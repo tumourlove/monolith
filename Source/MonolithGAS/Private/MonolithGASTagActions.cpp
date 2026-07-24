@@ -832,7 +832,12 @@ FMonolithActionResult FMonolithGASTagActions::HandleRenameTag(const TSharedPtr<F
 
 		// Use engine API to rename tag in INI (adds new tag, creates redirector, optionally renames children)
 		IGameplayTagsEditorModule& TagsEditor = IGameplayTagsEditorModule::Get();
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 		bool bRenameOk = TagsEditor.RenameTagInINI(OldTag, NewTag, /*bRenameChildren=*/ false);
+#else
+		// UE 5.6's RenameTagInINI doesn't take a bRenameChildren parameter yet.
+		bool bRenameOk = TagsEditor.RenameTagInINI(OldTag, NewTag);
+#endif
 
 		if (!bRenameOk)
 		{

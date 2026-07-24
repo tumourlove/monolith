@@ -208,9 +208,17 @@ namespace
 				bool bDropped = (Action == nullptr);
 				if (Action)
 				{
-					if (UEnhancedInputLocalPlayerSubsystem* Subsystem =
+	#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
+				if (UEnhancedInputLocalPlayerSubsystem* Subsystem =
 						ULocalPlayer::GetSubsystemFromController<UEnhancedInputLocalPlayerSubsystem>(
 							ResolvePlayerController(PieWorld, H.PlayerIndex)))
+#else
+				// UE 5.6 doesn't have the GetSubsystemFromController() convenience accessor yet.
+				APlayerController* HeldPC = ResolvePlayerController(PieWorld, H.PlayerIndex);
+				if (UEnhancedInputLocalPlayerSubsystem* Subsystem = HeldPC
+						? ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(HeldPC->GetLocalPlayer())
+						: nullptr)
+#endif
 					{
 						Subsystem->InjectInputForAction(Action, H.Value, {}, {});
 					}
@@ -601,8 +609,14 @@ FMonolithActionResult FMonolithPieInputActions::HandleInjectInputAction(const TS
 			TEXT("No player controller at player_index %d in the running PIE world"), PlayerIndex));
 	}
 
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 	UEnhancedInputLocalPlayerSubsystem* Subsystem =
 		ULocalPlayer::GetSubsystemFromController<UEnhancedInputLocalPlayerSubsystem>(PC);
+#else
+	// UE 5.6 doesn't have the GetSubsystemFromController() convenience accessor yet.
+	UEnhancedInputLocalPlayerSubsystem* Subsystem =
+		ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PC->GetLocalPlayer());
+#endif
 	if (!Subsystem)
 	{
 		return FMonolithActionResult::Error(FString::Printf(

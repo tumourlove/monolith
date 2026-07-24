@@ -33,7 +33,9 @@
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 #include "Materials/MaterialParameters.h"
+#endif
 
 // Asset registry + asset tools (unique naming for saved-MID case)
 #include "AssetRegistry/AssetRegistryModule.h"

@@ -250,7 +250,12 @@ FMonolithActionResult FMonolithMeshInspectionActions::GetMeshInfo(const TSharedP
 		Result->SetStringField(TEXT("collision"), MeshInspectionHelpers::CollisionTypeString(BodySetup));
 
 		// Nanite
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 		Result->SetBoolField(TEXT("nanite_enabled"), SM->GetNaniteSettings().bEnabled != 0);
+#else
+		// UE 5.6's NaniteSettings is still a plain public field, no accessor yet.
+		Result->SetBoolField(TEXT("nanite_enabled"), SM->NaniteSettings.bEnabled != 0);
+#endif
 
 		// Lightmap UV index
 		Result->SetNumberField(TEXT("lightmap_uv_index"), SM->GetLightMapCoordinateIndex());

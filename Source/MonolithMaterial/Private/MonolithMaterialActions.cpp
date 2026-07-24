@@ -3293,8 +3293,13 @@ FMonolithActionResult FMonolithMaterialActions::RecompileMaterial(const TSharedP
 		ResultJson->SetNumberField(TEXT("num_pixel_shader_instructions"), Stats.NumPixelShaderInstructions);
 		ResultJson->SetNumberField(TEXT("num_vertex_shader_instructions"), Stats.NumVertexShaderInstructions);
 
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 		const EShaderPlatform ShaderPlatform = GShaderPlatformForFeatureLevel[GMaxRHIFeatureLevel];
 		FMaterialResource* MatResource = BaseMat->GetMaterialResource(ShaderPlatform);
+#else
+		// UE 5.6's GetMaterialResource() takes an ERHIFeatureLevel, not an EShaderPlatform.
+		FMaterialResource* MatResource = BaseMat->GetMaterialResource(GMaxRHIFeatureLevel);
+#endif
 		bool bIsCompiled = false;
 		if (MatResource)
 		{
@@ -3386,8 +3391,13 @@ FMonolithActionResult FMonolithMaterialActions::GetCompilationStats(const TShare
 	ResultJson->SetStringField(TEXT("asset_path"), AssetPath);
 
 	// Get material resource for the current shader platform
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 	const EShaderPlatform ShaderPlatform = GShaderPlatformForFeatureLevel[GMaxRHIFeatureLevel];
 	FMaterialResource* MatResource = BaseMat->GetMaterialResource(ShaderPlatform);
+#else
+	// UE 5.6's GetMaterialResource() takes an ERHIFeatureLevel, not an EShaderPlatform.
+	FMaterialResource* MatResource = BaseMat->GetMaterialResource(GMaxRHIFeatureLevel);
+#endif
 	if (MatResource)
 	{
 		bool bIsCompiled = MatResource->IsGameThreadShaderMapComplete();
@@ -6920,7 +6930,9 @@ FMonolithActionResult FMonolithMaterialActions::ExportFunctionGraph(const TShare
 			InputJson->SetArrayField(TEXT("preview_value"), PreviewArr);
 
 			// Blend input relevance
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 			InputJson->SetNumberField(TEXT("blend_input_relevance"), static_cast<int32>(FuncInput->BlendInputRelevance));
+#endif // UE 5.6's UMaterialExpressionFunctionInput has no BlendInputRelevance yet.
 
 			if (bIncludePositions)
 			{
@@ -8295,8 +8307,13 @@ FMonolithActionResult FMonolithMaterialActions::CreatePbrMaterialFromDisk(const 
 	StatsJson->SetNumberField(TEXT("ps_instructions"), Stats.NumPixelShaderInstructions);
 
 	// Sampler count from material resource
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 	const EShaderPlatform ShaderPlatform = GShaderPlatformForFeatureLevel[GMaxRHIFeatureLevel];
 	FMaterialResource* MatResource = NewMat->GetMaterialResource(ShaderPlatform);
+#else
+	// UE 5.6's GetMaterialResource() takes an ERHIFeatureLevel, not an EShaderPlatform.
+	FMaterialResource* MatResource = NewMat->GetMaterialResource(GMaxRHIFeatureLevel);
+#endif
 	if (MatResource)
 	{
 		StatsJson->SetNumberField(TEXT("num_samplers"), MatResource->GetSamplerUsage());
@@ -8894,6 +8911,7 @@ FMonolithActionResult FMonolithMaterialActions::GetFunctionInstanceInfo(const TS
 
 	// --- Parameter collection parameter overrides ---
 	TArray<TSharedPtr<FJsonValue>> ParamCollArr;
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 	for (const auto& Param : MFI->ParameterCollectionParameterValues)
 	{
 		auto PJson = MakeShared<FJsonObject>();
@@ -8901,6 +8919,7 @@ FMonolithActionResult FMonolithMaterialActions::GetFunctionInstanceInfo(const TS
 		PJson->SetStringField(TEXT("value"), Param.ParameterValue ? Param.ParameterValue->GetPathName() : TEXT("None"));
 		ParamCollArr.Add(MakeShared<FJsonValueObject>(PJson));
 	}
+#endif // UE 5.6's UMaterialFunctionInstance has no per-instance parameter collection overrides yet.
 	ResultJson->SetArrayField(TEXT("parameter_collection_overrides"), ParamCollArr);
 
 	// --- Font parameter overrides ---
@@ -9087,7 +9106,30 @@ FMonolithActionResult FMonolithMaterialActions::RenameFunctionParameterGroup(con
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Asset '%s' is not a MaterialFunctionInterface (type: %s)"), *AssetPath, *LoadedAsset->GetClass()->GetName()));
 	}
 
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 	bool bRenamed = UMaterialEditingLibrary::RenameMaterialFunctionParameterGroup(MatFuncInterface, FName(*OldGroup), FName(*NewGroup));
+#else
+	// UE 5.6's UMaterialEditingLibrary has no RenameMaterialFunctionParameterGroup helper yet —
+	// walk the function's expressions and rename any "Group" FName property found via reflection
+	// (parameter expressions of every kind — scalar/vector/texture/static switch/font/...
+	// — expose a Group field, so this generalizes without enumerating every subclass).
+	bool bRenamed = false;
+	const FName OldGroupName(*OldGroup);
+	const FName NewGroupName(*NewGroup);
+	for (const TObjectPtr<UMaterialExpression>& Expr : MatFuncInterface->GetExpressions())
+	{
+		if (!Expr) continue;
+		FNameProperty* GroupProp = CastField<FNameProperty>(Expr->GetClass()->FindPropertyByName(TEXT("Group")));
+		if (!GroupProp) continue;
+		FName* GroupValue = GroupProp->ContainerPtrToValuePtr<FName>(Expr.Get());
+		if (*GroupValue == OldGroupName)
+		{
+			Expr->Modify();
+			*GroupValue = NewGroupName;
+			bRenamed = true;
+		}
+	}
+#endif
 
 	auto ResultJson = MakeShared<FJsonObject>();
 	ResultJson->SetStringField(TEXT("asset_path"), AssetPath);

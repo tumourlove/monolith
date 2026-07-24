@@ -8,7 +8,12 @@
 #include "UObject/PropertyPortFlags.h"
 #include "UObject/SoftObjectPtr.h"
 #include "UObject/Class.h"
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 #include "Misc/StringOutputDevice.h"
+#else
+// UE 5.6 hasn't split FStringOutputDevice out of UnrealString.h yet.
+#include "Containers/UnrealString.h"
+#endif
 #include "Algo/Count.h"
 
 #if WITH_EDITOR

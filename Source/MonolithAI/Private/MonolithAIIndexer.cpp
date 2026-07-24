@@ -280,7 +280,7 @@ void FAIIndexer::IndexBehaviorTree(UBehaviorTree* BT, const FString& AssetPath, 
 
 	FString PropsStr;
 	auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&PropsStr);
-	FJsonSerializer::Serialize(Props, *Writer, true);
+	FJsonSerializer::Serialize(Props.ToSharedRef(), *Writer, true);
 	Node.Properties = PropsStr;
 
 	if (Node.AssetId > 0)
@@ -342,7 +342,7 @@ void FAIIndexer::IndexBlackboard(UBlackboardData* BB, const FString& AssetPath, 
 
 	FString PropsStr;
 	auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&PropsStr);
-	FJsonSerializer::Serialize(Props, *Writer, true);
+	FJsonSerializer::Serialize(Props.ToSharedRef(), *Writer, true);
 	Node.Properties = PropsStr;
 
 	if (Node.AssetId > 0)
@@ -387,7 +387,7 @@ void FAIIndexer::IndexAIController(UBlueprint* BP, const FString& AssetPath, FMo
 
 	FString PropsStr;
 	auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&PropsStr);
-	FJsonSerializer::Serialize(Props, *Writer, true);
+	FJsonSerializer::Serialize(Props.ToSharedRef(), *Writer, true);
 	Node.Properties = PropsStr;
 
 	if (Node.AssetId > 0)

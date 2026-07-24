@@ -16,7 +16,9 @@
 // Materials -- read-back via runtime API
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceConstant.h"
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 #include "Materials/MaterialParameters.h"
+#endif
 
 // Package / loading
 #include "UObject/Package.h"

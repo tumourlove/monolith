@@ -53,7 +53,12 @@
 #include "RetargetEditor/IKRetargeterController.h"
 #include "RetargetEditor/IKRetargetBatchOperation.h" // batch_retarget_animations — RunRetarget + FIKRetargetBatchOperationContext
 #include "EditorAnimUtils.h"                          // EditorAnimUtils::FNameDuplicationRule (output folder + rename rule)
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 #include "ControlRigBlueprintLegacy.h"
+#else
+// UE 5.6 hasn't split the legacy Control Rig Blueprint out of ControlRigBlueprint.h yet.
+#include "ControlRigBlueprint.h"
+#endif
 #include "Rigs/RigHierarchy.h"
 #include "Rigs/RigHierarchyElements.h"
 #include "Rigs/RigHierarchyDefines.h"
@@ -5961,7 +5966,12 @@ FMonolithActionResult FMonolithAnimationActions::HandleGetRetargeterInfo(const T
 			OpObj->SetStringField(TEXT("type"), OpStruct ? OpStruct->GetName() : TEXT("Unknown"));
 
 			const UScriptStruct* SettingsStruct = Op->GetSettingsType();
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 			const FIKRetargetOpSettingsBase* OpSettings = Op->GetSettingsConst();
+#else
+			// UE 5.6 only exposes the non-const GetSettings() accessor.
+			const FIKRetargetOpSettingsBase* OpSettings = const_cast<FIKRetargetOpBase*>(Op)->GetSettings();
+#endif
 			if (SettingsStruct && OpSettings)
 			{
 				OpObj->SetStringField(TEXT("settings_type"), SettingsStruct->GetName());
@@ -6477,7 +6487,16 @@ static UAnimStateEntryNode* FindEntryNode(UAnimationStateMachineGraph* SMGraph)
 static UAnimStateNodeBase* GetEntryTargetState(UAnimStateEntryNode* EntryNode)
 {
 	if (!EntryNode) return nullptr;
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 	UEdGraphPin* EntryOut = EntryNode->GetOutputPin();
+#else
+	// UE 5.6's UAnimStateEntryNode has no GetOutputPin() convenience accessor yet.
+	UEdGraphPin* EntryOut = nullptr;
+	for (UEdGraphPin* P : EntryNode->Pins)
+	{
+		if (P && P->Direction == EGPD_Output) { EntryOut = P; break; }
+	}
+#endif
 	if (!EntryOut) return nullptr;
 	for (UEdGraphPin* Linked : EntryOut->LinkedTo)
 	{
@@ -6650,7 +6669,16 @@ FMonolithActionResult FMonolithAnimationActions::HandleSetAnimEntryState(const T
 		return FMonolithActionResult::Success(Root);
 	}
 
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 	UEdGraphPin* EntryOut = EntryNode->GetOutputPin();
+#else
+	// UE 5.6's UAnimStateEntryNode has no GetOutputPin() convenience accessor yet.
+	UEdGraphPin* EntryOut = nullptr;
+	for (UEdGraphPin* P : EntryNode->Pins)
+	{
+		if (P && P->Direction == EGPD_Output) { EntryOut = P; break; }
+	}
+#endif
 	if (!EntryOut) return FMonolithActionResult::Error(TEXT("Entry node has no output pin"));
 	UEdGraphPin* StateIn = TargetState->GetInputPin();
 	if (!StateIn) return FMonolithActionResult::Error(FString::Printf(TEXT("Target state '%s' has no input pin"), *StateName));
@@ -8312,7 +8340,16 @@ FMonolithActionResult FMonolithAnimationActions::HandleBuildStateMachine(const T
 		}
 		if (EntryTarget && EntryNode)
 		{
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 			UEdGraphPin* EntryOut = EntryNode->GetOutputPin();
+#else
+			// UE 5.6's UAnimStateEntryNode has no GetOutputPin() convenience accessor yet.
+			UEdGraphPin* EntryOut = nullptr;
+			for (UEdGraphPin* P : EntryNode->Pins)
+			{
+				if (P && P->Direction == EGPD_Output) { EntryOut = P; break; }
+			}
+#endif
 			UEdGraphPin* StateIn  = EntryTarget->GetInputPin();
 			const UAnimationStateMachineSchema* Schema = Cast<UAnimationStateMachineSchema>(SMGraph->GetSchema());
 			if (EntryOut && StateIn && Schema)

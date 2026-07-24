@@ -13,7 +13,7 @@ bool FDataAssetIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedA
 
 	FString PropsStr;
 	auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&PropsStr);
-	FJsonSerializer::Serialize(Props, *Writer, true);
+	FJsonSerializer::Serialize(Props.ToSharedRef(), *Writer, true);
 
 	FIndexedNode Node;
 	Node.AssetId = AssetId;

@@ -541,7 +541,13 @@ FMonolithActionResult FMonolithSkeletonRetargetActions::HandleSetIkRigBoneSettin
 		// explicit-index path; the all-solvers path simply skips ineligible solvers.
 		FText CanAddErr;
 		const bool bAlreadyHasSetting = Solver->HasSettingsOnBone(BoneName);
-		if (!bAlreadyHasSetting && !Controller->CanAddBoneSetting(BoneName, SolverIndex, &CanAddErr))
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
+		const bool bCanAdd = Controller->CanAddBoneSetting(BoneName, SolverIndex, &CanAddErr);
+#else
+		// UE 5.6's CanAddBoneSetting doesn't take an out-error FText* yet.
+		const bool bCanAdd = Controller->CanAddBoneSetting(BoneName, SolverIndex);
+#endif
+		if (!bAlreadyHasSetting && !bCanAdd)
 		{
 			if (bHasSolverIndex)
 			{

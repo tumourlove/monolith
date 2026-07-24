@@ -328,7 +328,11 @@ FMonolithActionResult MonolithUI::FFontIngestActions::HandleImportFontFamily(con
 
     // UE 5.7: direct public write to UFont::CompositeFont is UE_DEPRECATED -- the
     // header instructs callers to go through GetMutableInternalCompositeFont().
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
     FCompositeFont& Composite = FamilyFont->GetMutableInternalCompositeFont();
+#else
+    FCompositeFont& Composite = FamilyFont->CompositeFont;
+#endif
     Composite.DefaultTypeface.Fonts.Reset();
 
     for (const FFaceResult& R : FaceResults)

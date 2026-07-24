@@ -13,7 +13,9 @@
 #include "GameplayEffectComponents/AssetTagsGameplayEffectComponent.h"
 #include "GameplayEffectComponents/TargetTagsGameplayEffectComponent.h"
 #include "GameplayEffectComponents/BlockAbilityTagsGameplayEffectComponent.h"
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 #include "GameplayEffectComponents/CancelAbilityTagsGameplayEffectComponent.h"
+#endif
 #include "GameplayEffectComponents/TargetTagRequirementsGameplayEffectComponent.h"
 #include "GameplayEffectComponents/AdditionalEffectsGameplayEffectComponent.h"
 #include "GameplayEffectComponents/ImmunityGameplayEffectComponent.h"
@@ -521,10 +523,12 @@ TSharedPtr<FJsonObject> GEComponentToJson(const UGameplayEffectComponent* Comp)
 	{
 		Obj->SetStringField(TEXT("type"), TEXT("grant_abilities"));
 	}
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 	else if (const UCancelAbilityTagsGameplayEffectComponent* CancelTags = Cast<UCancelAbilityTagsGameplayEffectComponent>(Comp))
 	{
 		Obj->SetStringField(TEXT("type"), TEXT("cancel_abilities"));
 	}
+#endif
 	else
 	{
 		Obj->SetStringField(TEXT("type"), TEXT("custom"));
@@ -542,7 +546,9 @@ UClass* ResolveComponentClass(const FString& TypeStr, FString& OutError)
 		TypeMap.Add(TEXT("asset_tags"),                UAssetTagsGameplayEffectComponent::StaticClass());
 		TypeMap.Add(TEXT("target_tags"),               UTargetTagsGameplayEffectComponent::StaticClass());
 		TypeMap.Add(TEXT("block_abilities"),           UBlockAbilityTagsGameplayEffectComponent::StaticClass());
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 		TypeMap.Add(TEXT("cancel_abilities"),          UCancelAbilityTagsGameplayEffectComponent::StaticClass());
+#endif
 		TypeMap.Add(TEXT("target_tag_requirements"),   UTargetTagRequirementsGameplayEffectComponent::StaticClass());
 		TypeMap.Add(TEXT("additional_effects"),        UAdditionalEffectsGameplayEffectComponent::StaticClass());
 		TypeMap.Add(TEXT("immunity"),                  UImmunityGameplayEffectComponent::StaticClass());
@@ -1571,6 +1577,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleAddGEComponent(const TSha
 		ApplyTagConfig(Config, Tags);
 		Comp->SetAndApplyBlockedAbilityTagChanges(Tags);
 	}
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 	else if (ComponentType == TEXT("cancel_abilities"))
 	{
 		UCancelAbilityTagsGameplayEffectComponent* Comp = CastChecked<UCancelAbilityTagsGameplayEffectComponent>(NewComp);
@@ -1585,6 +1592,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleAddGEComponent(const TSha
 		}
 		Comp->SetAndApplyCanceledAbilityTagChanges(WithTags, WithoutTags);
 	}
+#endif
 	else if (ComponentType == TEXT("target_tag_requirements"))
 	{
 		UTargetTagRequirementsGameplayEffectComponent* Comp = CastChecked<UTargetTagRequirementsGameplayEffectComponent>(NewComp);
@@ -1747,6 +1755,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleSetGEComponent(const TSha
 		ApplyTagConfig(Config, Tags);
 		Comp->SetAndApplyBlockedAbilityTagChanges(Tags);
 	}
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 	else if (ComponentType == TEXT("cancel_abilities"))
 	{
 		UCancelAbilityTagsGameplayEffectComponent* Comp = CastChecked<UCancelAbilityTagsGameplayEffectComponent>(FoundComp);
@@ -1760,6 +1769,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleSetGEComponent(const TSha
 		}
 		Comp->SetAndApplyCanceledAbilityTagChanges(WithTags, WithoutTags);
 	}
+#endif
 	else if (ComponentType == TEXT("target_tag_requirements"))
 	{
 		UTargetTagRequirementsGameplayEffectComponent* Comp = CastChecked<UTargetTagRequirementsGameplayEffectComponent>(FoundComp);

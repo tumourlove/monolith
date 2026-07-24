@@ -3,7 +3,12 @@
 #include "MonolithParamSchema.h"
 #include "MonolithJsonUtils.h"
 
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 #include "ControlRigBlueprintLegacy.h"
+#else
+// UE 5.6 hasn't split the legacy Control Rig Blueprint out of ControlRigBlueprint.h yet.
+#include "ControlRigBlueprint.h"
+#endif
 #include "RigVMModel/RigVMGraph.h"
 #include "RigVMModel/RigVMNode.h"
 #include "RigVMModel/RigVMPin.h"
@@ -13,9 +18,11 @@
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8
 // UE 5.8 relocated IRigVMAssetInterface (now an alias of IRigVMEditorAssetInterface).
 #include "RigVMEditorAsset.h"
-#else
+#elif ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 7
 #include "RigVMAsset.h"
 #endif
+// UE 5.6 has neither header — UControlRigBlueprint (via URigVMBlueprint) already
+// implements GetRigVMClient() directly, no IRigVMAssetInterface indirection needed.
 #include "RigVMModel/Nodes/RigVMUnitNode.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -89,7 +96,11 @@ static URigVMGraph* GetGraphFromBlueprint(UControlRigBlueprint* CRB, const FStri
 	}
 
 	// Search by name across all models
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 	FRigVMClient* Client = static_cast<IRigVMAssetInterface*>(CRB)->GetRigVMClient();
+#else
+	FRigVMClient* Client = CRB->GetRigVMClient();
+#endif
 	if (!Client)
 	{
 		OutError = TEXT("Failed to get RigVMClient");
@@ -111,7 +122,11 @@ static URigVMGraph* GetGraphFromBlueprint(UControlRigBlueprint* CRB, const FStri
 
 static URigVMController* GetControllerForGraph(UControlRigBlueprint* CRB, URigVMGraph* Graph, FString& OutError)
 {
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
 	FRigVMClient* Client = static_cast<IRigVMAssetInterface*>(CRB)->GetRigVMClient();
+#else
+	FRigVMClient* Client = CRB->GetRigVMClient();
+#endif
 	if (!Client)
 	{
 		OutError = TEXT("Failed to get RigVMClient");

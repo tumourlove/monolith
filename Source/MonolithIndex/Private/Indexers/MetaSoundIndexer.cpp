@@ -24,7 +24,7 @@ namespace
 	{
 		FString Out;
 		auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Out);
-		FJsonSerializer::Serialize(JsonObj, *Writer, true);
+		FJsonSerializer::Serialize(JsonObj.ToSharedRef(), *Writer, true);
 		return Out;
 	}
 
