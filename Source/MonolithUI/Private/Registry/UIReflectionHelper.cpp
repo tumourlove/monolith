@@ -12,6 +12,7 @@
 #include "Registry/UIReflectionHelper.h"
 
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Layout/Margin.h"
 #include "Math/Color.h"
 #include "Math/Vector2D.h"
@@ -21,6 +22,8 @@
 #include "Registry/UIPropertyAllowlist.h"
 #include "Registry/UIPropertyPathCache.h"
 #include "Registry/UITypeRegistry.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "Styling/SlateColor.h"
 #include "UObject/Class.h"
 #include "UObject/EnumProperty.h"
@@ -79,6 +82,50 @@ namespace
     // ------------------------------------------------------------------
     // Hand-rolled struct parsers
     // ------------------------------------------------------------------
+
+    // The `value` param of set_widget_property is declared `string` in the
+    // action schema, so a caller writing JSON (`[1,2,3,4]`, `{"left":4,...}`)
+    // or a bare number (`20`) delivers it as TEXT. Parsers that only branch on
+    // EJson::Number / Array / Object therefore never match and report a
+    // ParseFailed listing shapes that cannot actually get through.
+    //
+    // Re-parse such a string into the JSON value it represents so the shape
+    // branches below work for text and structured callers alike. Returns the
+    // original value when it is not a string or is not JSON/numeric text.
+    TSharedPtr<FJsonValue> CoerceStringToJson(const TSharedPtr<FJsonValue>& Value)
+    {
+        if (!Value.IsValid() || Value->Type != EJson::String)
+        {
+            return Value;
+        }
+
+        const FString S = Value->AsString().TrimStartAndEnd();
+        if (S.IsEmpty())
+        {
+            return Value;
+        }
+
+        const bool bLooksObject = S.StartsWith(TEXT("{")) && S.EndsWith(TEXT("}"));
+        const bool bLooksArray  = S.StartsWith(TEXT("[")) && S.EndsWith(TEXT("]"));
+        if (bLooksObject || bLooksArray)
+        {
+            TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(S);
+            TSharedPtr<FJsonValue> Parsed;
+            if (FJsonSerializer::Deserialize(Reader, Parsed) && Parsed.IsValid())
+            {
+                return Parsed;
+            }
+            return Value;
+        }
+
+        // Bare numeric text — the documented "scalar" form for FMargin.
+        if (S.IsNumeric())
+        {
+            return MakeShared<FJsonValueNumber>(FCString::Atod(*S));
+        }
+
+        return Value;
+    }
 
     // FVector2D — object{x,y} OR array[x,y] OR "x,y" string.
     bool ParseVector2D(const TSharedPtr<FJsonValue>& Value, FVector2D& Out)
@@ -162,8 +209,10 @@ namespace
     }
 
     // FMargin — object{left,top,right,bottom} OR array[l,t,r,b] OR scalar (uniform).
-    bool ParseMargin(const TSharedPtr<FJsonValue>& Value, FMargin& Out)
+    // Also accepts any of those written as text, plus "l,t,r,b".
+    bool ParseMargin(const TSharedPtr<FJsonValue>& InValue, FMargin& Out)
     {
+        const TSharedPtr<FJsonValue> Value = CoerceStringToJson(InValue);
         if (!Value.IsValid()) return false;
 
         if (Value->Type == EJson::Number)
@@ -193,12 +242,28 @@ namespace
                 (float)ObjNum(Obj, TEXT("bottom"), 0.0));
             return true;
         }
+        // "l,t,r,b" (4 values) or "v" handled above via numeric coercion.
+        if (Value->Type == EJson::String)
+        {
+            TArray<FString> Parts;
+            Value->AsString().ParseIntoArray(Parts, TEXT(","));
+            if (Parts.Num() >= 4)
+            {
+                Out = FMargin(
+                    (float)FCString::Atod(*Parts[0].TrimStartAndEnd()),
+                    (float)FCString::Atod(*Parts[1].TrimStartAndEnd()),
+                    (float)FCString::Atod(*Parts[2].TrimStartAndEnd()),
+                    (float)FCString::Atod(*Parts[3].TrimStartAndEnd()));
+                return true;
+            }
+        }
         return false;
     }
 
-    // FVector4 — array[x,y,z,w] OR object{x,y,z,w}. FVector4 is LWC (double).
-    bool ParseVector4(const TSharedPtr<FJsonValue>& Value, FVector4& Out)
+    // FVector4 — array[x,y,z,w] OR object{x,y,z,w} OR "x,y,z,w". FVector4 is LWC (double).
+    bool ParseVector4(const TSharedPtr<FJsonValue>& InValue, FVector4& Out)
     {
+        const TSharedPtr<FJsonValue> Value = CoerceStringToJson(InValue);
         if (!Value.IsValid()) return false;
 
         if (Value->Type == EJson::Array)
@@ -221,6 +286,20 @@ namespace
                 ObjNum(Obj, TEXT("z"), 0.0),
                 ObjNum(Obj, TEXT("w"), 0.0));
             return true;
+        }
+        if (Value->Type == EJson::String)
+        {
+            TArray<FString> Parts;
+            Value->AsString().ParseIntoArray(Parts, TEXT(","));
+            if (Parts.Num() >= 4)
+            {
+                Out = FVector4(
+                    FCString::Atod(*Parts[0].TrimStartAndEnd()),
+                    FCString::Atod(*Parts[1].TrimStartAndEnd()),
+                    FCString::Atod(*Parts[2].TrimStartAndEnd()),
+                    FCString::Atod(*Parts[3].TrimStartAndEnd()));
+                return true;
+            }
         }
         return false;
     }
