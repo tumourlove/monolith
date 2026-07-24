@@ -2615,6 +2615,7 @@ void FMonolithNiagaraActions::RegisterActions(FMonolithToolRegistry& Registry)
 		FMonolithActionHandler::CreateStatic(&HandleGetModuleGraph),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("script_path"), TEXT("Module script asset path"))
+			.Optional(TEXT("links"), TEXT("boolean"), TEXT("Include per-pin pin_id and linked_to [{node_guid, pin_id, pin_name}] arrays for link topology (default false)"))
 			.Build());
 	Registry.RegisterAction(TEXT("niagara"), TEXT("get_custom_hlsl_text"), TEXT("Read the Custom HLSL source text from a Niagara script's CustomHlsl node"),
 		FMonolithActionHandler::CreateStatic(&HandleGetCustomHLSLText),
@@ -4248,6 +4249,10 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetModuleInputs(const TShar
 FMonolithActionResult FMonolithNiagaraActions::HandleGetModuleGraph(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ScriptPath = Params->GetStringField(TEXT("script_path"));
+	// Opt-in serialization of pin ids + LinkedTo arrays. Without this the graph is
+	// nodes/pins only (linked_count but no topology), forcing consumers that need
+	// branch tracing through a T3D-export workaround.
+	const bool bLinks = Params->HasField(TEXT("links")) && Params->GetBoolField(TEXT("links"));
 	UNiagaraScript* Script = LoadObject<UNiagaraScript>(nullptr, *ScriptPath);
 	if (!Script) return FMonolithActionResult::Error(TEXT("Failed to load script"));
 
@@ -4286,6 +4291,27 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetModuleGraph(const TShare
 			PO->SetStringField(TEXT("type"), Pin->PinType.PinCategory.ToString());
 			PO->SetStringField(TEXT("default_value"), Pin->DefaultValue);
 			PO->SetNumberField(TEXT("linked_count"), Pin->LinkedTo.Num());
+			// Pin identity + link targets. pin_id disambiguates same-named pins (PinId
+			// GUIDs can repeat across a graph from copy-paste history, so consumers
+			// should key edges by the (node_guid, pin_id) pair); each linked_to entry
+			// carries the remote node's guid, the remote pin's id, and its name so
+			// edges are walkable in both directions.
+			if (bLinks)
+			{
+				PO->SetStringField(TEXT("pin_id"), Pin->PinId.ToString());
+				TArray<TSharedPtr<FJsonValue>> LinksArr;
+				for (const UEdGraphPin* Linked : Pin->LinkedTo)
+				{
+					if (!Linked) continue;
+					TSharedRef<FJsonObject> LinkObj = MakeShared<FJsonObject>();
+					const UEdGraphNode* LinkedNode = Linked->GetOwningNodeUnchecked();
+					LinkObj->SetStringField(TEXT("node_guid"), LinkedNode ? LinkedNode->NodeGuid.ToString() : FString());
+					LinkObj->SetStringField(TEXT("pin_id"), Linked->PinId.ToString());
+					LinkObj->SetStringField(TEXT("pin_name"), Linked->PinName.ToString());
+					LinksArr.Add(MakeShared<FJsonValueObject>(LinkObj));
+				}
+				PO->SetArrayField(TEXT("linked_to"), LinksArr);
+			}
 			PinsArr.Add(MakeShared<FJsonValueObject>(PO));
 		}
 		NodeObj->SetArrayField(TEXT("pins"), PinsArr);
