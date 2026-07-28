@@ -1,5 +1,7 @@
 # Monolith
 
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2Ftumourlove%2Fmonolith.svg)](https://mcptoplist.com/server/glama%2Ftumourlove%2Fmonolith)
+
 **One plugin. Every Unreal domain. Zero dependencies.**
 
 [![UE 5.7 / 5.8](https://img.shields.io/badge/Unreal-5.7%20%2F%205.8-blue)](https://unrealengine.com)
