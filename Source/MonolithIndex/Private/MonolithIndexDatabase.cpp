@@ -521,6 +521,11 @@ bool FMonolithIndexDatabase::MarkFullIndexPostPassComplete(const FString& PassNa
 	return WriteMeta(TEXT("full_index_postpass.") + PassName, TEXT("complete"));
 }
 
+bool FMonolithIndexDatabase::DeleteFullIndexPostPassProgress(const FString& PassName)
+{
+	return DeleteMeta(TEXT("full_index_postpass.") + PassName);
+}
+
 bool FMonolithIndexDatabase::ClearFullIndexPostPassProgress()
 {
 	return ExecuteSQL(TEXT("DELETE FROM meta WHERE key LIKE 'full_index_postpass.%';"));
@@ -528,36 +533,57 @@ bool FMonolithIndexDatabase::ClearFullIndexPostPassProgress()
 
 bool FMonolithIndexDatabase::ClearFullIndexPostPassData(const FString& PassName)
 {
-	if (PassName == TEXT("dependencies"))
+	if (PassName == TEXT("DependencyIndexer"))
 	{
 		return ExecuteSQL(TEXT("DELETE FROM dependencies;"));
 	}
-	if (PassName == TEXT("levels"))
+	if (PassName == TEXT("LevelIndexer"))
 	{
 		return ExecuteSQL(TEXT("DELETE FROM actors;"));
 	}
-	if (PassName == TEXT("datatables"))
+	if (PassName == TEXT("DataTableIndexer"))
 	{
 		return ExecuteSQL(TEXT("DELETE FROM datatable_rows;"));
 	}
-	if (PassName == TEXT("configs"))
+	if (PassName == TEXT("ConfigIndexer"))
 	{
 		return ExecuteSQL(TEXT("DELETE FROM configs;"));
 	}
-	if (PassName == TEXT("cpp_symbols"))
+	if (PassName == TEXT("CppIndexer"))
 	{
 		return ExecuteSQL(TEXT("DELETE FROM cpp_symbols;"));
 	}
-	if (PassName == TEXT("gameplay_tags"))
+	if (PassName == TEXT("GameplayTagIndexer"))
 	{
 		return ExecuteSQL(TEXT("DELETE FROM tag_references;"))
 			&& ExecuteSQL(TEXT("DELETE FROM tags;"));
 	}
-	if (PassName == TEXT("niagara"))
+	if (PassName == TEXT("NiagaraIndexer"))
 	{
 		return ExecuteSQL(
 			TEXT("DELETE FROM nodes WHERE asset_id IN "
 				 "(SELECT id FROM assets WHERE asset_class = 'NiagaraSystem');"));
+	}
+	if (PassName == TEXT("GASIndexer"))
+	{
+		return ExecuteSQL(
+			TEXT("DELETE FROM nodes WHERE node_type IN "
+				 "('GameplayAbility', 'GameplayEffect', 'AttributeSet', 'GameplayCue');"));
+	}
+	if (PassName == TEXT("AI"))
+	{
+		return ExecuteSQL(
+			TEXT("DELETE FROM nodes WHERE node_type IN "
+				 "('BehaviorTree', 'BlackboardData', 'AIController');"));
+	}
+	if (PassName == TEXT("MetaSoundIndexer"))
+	{
+		return ExecuteSQL(
+			TEXT("DELETE FROM nodes WHERE asset_id IN "
+				 "(SELECT id FROM assets WHERE asset_class IN ('MetaSoundSource', 'MetaSoundPatch'));"))
+			&& ExecuteSQL(
+				TEXT("DELETE FROM variables WHERE asset_id IN "
+					 "(SELECT id FROM assets WHERE asset_class IN ('MetaSoundSource', 'MetaSoundPatch'));"));
 	}
 
 	// Animation replaces each asset's child data transactionally. Mesh catalog

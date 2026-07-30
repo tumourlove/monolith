@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **Interrupted full-project indexing now resumes instead of restarting from zero.** Schema v3 stores hash-scoped, per-indexer asset checkpoints plus post-pass checkpoints in SQLite. Asset data and its checkpoint commit atomically, animation indexing yields between compiler-idle asset ticks, failed work remains pending, and `last_full_index` is published only after every metadata, deep-index, and post-pass operation succeeds. Manual forced reindexing still clears all data and recovery state.
+- **Interrupted full-project indexing now resumes instead of restarting from zero.** Schema v3 stores hash-scoped, per-indexer asset checkpoints plus post-pass checkpoints in SQLite. Asset data and its checkpoint commit atomically, animation indexing yields between compiler-idle asset ticks, failed work remains pending, and `last_full_index` is published only after every metadata, deep-index, and enabled sentinel post-pass succeeds. Remaining registered sentinels are scheduled generically, so optional and cross-module families such as GAS, MetaSound, and AI participate without adding module coupling; a final fail-closed check prevents any sentinel from being silently skipped. Successful completion also no longer assumes a project has at least 500 assets. Manual forced reindexing still clears all data and recovery state.
 
 ## [0.21.3] - 2026-07-26
 

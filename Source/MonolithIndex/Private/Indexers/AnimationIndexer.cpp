@@ -15,11 +15,6 @@
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
 
-namespace
-{
-	const TCHAR* AnimationCheckpointName = TEXT("AnimationIndexer");
-}
-
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include <excpt.h>
@@ -155,7 +150,7 @@ bool FAnimationIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedA
 						SavedHash = LexToString(PackageData->GetPackageSavedHash());
 					}
 
-					if (DB.IsFullIndexAssetComplete(PackagePath, SavedHash, AnimationCheckpointName))
+					if (DB.IsFullIndexAssetComplete(PackagePath, SavedHash, GetName()))
 					{
 						TotalResumed++;
 						continue;
@@ -204,7 +199,7 @@ bool FAnimationIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedA
 						bSucceeded = DB.MarkFullIndexAssetComplete(
 							PackagePath,
 							SavedHash,
-							AnimationCheckpointName)
+							GetName())
 							&& DB.CommitTransaction();
 					}
 

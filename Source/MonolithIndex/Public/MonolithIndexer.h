@@ -26,10 +26,18 @@ public:
 	 */
 	virtual bool IndexAsset(const FAssetData& AssetData, UObject* LoadedAsset, FMonolithIndexDatabase& DB, int64 AssetId) = 0;
 
-	/** Human-readable name for logging */
+	/**
+	 * Stable, unique indexer name used for logging and durable full-index
+	 * checkpoints. Changing it invalidates interrupted-run progress.
+	 */
 	virtual FString GetName() const = 0;
 
-	/** Whether this is a sentinel indexer (does its own AR enumeration) */
+	/**
+	 * Whether this is a sentinel indexer (does its own enumeration). Sentinels
+	 * without specialized orchestration run through the generic compiler-idle
+	 * full-index path, so IndexAsset must report failure and rebuild derived
+	 * data idempotently.
+	 */
 	virtual bool IsSentinel() const { return false; }
 
 	/** Whether this sentinel supports scoped (incremental) indexing */

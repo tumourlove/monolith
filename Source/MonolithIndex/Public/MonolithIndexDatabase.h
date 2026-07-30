@@ -169,6 +169,7 @@ public:
 	bool DeleteFullIndexAssetProgress(const FString& PackagePath);
 	bool IsFullIndexPostPassComplete(const FString& PassName) const;
 	bool MarkFullIndexPostPassComplete(const FString& PassName);
+	bool DeleteFullIndexPostPassProgress(const FString& PassName);
 	bool ClearFullIndexPostPassProgress();
 	bool ClearFullIndexPostPassData(const FString& PassName);
 
@@ -217,7 +218,6 @@ public:
 	// --- Meta ---
 	bool WriteMeta(const FString& Key, const FString& Value);
 	FString ReadMeta(const FString& Key) const;
-	bool DeleteMeta(const FString& Key);
 
 	// --- Config CRUD ---
 	int64 InsertConfig(const FIndexedConfig& Config);
@@ -256,6 +256,7 @@ public:
 private:
 	bool CreateTables();
 	bool CreateRecoveryTables();
+	bool DeleteMeta(const FString& Key);
 	bool ExecuteSQL(const FString& SQL);
 	FSQLiteDatabase* Database = nullptr;
 	FString DbPath;
