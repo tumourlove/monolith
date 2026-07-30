@@ -15,12 +15,12 @@
 | Class | Responsibility |
 |-------|---------------|
 | `FMonolithIndexModule` | Registers 12 project actions (7 baseline + 1 v0.17.0 cross-module `audit_orphan_assets` + 3 test/profiling harness Wave 1 + 1 (2026-06-10) `export_asset_text`, Gap 11) |
-| `FMonolithIndexDatabase` | RAII SQLite wrapper. 13 tables + 2 FTS5 + 6 triggers + 1 meta. DELETE journal mode, 64MB cache. Schema v2: `saved_hash` column (Blake3 `FIoHash` hex), `schema_version` meta key |
-| `UMonolithIndexSubsystem` | UEditorSubsystem. 3-layer indexing (startup delta, live AR callbacks, full fallback). Hash-based startup catch-up. Live batched AR delegates on 2s timer. Deep asset indexing with game-thread batching. Batches every 100 assets. Progress notifications |
+| `FMonolithIndexDatabase` | RAII SQLite wrapper. 14 tables + 2 FTS5 + 6 triggers. DELETE journal mode, 64MB cache. Schema v3: `saved_hash` column (Blake3 `FIoHash` hex), resumable full-index checkpoints, `schema_version` meta key |
+| `UMonolithIndexSubsystem` | UEditorSubsystem. 3-layer indexing (startup delta, live AR callbacks, full fallback). Hash-based startup catch-up. Live batched AR delegates on 2s timer. Deep asset indexing with game-thread batching and restart-safe checkpoints. Batches every 100 assets. Progress notifications |
 | `IMonolithIndexer` | Pure virtual interface: GetSupportedClasses(), IndexAsset(), GetName(), IsSentinel(), SupportsIncrementalIndex(), IndexScoped() |
 | `FBlueprintIndexer` | Blueprint, WidgetBlueprint, AnimBlueprint — graphs, nodes, variables |
 | `FMaterialIndexer` | Material, MaterialInstanceConstant, MaterialFunction — expressions, params, connections |
-| `FAnimationIndexer` | AnimSequence, AnimMontage, BlendSpace, AnimBlueprint — tracks, notifies, slots, state machines |
+| `FAnimationIndexer` | AnimSequence, AnimMontage, BlendSpace, AnimBlueprint — tracks, notifies, slots, state machines. Full-index post-pass processes one asset per compiler-idle editor tick and checkpoints each asset transactionally |
 | `FNiagaraIndexer` | NiagaraSystem, NiagaraEmitter — emitters, modules, parameters, renderers |
 | `FDataTableIndexer` | DataTable — row names, struct type, column info |
 | `FLevelIndexer` | World/MapBuildData — actors, components, sublevel references. **Editor-world skip invariant (v0.14.1, PR #28):** `IndexAsset` skips WorldPartition `Uninitialize` + `TryUnloadPackage` when the asset being indexed is the world currently open in the editor (`GEditor->GetEditorWorldContext().World()`). Prevents the indexer from tearing down the live editor WP world mid-session (fixes #20/#27). **Landscape-world safe-teardown invariant (issue #67):** worlds loaded purely to enumerate placed actors are torn down + unloaded after enumeration. For a world carrying a `ULandscapeSubsystem`, the indexer first unregisters every landscape proxy's components (`AActor::UnregisterAllComponents`, world-wide) — nulling the grass-builder state so the subsystem's `Deinitialize` no longer dereferences a null render scene — then drives `UWorld::CleanupWorld`, which clears the world subsystem collection's `bInitialized` (no GC ensure) and tears the world down normally, with no residency cost. Non-landscape worlds use the existing WorldPartition-uninit + unload path. A bare `CleanupWorld` without the unregister-first step is unsafe (it deinitializes the landscape subsystem while a grass-builder still references the null render scene, crashing) — hence the ordering. Runtime-verified: a full reindex with level indexing enabled completes with zero ensures, zero crashes, and all landscape worlds torn down (no residency) on landscape-heavy projects. |
@@ -59,7 +59,7 @@
 
 ### Database Schema
 
-**13 Tables:** assets, nodes, connections, variables, parameters, dependencies, actors, tags, tag_references, configs, cpp_symbols, datatable_rows, meta
+**14 Tables:** assets, nodes, connections, variables, parameters, dependencies, actors, tags, tag_references, configs, cpp_symbols, datatable_rows, meta, full_index_progress
 
 **2 FTS5 Virtual Tables:**
 - `fts_assets` — content=assets, tokenize='porter unicode61', columns: asset_name, asset_class, description, package_path
@@ -93,7 +93,9 @@ Events are batched into a pending queue and drained on a 2-second timer tick. Th
 
 **Layer 3 — Forced Full Reindex (fallback)**
 
-`monolith_reindex()` defaults to incremental mode (Layer 1 logic). Passing `force=true` triggers a full wipe-and-rebuild: drops all table data, re-enumerates, and re-indexes every asset. Used when the DB is suspected corrupt or after schema migrations.
+`monolith_reindex()` defaults to incremental mode (Layer 1 logic). Passing `force=true` triggers a full wipe-and-rebuild: drops all table data and recovery state, re-enumerates, and re-indexes every asset. Used when the DB is suspected corrupt or after schema migrations.
+
+An automatic full index records `full_index_state=in_progress` before work begins. Each deep-indexed asset writes a checkpoint keyed by `(package_path, saved_hash, indexer_name)` in the same transaction as its child data. Project-wide post-passes use `full_index_postpass.<name>` meta checkpoints. If shutdown, cancellation, a crash, or any indexing failure interrupts the run, startup bypasses `bDeferFirstTimeIndex`, refreshes the metadata pass, removes deleted packages, and queues only missing or hash-invalidated work. Added, removed, or hash-changed packages invalidate completed asset-derived post-pass checkpoints so project-wide derived data cannot go stale. Config, C++ symbol, and gameplay-tag passes always rerun after a restart because their inputs are not fully represented by asset package hashes. `last_full_index` is written atomically with recovery-state cleanup only after all phases succeed. A manual forced full index intentionally discards these checkpoints.
 
 **Schema v2 Migration**
 
@@ -103,6 +105,14 @@ Schema v2 adds:
 - Index on `saved_hash` for fast lookup
 
 Migration is automatic: on startup, `PRAGMA table_info(assets)` checks for the `saved_hash` column. If missing, `ALTER TABLE assets ADD COLUMN saved_hash TEXT` runs followed by index creation.
+
+**Schema v3 Migration**
+
+Schema v3 adds:
+- `full_index_progress` table for hash-scoped, per-indexer asset checkpoints
+- `full_index_state` and `full_index_postpass.*` entries in the `meta` table
+
+The recovery table and index must be created successfully before the database advertises schema v3. Recovery schema failures abort database open rather than silently disabling resumability.
 
 **IMonolithIndexer Interface Additions**
 

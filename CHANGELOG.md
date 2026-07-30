@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Interrupted full-project indexing now resumes instead of restarting from zero.** Schema v3 stores hash-scoped, per-indexer asset checkpoints plus post-pass checkpoints in SQLite. Asset data and its checkpoint commit atomically, animation indexing yields between compiler-idle asset ticks, failed work remains pending, and `last_full_index` is published only after every metadata, deep-index, and post-pass operation succeeds. Manual forced reindexing still clears all data and recovery state.
+
 ## [0.21.3] - 2026-07-26
 
 This release closes out the open pull-request queue. Every fix below was reported or prototyped by a contributor — thanks to **@Thomasbehan**, **@whalemenace**, and **@kunkunGames** for the write-ups, which were detailed enough to reproduce from directly.

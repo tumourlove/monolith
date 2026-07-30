@@ -213,6 +213,23 @@ CREATE TABLE IF NOT EXISTS meta (
 
 )SQL");
 
+// Kept separate so each MSVC string literal remains below C2026's
+// 16,380-character limit.
+static const TCHAR* GCreateRecoveryTablesSQL = TEXT(R"SQL(
+
+-- Durable checkpoints for a full index interrupted by shutdown or a crash.
+CREATE TABLE IF NOT EXISTS full_index_progress (
+    package_path TEXT NOT NULL,
+    saved_hash TEXT DEFAULT '',
+    indexer_name TEXT NOT NULL,
+    processed_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (package_path, indexer_name)
+);
+CREATE INDEX IF NOT EXISTS idx_full_index_progress_hash
+    ON full_index_progress(package_path, saved_hash);
+
+)SQL");
+
 // ============================================================
 // Constructor / Destructor
 // ============================================================
@@ -266,6 +283,13 @@ bool FMonolithIndexDatabase::Open(const FString& InDbPath)
 		return false;
 	}
 
+	if (!CreateRecoveryTables())
+	{
+		UE_LOG(LogMonolithIndex, Error, TEXT("Failed to create full-index recovery tables"));
+		Close();
+		return false;
+	}
+
 	// Schema migration: v1 -> v2
 	{
 		FString SchemaVersion = ReadMeta(TEXT("schema_version"));
@@ -295,6 +319,16 @@ bool FMonolithIndexDatabase::Open(const FString& InDbPath)
 			}
 			WriteMeta(TEXT("schema_version"), TEXT("2"));
 		}
+	}
+
+	// Schema migration: v2 -> v3. The recovery table was created successfully
+	// above before this database advertises resumable full indexing.
+	if (FCString::Atoi(*ReadMeta(TEXT("schema_version"))) < 3
+		&& !WriteMeta(TEXT("schema_version"), TEXT("3")))
+	{
+		UE_LOG(LogMonolithIndex, Error, TEXT("Failed to record index schema version 3"));
+		Close();
+		return false;
 	}
 
 	// Ensure hash index exists (safe for both fresh and migrated DBs)
@@ -343,10 +377,192 @@ bool FMonolithIndexDatabase::ResetDatabase()
 	ExecuteSQL(TEXT("DROP TABLE IF EXISTS configs;"));
 	ExecuteSQL(TEXT("DROP TABLE IF EXISTS cpp_symbols;"));
 	ExecuteSQL(TEXT("DROP TABLE IF EXISTS datatable_rows;"));
+	ExecuteSQL(TEXT("DROP TABLE IF EXISTS full_index_progress;"));
 	ExecuteSQL(TEXT("DROP TABLE IF EXISTS meta;"));
 	ExecuteSQL(TEXT("DROP TABLE IF EXISTS assets;"));
 
-	return CreateTables();
+	if (!CreateTables() || !CreateRecoveryTables())
+	{
+		return false;
+	}
+
+	return WriteMeta(TEXT("schema_version"), TEXT("3"));
+}
+
+bool FMonolithIndexDatabase::IsFullIndexInProgress() const
+{
+	return ReadMeta(TEXT("full_index_state")) == TEXT("in_progress");
+}
+
+bool FMonolithIndexDatabase::BeginFullIndex()
+{
+	if (!IsOpen() || !BeginTransaction())
+	{
+		return false;
+	}
+
+	bool bSuccess = true;
+	bSuccess &= ExecuteSQL(TEXT("DELETE FROM full_index_progress;"));
+	bSuccess &= ExecuteSQL(TEXT("DELETE FROM meta WHERE key LIKE 'full_index_postpass.%';"));
+	bSuccess &= DeleteMeta(TEXT("last_full_index"));
+	bSuccess &= WriteMeta(TEXT("full_index_state"), TEXT("in_progress"));
+	bSuccess &= WriteMeta(TEXT("schema_version"), TEXT("3"));
+
+	if (bSuccess && CommitTransaction())
+	{
+		return true;
+	}
+
+	RollbackTransaction();
+	return false;
+}
+
+bool FMonolithIndexDatabase::CompleteFullIndex(const FString& CompletedAt)
+{
+	if (!IsOpen() || !BeginTransaction())
+	{
+		return false;
+	}
+
+	bool bSuccess = true;
+	bSuccess &= WriteMeta(TEXT("last_full_index"), CompletedAt);
+	bSuccess &= DeleteMeta(TEXT("full_index_state"));
+	bSuccess &= ExecuteSQL(TEXT("DELETE FROM full_index_progress;"));
+	bSuccess &= ExecuteSQL(TEXT("DELETE FROM meta WHERE key LIKE 'full_index_postpass.%';"));
+
+	if (bSuccess && CommitTransaction())
+	{
+		return true;
+	}
+
+	RollbackTransaction();
+	return false;
+}
+
+bool FMonolithIndexDatabase::IsFullIndexAssetComplete(
+	const FString& PackagePath,
+	const FString& SavedHash,
+	const FString& IndexerName) const
+{
+	if (!Database || !Database->IsValid())
+	{
+		return false;
+	}
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(
+			*Database,
+			TEXT("SELECT 1 FROM full_index_progress WHERE package_path = ? AND saved_hash = ? AND indexer_name = ?;"),
+			ESQLitePreparedStatementFlags::Persistent))
+	{
+		return false;
+	}
+
+	Stmt.SetBindingValueByIndex(1, PackagePath);
+	Stmt.SetBindingValueByIndex(2, SavedHash);
+	Stmt.SetBindingValueByIndex(3, IndexerName);
+	return Stmt.Step() == ESQLitePreparedStatementStepResult::Row;
+}
+
+bool FMonolithIndexDatabase::MarkFullIndexAssetComplete(
+	const FString& PackagePath,
+	const FString& SavedHash,
+	const FString& IndexerName)
+{
+	if (!IsOpen())
+	{
+		return false;
+	}
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(
+			*Database,
+			TEXT("INSERT OR REPLACE INTO full_index_progress "
+				 "(package_path, saved_hash, indexer_name, processed_at) "
+				 "VALUES (?, ?, ?, datetime('now'));"),
+			ESQLitePreparedStatementFlags::Persistent))
+	{
+		return false;
+	}
+
+	Stmt.SetBindingValueByIndex(1, PackagePath);
+	Stmt.SetBindingValueByIndex(2, SavedHash);
+	Stmt.SetBindingValueByIndex(3, IndexerName);
+	return Stmt.Execute();
+}
+
+bool FMonolithIndexDatabase::DeleteFullIndexAssetProgress(const FString& PackagePath)
+{
+	if (!IsOpen())
+	{
+		return false;
+	}
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(
+			*Database,
+			TEXT("DELETE FROM full_index_progress WHERE package_path = ?;"),
+			ESQLitePreparedStatementFlags::Persistent))
+	{
+		return false;
+	}
+
+	Stmt.SetBindingValueByIndex(1, PackagePath);
+	return Stmt.Execute();
+}
+
+bool FMonolithIndexDatabase::IsFullIndexPostPassComplete(const FString& PassName) const
+{
+	return ReadMeta(TEXT("full_index_postpass.") + PassName) == TEXT("complete");
+}
+
+bool FMonolithIndexDatabase::MarkFullIndexPostPassComplete(const FString& PassName)
+{
+	return WriteMeta(TEXT("full_index_postpass.") + PassName, TEXT("complete"));
+}
+
+bool FMonolithIndexDatabase::ClearFullIndexPostPassProgress()
+{
+	return ExecuteSQL(TEXT("DELETE FROM meta WHERE key LIKE 'full_index_postpass.%';"));
+}
+
+bool FMonolithIndexDatabase::ClearFullIndexPostPassData(const FString& PassName)
+{
+	if (PassName == TEXT("dependencies"))
+	{
+		return ExecuteSQL(TEXT("DELETE FROM dependencies;"));
+	}
+	if (PassName == TEXT("levels"))
+	{
+		return ExecuteSQL(TEXT("DELETE FROM actors;"));
+	}
+	if (PassName == TEXT("datatables"))
+	{
+		return ExecuteSQL(TEXT("DELETE FROM datatable_rows;"));
+	}
+	if (PassName == TEXT("configs"))
+	{
+		return ExecuteSQL(TEXT("DELETE FROM configs;"));
+	}
+	if (PassName == TEXT("cpp_symbols"))
+	{
+		return ExecuteSQL(TEXT("DELETE FROM cpp_symbols;"));
+	}
+	if (PassName == TEXT("gameplay_tags"))
+	{
+		return ExecuteSQL(TEXT("DELETE FROM tag_references;"))
+			&& ExecuteSQL(TEXT("DELETE FROM tags;"));
+	}
+	if (PassName == TEXT("niagara"))
+	{
+		return ExecuteSQL(
+			TEXT("DELETE FROM nodes WHERE asset_id IN "
+				 "(SELECT id FROM assets WHERE asset_class = 'NiagaraSystem');"));
+	}
+
+	// Animation replaces each asset's child data transactionally. Mesh catalog
+	// clears its own dynamically-created table before rebuilding it.
+	return true;
 }
 
 // ============================================================
@@ -837,6 +1053,20 @@ FString FMonolithIndexDatabase::ReadMeta(const FString& Key) const
 	return FString();
 }
 
+bool FMonolithIndexDatabase::DeleteMeta(const FString& Key)
+{
+	if (!IsOpen()) return false;
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(*Database, TEXT("DELETE FROM meta WHERE key = ?;"), ESQLitePreparedStatementFlags::Persistent))
+	{
+		return false;
+	}
+
+	Stmt.SetBindingValueByIndex(1, Key);
+	return Stmt.Execute();
+}
+
 // ============================================================
 // Incremental indexing helpers
 // ============================================================
@@ -943,17 +1173,9 @@ bool FMonolithIndexDatabase::UpdateAssetMetadata(const FIndexedAsset& Asset)
 	Stmt.SetBindingValueByIndex(7, Asset.SavedHash);
 	Stmt.SetBindingValueByIndex(8, Asset.PackagePath);
 
-	if (!Stmt.Execute()) return false;
-
-	FSQLitePreparedStatement ChangesStmt;
-	ChangesStmt.Create(*Database, TEXT("SELECT changes();"));
-	if (ChangesStmt.Step() == ESQLitePreparedStatementStepResult::Row)
-	{
-		int64 Changes = 0;
-		ChangesStmt.GetColumnValueByIndex(0, Changes);
-		return Changes > 0;
-	}
-	return false;
+	// Callers use this as an operation-success result. Whether SQLite considers
+	// identical values "changed" must not turn a valid resumed row into an error.
+	return Stmt.Execute();
 }
 
 // Deletes per-asset child data that deep indexing repopulates (nodes, variables, parameters, datatable_rows).
@@ -1393,6 +1615,35 @@ bool FMonolithIndexDatabase::CreateTables()
 	}
 
 	return true; // Return true even if FTS fails -- basic tables should work
+}
+
+bool FMonolithIndexDatabase::CreateRecoveryTables()
+{
+	if (!Database || !Database->IsValid())
+	{
+		return false;
+	}
+
+	FString FullSQL(GCreateRecoveryTablesSQL);
+	TArray<FString> Statements;
+	FullSQL.ParseIntoArray(Statements, TEXT(";"), true);
+
+	for (const FString& Statement : Statements)
+	{
+		const FString Trimmed = Statement.TrimStartAndEnd();
+		if (!Trimmed.IsEmpty() && !Database->Execute(*(Trimmed + TEXT(";"))))
+		{
+			UE_LOG(
+				LogMonolithIndex,
+				Error,
+				TEXT("Recovery schema statement failed: %s -- Error: %s"),
+				*Trimmed.Left(100),
+				*Database->GetLastError());
+			return false;
+		}
+	}
+
+	return true;
 }
 
 bool FMonolithIndexDatabase::ExecuteSQL(const FString& SQL)

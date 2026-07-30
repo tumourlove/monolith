@@ -1,4 +1,5 @@
 #include "Indexers/AnimationIndexer.h"
+#include "MonolithCompilerSafeDispatch.h"
 #include "MonolithSettings.h"
 #include "MonolithMemoryHelper.h"
 #include "Animation/AnimSequence.h"
@@ -9,8 +10,15 @@
 #include "Animation/AnimNotifies/AnimNotifyState.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
+#include "HAL/Event.h"
+#include "HAL/PlatformProcess.h"
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
+
+namespace
+{
+	const TCHAR* AnimationCheckpointName = TEXT("AnimationIndexer");
+}
 
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
@@ -39,6 +47,7 @@ struct FAnimIndexCallContext
 	FMonolithIndexDatabase* DB;
 	int64 AssetId;
 	FSoftObjectPath ObjectPath;  // Load happens inside SEH guard
+	UObject* LoadedAsset;        // Retained only long enough to request unloading
 	bool bSuccess;               // Set to true if load+index succeeded
 	enum EType { Sequence, Montage, BlendSp, Pose } Type;
 };
@@ -47,10 +56,12 @@ static void LoadAndIndexAnimAsset(void* Ctx)
 {
 	auto* C = static_cast<FAnimIndexCallContext*>(Ctx);
 	C->bSuccess = false;
+	C->LoadedAsset = nullptr;
 
 	// TryLoad inside SEH guard — this is where the crash was happening
 	UObject* Loaded = C->ObjectPath.TryLoad();
 	if (!Loaded) return;
+	C->LoadedAsset = Loaded;
 
 	switch (C->Type)
 	{
@@ -79,11 +90,14 @@ bool FAnimationIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedA
 
 	// Get settings for batching
 	const UMonolithSettings* Settings = GetDefault<UMonolithSettings>();
-	const int32 BatchSize = FMath::Max(1, FMonolithMemoryHelper::GetResolvedPostPassBatchSize());
+	constexpr int32 BatchSize = 1;
 	const SIZE_T MemoryBudgetMB = static_cast<SIZE_T>(FMonolithMemoryHelper::GetResolvedMemoryBudgetMB());
 	const bool bLogMemory = Settings->bLogMemoryStats;
 
 	int32 TotalIndexed = 0;
+	int32 TotalResumed = 0;
+	int32 TotalFailed = 0;
+	bool bAllSucceeded = true;
 
 	// Helper lambda: scan registry for type T, safely load and index each asset with batching and GC
 	auto IndexAllOfType = [&](UClass* Class, FAnimIndexCallContext::EType Type, const TCHAR* TypeName) -> int32
@@ -96,7 +110,16 @@ bool FAnimationIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedA
 		}
 		Filter.bRecursivePaths = true;
 		Filter.ClassPaths.Add(Class->GetClassPathName());
-		Registry.GetAssets(Filter, Assets);
+
+		FEvent* RegistryEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
+			[&Registry, &Filter, &Assets]()
+			{
+				Registry.GetAssets(Filter, Assets);
+			},
+			RegistryEvent);
+		RegistryEvent->Wait();
+		FPlatformProcess::ReturnSynchEventToPool(RegistryEvent);
 
 		if (Assets.Num() == 0) return 0;
 
@@ -107,52 +130,111 @@ bool FAnimationIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedA
 
 		for (int32 i = 0; i < Assets.Num(); i += BatchSize)
 		{
-			// Memory budget check before each batch
-			if (FMonolithMemoryHelper::ShouldThrottle(MemoryBudgetMB))
-			{
-				UE_LOG(LogMonolithIndex, Log, TEXT("AnimationIndexer: Memory budget exceeded, forcing GC..."));
-				FMonolithMemoryHelper::ForceGarbageCollection(true);
-				FMonolithMemoryHelper::YieldToEditor();
-			}
-
 			int32 BatchEnd = FMath::Min(i + BatchSize, Assets.Num());
+			FEvent* BatchEvent = FPlatformProcess::GetSynchEventFromPool(true);
 
-			// Process batch
-			for (int32 j = i; j < BatchEnd; ++j)
+			// Process one animation per compiler-idle editor tick. Each asset gets
+			// its own durable transaction, so a restart loses at most one asset.
+			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
+				[&, i, BatchEnd, Type]()
 			{
-				const FAssetData& AD = Assets[j];
+				if (FMonolithMemoryHelper::ShouldThrottle(MemoryBudgetMB))
+				{
+					UE_LOG(LogMonolithIndex, Log, TEXT("AnimationIndexer: Memory budget exceeded, forcing GC..."));
+					FMonolithMemoryHelper::ForceGarbageCollection(true);
+				}
 
-				int64 AId = DB.GetAssetId(AD.PackageName.ToString());
-				if (AId < 0) continue;
+				for (int32 j = i; j < BatchEnd; ++j)
+				{
+					const FAssetData& AD = Assets[j];
+					const FString PackagePath = AD.PackageName.ToString();
+					FString SavedHash;
+					if (TOptional<FAssetPackageData> PackageData = Registry.GetAssetPackageDataCopy(AD.PackageName);
+						PackageData.IsSet())
+					{
+						SavedHash = LexToString(PackageData->GetPackageSavedHash());
+					}
 
-				FAnimIndexCallContext Ctx;
-				Ctx.Self = this;
-				Ctx.DB = &DB;
-				Ctx.AssetId = AId;
-				Ctx.ObjectPath = AD.GetSoftObjectPath();
-				Ctx.bSuccess = false;
-				Ctx.Type = Type;
+					if (DB.IsFullIndexAssetComplete(PackagePath, SavedHash, AnimationCheckpointName))
+					{
+						TotalResumed++;
+						continue;
+					}
+
+					int64 AId = DB.GetAssetId(PackagePath);
+					if (AId < 0)
+					{
+						bAllSucceeded = false;
+						TotalFailed++;
+						continue;
+					}
+
+					FAnimIndexCallContext Ctx;
+					Ctx.Self = this;
+					Ctx.DB = &DB;
+					Ctx.AssetId = AId;
+					Ctx.ObjectPath = AD.GetSoftObjectPath();
+					Ctx.LoadedAsset = nullptr;
+					Ctx.bSuccess = false;
+					Ctx.Type = Type;
+					const bool bWasLoaded = AD.IsAssetLoaded();
+					const bool bTransactionStarted = DB.BeginTransaction();
+					bool bSucceeded = bTransactionStarted && DB.DeleteChildDataForAsset(AId);
 
 #if PLATFORM_WINDOWS
-				if (SafeCallWithSEH(&LoadAndIndexAnimAsset, &Ctx))
-				{
-					if (Ctx.bSuccess) Count++;
-				}
-				else
-				{
-					UE_LOG(LogMonolithIndex, Warning, TEXT("AnimationIndexer: crashed loading/indexing '%s' - skipping"), *AD.GetSoftObjectPath().ToString());
-				}
+					if (bSucceeded && SafeCallWithSEH(&LoadAndIndexAnimAsset, &Ctx))
+					{
+						bSucceeded = Ctx.bSuccess;
+					}
+					else if (bSucceeded)
+					{
+						UE_LOG(LogMonolithIndex, Warning, TEXT("AnimationIndexer: crashed loading/indexing '%s' - skipping"), *AD.GetSoftObjectPath().ToString());
+						bSucceeded = false;
+					}
 #else
-				LoadAndIndexAnimAsset(&Ctx);
-				if (Ctx.bSuccess) Count++;
+					if (bSucceeded)
+					{
+						LoadAndIndexAnimAsset(&Ctx);
+						bSucceeded = Ctx.bSuccess;
+					}
 #endif
-			}
+
+					if (bSucceeded)
+					{
+						bSucceeded = DB.MarkFullIndexAssetComplete(
+							PackagePath,
+							SavedHash,
+							AnimationCheckpointName)
+							&& DB.CommitTransaction();
+					}
+
+					if (!bSucceeded)
+					{
+						if (bTransactionStarted)
+						{
+							DB.RollbackTransaction();
+						}
+						bAllSucceeded = false;
+						TotalFailed++;
+					}
+					else
+					{
+						Count++;
+					}
+
+					if (Ctx.LoadedAsset)
+					{
+						FMonolithMemoryHelper::TryUnloadPackage(Ctx.LoadedAsset, bWasLoaded);
+					}
+				}
+
+				FMonolithMemoryHelper::ForceGarbageCollection(false);
+			},
+			BatchEvent);
+			BatchEvent->Wait();
+			FPlatformProcess::ReturnSynchEventToPool(BatchEvent);
 
 			BatchNumber++;
-
-			// GC after each batch
-			FMonolithMemoryHelper::ForceGarbageCollection(false);
-			FMonolithMemoryHelper::YieldToEditor();
 
 			// Log progress periodically
 			if (BatchNumber % 10 == 0 || BatchEnd == Assets.Num())
@@ -174,17 +256,20 @@ bool FAnimationIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedA
 	TotalIndexed += IndexAllOfType(UBlendSpace::StaticClass(), FAnimIndexCallContext::BlendSp, TEXT("BlendSpace"));
 	TotalIndexed += IndexAllOfType(UPoseAsset::StaticClass(), FAnimIndexCallContext::Pose, TEXT("PoseAsset"));
 
-	// Final GC
-	FMonolithMemoryHelper::ForceGarbageCollection(true);
-
-	UE_LOG(LogMonolithIndex, Log, TEXT("AnimationIndexer: indexed %d animation assets"), TotalIndexed);
+	UE_LOG(
+		LogMonolithIndex,
+		Log,
+		TEXT("AnimationIndexer: indexed %d, resumed %d, failed %d animation assets"),
+		TotalIndexed,
+		TotalResumed,
+		TotalFailed);
 
 	if (bLogMemory)
 	{
 		FMonolithMemoryHelper::LogMemoryStats(TEXT("AnimationIndexer complete"));
 	}
 
-	return true;
+	return bAllSucceeded;
 }
 
 void FAnimationIndexer::IndexAnimSequence(UAnimSequence* AnimSeq, FMonolithIndexDatabase& DB, int64 AssetId)

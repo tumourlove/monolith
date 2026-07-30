@@ -48,7 +48,7 @@ public:
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
 
-	/** Trigger a full re-index (wipes DB, re-scans everything) */
+	/** Trigger a forced full re-index (wipes DB, re-scans everything) */
 	UFUNCTION()
 	void StartFullIndex();
 
@@ -111,6 +111,8 @@ private:
 	void RegisterDefaultIndexers();
 	FString GetDatabasePath() const;
 	bool ShouldAutoIndex() const;
+	void StartFullIndexInternal(bool bForceReset);
+	void ResumeFullIndex();
 
 	/** Gather mount paths for enabled marketplace plugins */
 	TArray<FIndexedPluginInfo> GatherMarketplacePluginPaths() const;

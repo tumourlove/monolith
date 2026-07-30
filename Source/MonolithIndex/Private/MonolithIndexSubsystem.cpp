@@ -166,17 +166,22 @@ void UMonolithIndexSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		// First-time index can be deferred for very large projects — leaves the DB
 		// empty until 'Monolith.StartIndex' is run manually (escape hatch for the
 		// GC worker-context crash class on huge / high-core-count environments).
-		if (GetDefault<UMonolithSettings>()->bDeferFirstTimeIndex)
+		const bool bResumingInterruptedIndex = Database->IsFullIndexInProgress();
+		if (GetDefault<UMonolithSettings>()->bDeferFirstTimeIndex && !bResumingInterruptedIndex)
 		{
 			UE_LOG(LogMonolithIndex, Log, TEXT("MonolithIndex: first-time index deferred via bDeferFirstTimeIndex; run Monolith.StartIndex to begin"));
 			return;
 		}
 
-		UE_LOG(LogMonolithIndex, Log, TEXT("First launch — deferring full index until AR ready"));
+		UE_LOG(
+			LogMonolithIndex,
+			Log,
+			TEXT("%s — deferring full index until AR ready"),
+			bResumingInterruptedIndex ? TEXT("Interrupted index found") : TEXT("First launch"));
 		if (AR.IsLoadingAssets())
 			AR.OnFilesLoaded().AddUObject(this, &UMonolithIndexSubsystem::OnAssetRegistryFilesLoaded);
 		else
-			StartFullIndex();
+			ResumeFullIndex();
 	}
 	else if (CanDoIncrementalIndex())
 	{
@@ -192,7 +197,7 @@ void UMonolithIndexSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		if (AR.IsLoadingAssets())
 			AR.OnFilesLoaded().AddUObject(this, &UMonolithIndexSubsystem::OnAssetRegistryFilesLoaded);
 		else
-			StartFullIndex();
+			ResumeFullIndex();
 	}
 }
 
@@ -204,8 +209,8 @@ void UMonolithIndexSubsystem::OnAssetRegistryFilesLoaded()
 
 	if (ShouldAutoIndex())
 	{
-		UE_LOG(LogMonolithIndex, Log, TEXT("Asset Registry fully loaded -- starting full project index"));
-		StartFullIndex();
+		UE_LOG(LogMonolithIndex, Log, TEXT("Asset Registry fully loaded -- starting or resuming full project index"));
+		ResumeFullIndex();
 	}
 	else
 	{
@@ -318,9 +323,25 @@ void UMonolithIndexSubsystem::RegisterDefaultIndexers()
 
 void UMonolithIndexSubsystem::StartFullIndex()
 {
+	StartFullIndexInternal(true);
+}
+
+void UMonolithIndexSubsystem::ResumeFullIndex()
+{
+	StartFullIndexInternal(false);
+}
+
+void UMonolithIndexSubsystem::StartFullIndexInternal(bool bForceReset)
+{
 	if (bIsIndexing)
 	{
 		UE_LOG(LogMonolithIndex, Warning, TEXT("Indexing already in progress"));
+		return;
+	}
+
+	if (!Database.IsValid() || !Database->IsOpen())
+	{
+		UE_LOG(LogMonolithIndex, Error, TEXT("Cannot start full index: database is not open"));
 		return;
 	}
 
@@ -332,8 +353,23 @@ void UMonolithIndexSubsystem::StartFullIndex()
 	// defensively in Deinitialize() (editor shutdown mid-index). Game thread.
 	GIncrementalGCOverride = MakeUnique<FIncrementalReachabilityGCOverride>();
 
-	// Reset the database for a full re-index
-	Database->ResetDatabase();
+	const bool bCanResume = !bForceReset && Database->IsFullIndexInProgress();
+	if (!bCanResume)
+	{
+		if (!Database->ResetDatabase() || !Database->BeginFullIndex())
+		{
+			UE_LOG(LogMonolithIndex, Error, TEXT("Failed to initialize full-index recovery state"));
+			bIsIndexing = false;
+			GIncrementalGCOverride.Reset();
+			return;
+		}
+
+		UE_LOG(LogMonolithIndex, Log, TEXT("Starting a fresh full project index"));
+	}
+	else
+	{
+		UE_LOG(LogMonolithIndex, Log, TEXT("Resuming interrupted full project index from durable checkpoints"));
+	}
 
 	// Gather marketplace plugin paths for indexing
 	IndexedPlugins = GatherMarketplacePluginPaths();
@@ -524,11 +560,21 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		return 1;
 	}
 
-	DB->BeginTransaction();
+	if (!DB->BeginTransaction())
+	{
+		UE_LOG(LogMonolithIndex, Error, TEXT("Failed to begin full-index metadata transaction"));
+		AsyncTask(ENamedThreads::GameThread, [this]()
+		{
+			Owner->OnIndexingFinished(false);
+		});
+		return 1;
+	}
+	bool bMetadataTransactionOpen = true;
 
-	int32 BatchSize = 100;
+	const int32 BatchSize = 100;
 	int32 Indexed = 0;
 	int32 Errors = 0;
+	TAtomic<int32> DeepErrors{0};
 
 	// Collect assets that have deep indexers for a second pass
 	struct FDeepIndexEntry
@@ -536,11 +582,14 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		FAssetData AssetData;
 		int64 AssetId;
 		TSharedPtr<IMonolithIndexer> Indexer;
+		FString SavedHash;
 	};
 	TArray<FDeepIndexEntry> DeepIndexQueue;
 
 	TMap<FString, int32> ClassDistribution;
 	TMap<FString, int32> QueuedClassDistribution;
+	TSet<FString> CurrentPackagePaths;
+	bool bInvalidatePostPassCheckpoints = false;
 
 	IAssetRegistry* AssetRegistryPtr = IAssetRegistry::Get();
 
@@ -562,6 +611,7 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		IndexedAsset.PackagePath = AssetData.PackageName.ToString();
 		IndexedAsset.AssetName = AssetData.AssetName.ToString();
 		IndexedAsset.AssetClass = AssetData.AssetClassPath.GetAssetName().ToString();
+		CurrentPackagePaths.Add(IndexedAsset.PackagePath);
 		ClassDistribution.FindOrAdd(IndexedAsset.AssetClass)++;
 
 		// Determine module name from package path
@@ -608,7 +658,24 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			}
 		}
 
-		int64 AssetId = DB->InsertAsset(IndexedAsset);
+		int64 AssetId = -1;
+		TOptional<FIndexedAsset> ExistingAsset = DB->GetAssetByPath(IndexedAsset.PackagePath);
+		if (ExistingAsset.IsSet())
+		{
+			AssetId = ExistingAsset->Id;
+			bInvalidatePostPassCheckpoints |= ExistingAsset->SavedHash != IndexedAsset.SavedHash;
+			if (!DB->UpdateAssetMetadata(IndexedAsset))
+			{
+				Errors++;
+				continue;
+			}
+		}
+		else
+		{
+			AssetId = DB->InsertAsset(IndexedAsset);
+			bInvalidatePostPassCheckpoints = true;
+		}
+
 		if (AssetId < 0)
 		{
 			Errors++;
@@ -619,8 +686,12 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		TSharedPtr<IMonolithIndexer>* FoundIndexer = Owner->ClassToIndexer.Find(IndexedAsset.AssetClass);
 		if (FoundIndexer && FoundIndexer->IsValid())
 		{
-			DeepIndexQueue.Add({ AssetData, AssetId, *FoundIndexer });
-			QueuedClassDistribution.FindOrAdd(IndexedAsset.AssetClass)++;
+			const FString IndexerName = (*FoundIndexer)->GetName();
+			if (!DB->IsFullIndexAssetComplete(IndexedAsset.PackagePath, IndexedAsset.SavedHash, IndexerName))
+			{
+				DeepIndexQueue.Add({ AssetData, AssetId, *FoundIndexer, IndexedAsset.SavedHash });
+				QueuedClassDistribution.FindOrAdd(IndexedAsset.AssetClass)++;
+			}
 		}
 
 		Indexed++;
@@ -628,8 +699,23 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		// Commit in batches
 		if (Indexed % BatchSize == 0)
 		{
-			DB->CommitTransaction();
-			DB->BeginTransaction();
+			if (!DB->CommitTransaction())
+			{
+				DB->RollbackTransaction();
+				bMetadataTransactionOpen = false;
+				Errors++;
+				bShouldStop = true;
+				break;
+			}
+			bMetadataTransactionOpen = false;
+
+			if (!DB->BeginTransaction())
+			{
+				Errors++;
+				bShouldStop = true;
+				break;
+			}
+			bMetadataTransactionOpen = true;
 
 			UE_LOG(LogMonolithIndex, Log, TEXT("Indexed %d / %d assets (%d errors)"),
 				Indexed, TotalAssets.Load(), Errors);
@@ -647,6 +733,42 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		}
 	}
 
+	// Remove packages deleted while the editor was offline. This keeps a
+	// resumed metadata pass equivalent to a fresh scan.
+	if (!bShouldStop)
+	{
+		for (const FString& ExistingPath : DB->GetAllIndexedPaths())
+		{
+			if (!CurrentPackagePaths.Contains(ExistingPath))
+			{
+				if (!DB->DeleteAssetByPath(ExistingPath)
+					|| !DB->DeleteFullIndexAssetProgress(ExistingPath))
+				{
+					Errors++;
+				}
+				bInvalidatePostPassCheckpoints = true;
+			}
+		}
+	}
+
+	if (!bShouldStop
+		&& bInvalidatePostPassCheckpoints
+		&& !DB->ClearFullIndexPostPassProgress())
+	{
+		Errors++;
+	}
+
+	// These inputs are not represented by asset package hashes. Re-run them
+	// after every restart so a completed checkpoint cannot hide config/source
+	// changes made while the editor was closed.
+	if (!bShouldStop
+		&& (!DB->DeleteMeta(TEXT("full_index_postpass.configs"))
+			|| !DB->DeleteMeta(TEXT("full_index_postpass.cpp_symbols"))
+			|| !DB->DeleteMeta(TEXT("full_index_postpass.gameplay_tags"))))
+	{
+		Errors++;
+	}
+
 	// Log class distribution summary
 	UE_LOG(LogMonolithIndex, Log, TEXT("Asset class distribution (top 20):"));
 	ClassDistribution.ValueSort([](int32 A, int32 B) { return A > B; });
@@ -657,14 +779,19 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		UE_LOG(LogMonolithIndex, Log, TEXT("  %s: %d"), *Pair.Key, Pair.Value);
 	}
 
-	UE_LOG(LogMonolithIndex, Log, TEXT("Deep index queue: %d assets across %d classes"),
+	UE_LOG(LogMonolithIndex, Log, TEXT("Deep index queue: %d pending assets across %d classes"),
 		DeepIndexQueue.Num(), QueuedClassDistribution.Num());
 	for (const auto& Pair : QueuedClassDistribution)
 	{
 		UE_LOG(LogMonolithIndex, Log, TEXT("  Queued %s: %d"), *Pair.Key, Pair.Value);
 	}
 
-	DB->CommitTransaction();
+	if (bMetadataTransactionOpen && !DB->CommitTransaction())
+	{
+		DB->RollbackTransaction();
+		Errors++;
+		bShouldStop = true;
+	}
 
 	UE_LOG(LogMonolithIndex, Log, TEXT("Metadata pass complete: %d assets indexed, %d errors"), Indexed, Errors);
 
@@ -694,7 +821,6 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 
 		constexpr double FrameBudgetSeconds = 0.016; // ~16ms per batch to stay interactive
 		TAtomic<int32> DeepIndexed{0};
-		TAtomic<int32> DeepErrors{0};
 		int32 TotalDeep = DeepIndexQueue.Num();
 		int32 BatchNumber = 0;
 
@@ -770,7 +896,6 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
 				[DB, BatchSlice = MoveTemp(BatchSlice), &DeepIndexed, &DeepErrors, FrameBudgetSeconds]()
 			{
-				DB->BeginTransaction();
 				double BatchStartTime = FPlatformTime::Seconds();
 
 				for (const FDeepIndexEntry& Entry : BatchSlice)
@@ -781,9 +906,26 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 					// Capture residency BEFORE GetAsset() may load it (issue #81).
 					const bool bWasLoaded = Entry.AssetData.IsAssetLoaded();
 					UObject* LoadedAsset = Entry.AssetData.GetAsset();
+					bool bSucceeded = false;
 					if (LoadedAsset)
 					{
-						if (Entry.Indexer->IndexAsset(Entry.AssetData, LoadedAsset, *DB, Entry.AssetId))
+						const bool bTransactionStarted = DB->BeginTransaction();
+						if (bTransactionStarted)
+						{
+							bSucceeded = DB->DeleteChildDataForAsset(Entry.AssetId)
+								&& Entry.Indexer->IndexAsset(Entry.AssetData, LoadedAsset, *DB, Entry.AssetId)
+								&& DB->MarkFullIndexAssetComplete(
+									Entry.AssetData.PackageName.ToString(),
+									Entry.SavedHash,
+									Entry.Indexer->GetName())
+								&& DB->CommitTransaction();
+							if (!bSucceeded)
+							{
+								DB->RollbackTransaction();
+							}
+						}
+
+						if (bSucceeded)
 						{
 							DeepIndexed++;
 						}
@@ -806,18 +948,14 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 							*Entry.AssetData.AssetClassPath.GetAssetName().ToString());
 					}
 
-					// If we've exceeded our frame budget, commit what we have and yield
+					// If we've exceeded our frame budget, yield before the next asset.
 					double Elapsed = FPlatformTime::Seconds() - BatchStartTime;
 					if (Elapsed > FrameBudgetSeconds)
 					{
-						DB->CommitTransaction();
 						FMonolithMemoryHelper::YieldToEditor();
-						DB->BeginTransaction();
 						BatchStartTime = FPlatformTime::Seconds();
 					}
 				}
-
-				DB->CommitTransaction();
 			},
 			BatchEvent);
 
@@ -933,10 +1071,13 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		FPlatformProcess::ReturnSynchEventToPool(GCEvent);
 	};
 
-	// Helper to check for cancellation
-	auto CheckCancellation = [this]() -> bool
+	TAtomic<bool> bPostPassFailed{false};
+
+	// Helper to check for cancellation or an incomplete asset pass. Post-passes
+	// must not be checkpointed against incomplete base/deep data.
+	auto CheckCancellation = [this, &Errors, &DeepErrors, &bPostPassFailed]() -> bool
 	{
-		if (bShouldStop) return true;
+		if (bShouldStop || Errors > 0 || DeepErrors.Load() > 0 || bPostPassFailed.Load()) return true;
 		if (Owner->TaskNotification && Owner->TaskNotification->GetPromptAction() == EAsyncTaskNotificationPromptAction::Cancel)
 		{
 			bShouldStop = true;
@@ -945,10 +1086,33 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		return false;
 	};
 
+	auto RunPostPassTransaction = [DB, &bPostPassFailed](
+		const FString& PassName,
+		TFunctionRef<bool()> IndexWork) -> bool
+	{
+		if (!DB->BeginTransaction())
+		{
+			bPostPassFailed = true;
+			return false;
+		}
+
+		const bool bWorkSucceeded = DB->ClearFullIndexPostPassData(PassName)
+			&& IndexWork()
+			&& DB->MarkFullIndexPostPassComplete(PassName);
+		if (!bWorkSucceeded || !DB->CommitTransaction())
+		{
+			DB->RollbackTransaction();
+			bPostPassFailed = true;
+			return false;
+		}
+
+		return true;
+	};
+
 	UE_LOG(LogMonolithIndex, Log, TEXT("Starting post-pass indexers..."));
 
 	// Run dependency indexer on game thread (Asset Registry requires it)
-	if (!CheckCancellation())
+	if (!CheckCancellation() && !DB->IsFullIndexPostPassComplete(TEXT("dependencies")))
 	{
 		Owner->IndexingStatusMessage = TEXT("Analyzing dependencies...");
 		TSharedPtr<IMonolithIndexer>* DepIndexer = Owner->ClassToIndexer.Find(TEXT("__Dependencies__"));
@@ -963,12 +1127,13 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			}
 			FEvent* DepEvent = FPlatformProcess::GetSynchEventFromPool(true);
 			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
-				[DB, DepIndexerCopy]()
+				[DB, DepIndexerCopy, RunPostPassTransaction]()
 			{
-				DB->BeginTransaction();
-				FAssetData DummyData;
-				DepIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
-				DB->CommitTransaction();
+				RunPostPassTransaction(TEXT("dependencies"), [DB, DepIndexerCopy]()
+				{
+					FAssetData DummyData;
+					return DepIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
+				});
 			},
 			DepEvent);
 			DepEvent->Wait();
@@ -979,7 +1144,7 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 	}
 
 	// Run level indexer on game thread (asset loading requires it)
-	if (!CheckCancellation())
+	if (!CheckCancellation() && !DB->IsFullIndexPostPassComplete(TEXT("levels")))
 	{
 		Owner->IndexingStatusMessage = TEXT("Indexing level actors...");
 		TSharedPtr<IMonolithIndexer>* LevelIndexer = Owner->ClassToIndexer.Find(TEXT("__Levels__"));
@@ -994,12 +1159,13 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			}
 			FEvent* LevelEvent = FPlatformProcess::GetSynchEventFromPool(true);
 			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
-				[DB, LevelIndexerCopy]()
+				[DB, LevelIndexerCopy, RunPostPassTransaction]()
 			{
-				DB->BeginTransaction();
-				FAssetData DummyData;
-				LevelIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
-				DB->CommitTransaction();
+				RunPostPassTransaction(TEXT("levels"), [DB, LevelIndexerCopy]()
+				{
+					FAssetData DummyData;
+					return LevelIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
+				});
 			},
 			LevelEvent);
 			LevelEvent->Wait();
@@ -1010,7 +1176,7 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 	}
 
 	// Run DataTable indexer on game thread (requires asset loading)
-	if (!CheckCancellation())
+	if (!CheckCancellation() && !DB->IsFullIndexPostPassComplete(TEXT("datatables")))
 	{
 		Owner->IndexingStatusMessage = TEXT("Indexing DataTable rows...");
 		TSharedPtr<IMonolithIndexer>* DTIndexer = Owner->ClassToIndexer.Find(TEXT("__DataTables__"));
@@ -1021,12 +1187,13 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			TSharedPtr<IMonolithIndexer> DTIndexerCopy = *DTIndexer;
 			FEvent* DTEvent = FPlatformProcess::GetSynchEventFromPool(true);
 			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
-				[DB, DTIndexerCopy]()
+				[DB, DTIndexerCopy, RunPostPassTransaction]()
 			{
-				DB->BeginTransaction();
-				FAssetData DummyData;
-				DTIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
-				DB->CommitTransaction();
+				RunPostPassTransaction(TEXT("datatables"), [DB, DTIndexerCopy]()
+				{
+					FAssetData DummyData;
+					return DTIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
+				});
 			},
 			DTEvent);
 			DTEvent->Wait();
@@ -1037,7 +1204,7 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 	}
 
 	// Run config indexer (file I/O only, no game thread needed)
-	if (!CheckCancellation())
+	if (!CheckCancellation() && !DB->IsFullIndexPostPassComplete(TEXT("configs")))
 	{
 		Owner->IndexingStatusMessage = TEXT("Indexing config files...");
 		TSharedPtr<IMonolithIndexer>* CfgIndexer = Owner->ClassToIndexer.Find(TEXT("__Configs__"));
@@ -1045,16 +1212,18 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		{
 			double SentinelStart = FPlatformTime::Seconds();
 			UE_LOG(LogMonolithIndex, Log, TEXT("Running config indexer..."));
-			DB->BeginTransaction();
-			FAssetData DummyCfgData;
-			(*CfgIndexer)->IndexAsset(DummyCfgData, nullptr, *DB, 0);
-			DB->CommitTransaction();
+			TSharedPtr<IMonolithIndexer> CfgIndexerCopy = *CfgIndexer;
+			RunPostPassTransaction(TEXT("configs"), [DB, CfgIndexerCopy]()
+			{
+				FAssetData DummyCfgData;
+				return CfgIndexerCopy->IndexAsset(DummyCfgData, nullptr, *DB, 0);
+			});
 			UE_LOG(LogMonolithIndex, Log, TEXT("Config indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
 		}
 	}
 
 	// Run C++ symbol indexer (file I/O only, no game thread needed)
-	if (!CheckCancellation())
+	if (!CheckCancellation() && !DB->IsFullIndexPostPassComplete(TEXT("cpp_symbols")))
 	{
 		Owner->IndexingStatusMessage = TEXT("Indexing C++ symbols...");
 		TSharedPtr<IMonolithIndexer>* CppIndexer = Owner->ClassToIndexer.Find(TEXT("__CppSymbols__"));
@@ -1062,16 +1231,18 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		{
 			double SentinelStart = FPlatformTime::Seconds();
 			UE_LOG(LogMonolithIndex, Log, TEXT("Running C++ symbol indexer..."));
-			DB->BeginTransaction();
-			FAssetData DummyCppData;
-			(*CppIndexer)->IndexAsset(DummyCppData, nullptr, *DB, 0);
-			DB->CommitTransaction();
+			TSharedPtr<IMonolithIndexer> CppIndexerCopy = *CppIndexer;
+			RunPostPassTransaction(TEXT("cpp_symbols"), [DB, CppIndexerCopy]()
+			{
+				FAssetData DummyCppData;
+				return CppIndexerCopy->IndexAsset(DummyCppData, nullptr, *DB, 0);
+			});
 			UE_LOG(LogMonolithIndex, Log, TEXT("C++ symbol indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
 		}
 	}
 
 	// Run animation indexer on game thread (asset loading requires it)
-	if (!CheckCancellation())
+	if (!CheckCancellation() && !DB->IsFullIndexPostPassComplete(TEXT("animations")))
 	{
 		Owner->IndexingStatusMessage = TEXT("Indexing animations...");
 		TSharedPtr<IMonolithIndexer>* AnimIndexer = Owner->ClassToIndexer.Find(TEXT("__Animations__"));
@@ -1080,25 +1251,23 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			double SentinelStart = FPlatformTime::Seconds();
 			UE_LOG(LogMonolithIndex, Log, TEXT("Running animation indexer..."));
 			TSharedPtr<IMonolithIndexer> AnimIndexerCopy = *AnimIndexer;
-			FEvent* AnimEvent = FPlatformProcess::GetSynchEventFromPool(true);
-			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
-				[DB, AnimIndexerCopy]()
+			FAssetData DummyData;
+			const bool bAnimationSucceeded = AnimIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
+			if (bAnimationSucceeded)
 			{
-				DB->BeginTransaction();
-				FAssetData DummyData;
-				AnimIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
-				DB->CommitTransaction();
-			},
-			AnimEvent);
-			AnimEvent->Wait();
-			FPlatformProcess::ReturnSynchEventToPool(AnimEvent);
+				RunPostPassTransaction(TEXT("animations"), []() { return true; });
+			}
+			else
+			{
+				bPostPassFailed = true;
+			}
 			UE_LOG(LogMonolithIndex, Log, TEXT("Animation indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
 			GCBetweenIndexers();
 		}
 	}
 
 	// Run gameplay tag indexer on game thread (GameplayTagsManager requires it)
-	if (!CheckCancellation())
+	if (!CheckCancellation() && !DB->IsFullIndexPostPassComplete(TEXT("gameplay_tags")))
 	{
 		Owner->IndexingStatusMessage = TEXT("Indexing gameplay tags...");
 		TSharedPtr<IMonolithIndexer>* TagIndexer = Owner->ClassToIndexer.Find(TEXT("__GameplayTags__"));
@@ -1109,12 +1278,13 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			TSharedPtr<IMonolithIndexer> TagIndexerCopy = *TagIndexer;
 			FEvent* TagEvent = FPlatformProcess::GetSynchEventFromPool(true);
 			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
-				[DB, TagIndexerCopy]()
+				[DB, TagIndexerCopy, RunPostPassTransaction]()
 			{
-				DB->BeginTransaction();
-				FAssetData DummyData;
-				TagIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
-				DB->CommitTransaction();
+				RunPostPassTransaction(TEXT("gameplay_tags"), [DB, TagIndexerCopy]()
+				{
+					FAssetData DummyData;
+					return TagIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
+				});
 			},
 			TagEvent);
 			TagEvent->Wait();
@@ -1125,7 +1295,7 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 	}
 
 	// Run Niagara indexer on game thread (requires asset loading)
-	if (!CheckCancellation())
+	if (!CheckCancellation() && !DB->IsFullIndexPostPassComplete(TEXT("niagara")))
 	{
 		Owner->IndexingStatusMessage = TEXT("Indexing Niagara systems...");
 		TSharedPtr<IMonolithIndexer>* NiagaraIndexerPtr = Owner->ClassToIndexer.Find(TEXT("__Niagara__"));
@@ -1136,12 +1306,13 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			TSharedPtr<IMonolithIndexer> NiagaraIndexerCopy = *NiagaraIndexerPtr;
 			FEvent* NiagaraEvent = FPlatformProcess::GetSynchEventFromPool(true);
 			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
-				[DB, NiagaraIndexerCopy]()
+				[DB, NiagaraIndexerCopy, RunPostPassTransaction]()
 			{
-				DB->BeginTransaction();
-				FAssetData DummyData;
-				NiagaraIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
-				DB->CommitTransaction();
+				RunPostPassTransaction(TEXT("niagara"), [DB, NiagaraIndexerCopy]()
+				{
+					FAssetData DummyData;
+					return NiagaraIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
+				});
 			},
 			NiagaraEvent);
 			NiagaraEvent->Wait();
@@ -1152,7 +1323,7 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 	}
 
 	// Run mesh catalog indexer on game thread (requires asset loading)
-	if (!CheckCancellation())
+	if (!CheckCancellation() && !DB->IsFullIndexPostPassComplete(TEXT("mesh_catalog")))
 	{
 		Owner->IndexingStatusMessage = TEXT("Building mesh catalog...");
 		TSharedPtr<IMonolithIndexer>* MeshCatIndexer = Owner->ClassToIndexer.Find(TEXT("__MeshCatalog__"));
@@ -1167,12 +1338,13 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			}
 			FEvent* MeshCatEvent = FPlatformProcess::GetSynchEventFromPool(true);
 			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
-				[DB, MeshCatIndexerCopy]()
+				[DB, MeshCatIndexerCopy, RunPostPassTransaction]()
 			{
-				DB->BeginTransaction();
-				FAssetData DummyData;
-				MeshCatIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
-				DB->CommitTransaction();
+				RunPostPassTransaction(TEXT("mesh_catalog"), [DB, MeshCatIndexerCopy]()
+				{
+					FAssetData DummyData;
+					return MeshCatIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
+				});
 			},
 			MeshCatEvent);
 			MeshCatEvent->Wait();
@@ -1184,8 +1356,15 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 
 	UE_LOG(LogMonolithIndex, Log, TEXT("Post-pass indexers complete"));
 
-	// Write index timestamp to meta (only if not cancelled and asset count looks valid)
-	if (!bShouldStop)
+	bool bIndexCompleted = false;
+	const bool bAllIndexingWorkSucceeded = !bShouldStop
+		&& Errors == 0
+		&& DeepErrors.Load() == 0
+		&& !bPostPassFailed.Load();
+
+	// Atomically publish the completed index and clear recovery checkpoints only
+	// when every metadata, deep-index, and post-pass operation succeeded.
+	if (bAllIndexingWorkSucceeded)
 	{
 		constexpr int32 MinAssetCountThreshold = 500;
 		if (Indexed < MinAssetCountThreshold)
@@ -1194,9 +1373,26 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		}
 		else
 		{
-			DB->WriteMeta(TEXT("last_full_index"), FDateTime::UtcNow().ToString());
-			UE_LOG(LogMonolithIndex, Log, TEXT("Wrote last_full_index timestamp (%d assets indexed)"), Indexed);
+			bIndexCompleted = DB->CompleteFullIndex(FDateTime::UtcNow().ToString());
+			if (bIndexCompleted)
+			{
+				UE_LOG(LogMonolithIndex, Log, TEXT("Published completed full index and cleared recovery checkpoints (%d assets indexed)"), Indexed);
+			}
+			else
+			{
+				UE_LOG(LogMonolithIndex, Error, TEXT("Failed to publish completed full index; recovery state was retained"));
+			}
 		}
+	}
+	else
+	{
+		UE_LOG(
+			LogMonolithIndex,
+			Error,
+			TEXT("Full index incomplete (metadata errors: %d, deep errors: %d, post-pass failed: %s); recovery state was retained"),
+			Errors,
+			DeepErrors.Load(),
+			bPostPassFailed.Load() ? TEXT("true") : TEXT("false"));
 	}
 
 	if (bLogMemory)
@@ -1204,9 +1400,9 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		FMonolithMemoryHelper::LogMemoryStats(TEXT("Full index complete"));
 	}
 
-	AsyncTask(ENamedThreads::GameThread, [this]()
+	AsyncTask(ENamedThreads::GameThread, [this, bIndexCompleted]()
 	{
-		Owner->OnIndexingFinished(!bShouldStop);
+		Owner->OnIndexingFinished(bIndexCompleted);
 	});
 
 	return 0;

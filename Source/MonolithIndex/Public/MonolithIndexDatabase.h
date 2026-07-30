@@ -160,6 +160,18 @@ public:
 	/** Wipe all data and recreate tables (for full re-index) */
 	bool ResetDatabase();
 
+	// --- Resumable full-index state ---
+	bool IsFullIndexInProgress() const;
+	bool BeginFullIndex();
+	bool CompleteFullIndex(const FString& CompletedAt);
+	bool IsFullIndexAssetComplete(const FString& PackagePath, const FString& SavedHash, const FString& IndexerName) const;
+	bool MarkFullIndexAssetComplete(const FString& PackagePath, const FString& SavedHash, const FString& IndexerName);
+	bool DeleteFullIndexAssetProgress(const FString& PackagePath);
+	bool IsFullIndexPostPassComplete(const FString& PassName) const;
+	bool MarkFullIndexPostPassComplete(const FString& PassName);
+	bool ClearFullIndexPostPassProgress();
+	bool ClearFullIndexPostPassData(const FString& PassName);
+
 	/** Direct access to the underlying SQLite database */
 	FSQLiteDatabase* GetRawDatabase() const { return Database; }
 
@@ -205,6 +217,7 @@ public:
 	// --- Meta ---
 	bool WriteMeta(const FString& Key, const FString& Value);
 	FString ReadMeta(const FString& Key) const;
+	bool DeleteMeta(const FString& Key);
 
 	// --- Config CRUD ---
 	int64 InsertConfig(const FIndexedConfig& Config);
@@ -242,6 +255,7 @@ public:
 
 private:
 	bool CreateTables();
+	bool CreateRecoveryTables();
 	bool ExecuteSQL(const FString& SQL);
 	FSQLiteDatabase* Database = nullptr;
 	FString DbPath;
