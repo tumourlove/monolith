@@ -2,7 +2,7 @@
 
 **Parent:** [SPEC_CORE.md](../SPEC_CORE.md)
 **Engine:** Unreal Engine 5.7+
-**Version:** 0.21.2 (Beta) — architecture expansion Phase A–L landed 2026-04-26 (plan: [`Docs/plans/2026-04-25-monolith-ui-architecture-expansion.md`](../../../../Docs/plans/2026-04-25-monolith-ui-architecture-expansion.md)); optional EffectSurface provider decouple (Wave 1/2 + Final.1) landed 2026-04-27.
+**Version:** 0.21.3 (Beta) — architecture expansion Phase A–L landed 2026-04-26 (plan: [`Docs/plans/2026-04-25-monolith-ui-architecture-expansion.md`](../../../../Docs/plans/2026-04-25-monolith-ui-architecture-expansion.md)); optional EffectSurface provider decouple (Wave 1/2 + Final.1) landed 2026-04-27.
 
 ---
 

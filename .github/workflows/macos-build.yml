@@ -57,10 +57,26 @@
 
 name: macOS Build
 
+# TRIGGER DISABLED (2026-07-26).
+#
+# This workflow is dormant: it requires a self-hosted runner labelled
+# [self-hosted, macOS, monolith] that is not currently registered, so every
+# tag push has been failing at the "Verify project shell exists" step.
+#
+# The tag-push trigger is also unsafe now that releases are published as a
+# draft first and only flipped live once every asset is uploaded and the
+# release body has been verified. This job attaches an asset to an
+# already-published release, which would re-open the partial-asset window
+# that draft-publishing exists to close: GET /releases/latest returns the
+# most recent non-draft release, so a client polling between publish and
+# this job's upload would see a release whose asset set is incomplete.
+#
+# To re-enable, register the runner and switch the trigger to
+# `on: release: { types: [published] }` -- NOT `push: tags` -- and add the
+# macOS asset to the expected-asset set in the release-body gate.
+#
+# Left workflow_dispatch-only so the build can still be exercised manually.
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 jobs:

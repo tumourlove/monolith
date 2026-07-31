@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.21.3] - 2026-07-26
+
+This release closes out the open pull-request queue. Every fix below was reported or prototyped by a contributor — thanks to **@Thomasbehan**, **@whalemenace**, and **@kunkunGames** for the write-ups, which were detailed enough to reproduce from directly.
+
+### Added
+
+- **`niagara get_module_graph` can emit link topology.** Pass `links: true` and the response gains a top-level `edges` array plus a `pin_id` on every pin, so you can trace branches through static switches or find dead ones without exporting the asset to T3D and parsing `LinkedTo` yourself. Output is unchanged when the flag is absent. Edges are keyed by the `(node_guid, pin_id)` pair, because pin IDs alone are not unique within a graph — copy-paste duplicates them. Thanks **@whalemenace** (#109).
+
+### Fixed
+
+- **`ui set_widget_property` can now set Margin and Vector4 properties.** The `value` parameter was declared as a string, so every documented shape for these types — `[22,14,22,14]`, `{"left":26,...}`, or a bare `20` for a uniform margin — arrived as text and was rejected, while the error message listed those exact shapes as valid. `value` is now typed `any`, and both parsers additionally accept string-encoded and comma-separated forms, since proxies still serialise nested parameters to text. Thanks **@Thomasbehan** (#110).
+- **Malformed destination paths are rejected before anything is created.** Seventeen asset-creation actions across `blueprint`, `material`, and `niagara` now validate the destination package path up front, instead of passing input such as `//Game/Foo` down to low-level package APIs. Nothing is created, loaded, or left dirty on a rejected call. In the compound PBR workflow, an invalid material option or an existing-material collision now fails *before* the first texture is imported rather than after. Thanks **@kunkunGames** (#106, #107, #108).
+- **Material creation no longer risks overwriting an unindexed asset.** The destination collision probe is an Asset Registry query, which does not see a `.uasset` that is on disk but not yet indexed — during a startup scan, or copied in out of band. Material creation now forces the package load that makes that check authoritative, so existing content is merged rather than clobbered.
+- **A spurious error log on every successful asset creation is gone.** Destination probes previously attempted a load that was expected to fail, emitting `LogEditorAssetSubsystem: Error` on the normal path.
+
+### Changed
+
+Three user-visible behaviour changes, all in the direction of failing loudly instead of quietly producing something broken:
+
+- **Destination paths containing characters Unreal forbids in a package name are now errors.** That set is `\ : * ? " < > | ' <space> , . & ! ~ @ #`. Previously such input passed a much weaker check and produced a mangled asset. If a path you rely on is rejected and you believe it is legitimate, please open an issue rather than working around it.
+- **Object-path destinations are accepted and normalised.** Because the forbidden set includes `.`, the stricter validation above would otherwise have rejected `/Game/Foo/M_Bar.M_Bar` — which is exactly what you get when you copy a path out of a search result. The redundant suffix is now stripped when it unambiguously names the same asset. A mismatched leaf, a dot inside a folder segment, or more than one dot is still rejected.
+- **`blueprint seed_data_asset` with `dry_run: true` now reports a malformed path as an error** rather than returning a dry-run report, since validation runs before the dry-run branch.
+
+### Internal
+
+- Line endings are normalised through `.gitattributes`, so contributions no longer arrive as whole-file CRLF rewrites that bury a small change in a full-file diff.
+- Releases are published as a draft and only flipped live once a new gate confirms all three assets are uploaded and every SHA256 marker matches a fresh hash of the artifact. This closes a window in which the auto-updater could see a release whose assets had not finished uploading.
+- `CONTRIBUTING.md` now states that UE 5.7 is the compile floor and that changes must build on both 5.7 and 5.8, and a pull-request template checks for it.
+
 ## [0.21.2] - 2026-07-22
 
 ### Fixed

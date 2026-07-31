@@ -12,7 +12,7 @@
 
 Most MCP integrations for Unreal register every action as a separate tool. That floods the AI's context window with hundreds of tool names before you've asked a single question — and the actually useful stuff gets buried. I built Monolith because I wanted my AI to spend its context on my problem, not on memorising a tool catalogue.
 
-One plugin. One MCP endpoint. A handful of namespace-dispatch tools instead of ~1,400+. The AI calls `monolith_discover()` and `monolith_guide()` when it needs to know what's available, and otherwise just hits `blueprint_query("create_asset", ...)`, `material_query("compile", ...)`, and so on. `monolith_discover()` is terse by default — each action returns just a name and a one-line description, so listing a namespace costs almost nothing; the full param schema is one `describe_query("action_schema", ...)` call (or `detail=true`) away when the AI actually needs it.
+One plugin. One MCP endpoint. A handful of namespace-dispatch tools instead of ~1,400+. The AI calls `monolith_discover()` and `monolith_guide()` when it needs to know what's available, and otherwise just hits `blueprint_query("create_blueprint", ...)`, `material_query("compile", ...)`, and so on. `monolith_discover()` is terse by default — each action returns just a name and a one-line description, so listing a namespace costs almost nothing; the full param schema is one `describe_query("action_schema", ...)` call (or `detail=true`) away when the AI actually needs it.
 
 I use it every day. It does what I need.
 

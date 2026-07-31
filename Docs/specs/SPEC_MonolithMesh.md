@@ -2,7 +2,7 @@
 
 **Parent:** [SPEC_CORE.md](../SPEC_CORE.md)
 **Engine:** Unreal Engine 5.7+
-**Version:** 0.21.2 (Beta)
+**Version:** 0.21.3 (Beta)
 
 > **Action-count audit (2026-04-26):** source-of-truth count is **195 core + 45 experimental town gen = 240**, not the previously claimed 197 + 45 = 242. The detailed per-action tables below predate the audit and may sum to slightly different numbers per category — they are accurate per-row but the category subtotals have drifted. A full per-action sweep against `Source/MonolithMesh/Private/Monolith*Actions.cpp` is on the audit backlog.
 

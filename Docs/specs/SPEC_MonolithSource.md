@@ -2,7 +2,7 @@
 
 **Parent:** [SPEC_CORE.md](../SPEC_CORE.md)
 **Engine:** Unreal Engine 5.7+
-**Version:** 0.21.2 (Beta)
+**Version:** 0.21.3 (Beta)
 
 ---
 

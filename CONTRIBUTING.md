@@ -6,7 +6,7 @@ Thanks for your interest in contributing. This guide covers everything you need 
 
 ### Prerequisites
 
-- **Unreal Engine 5.7+** (source or launcher build)
+- **Unreal Engine 5.7** (source or launcher build) is the compile floor. Contributions must build on **both UE 5.7 and UE 5.8** -- both are shipped and supported. Any engine API newer than 5.7 must sit behind an `ENGINE_MINOR_VERSION` gate, e.g. `#if ENGINE_MINOR_VERSION >= 8`, with a 5.7 code path alongside it. A change that only compiles on 5.8 will be sent back.
 - **Windows, macOS, or Linux** — see [README Installation](README.md#installation) for per-platform proxy setup
 - **Python 3.10+** (only needed for engine source indexing and for the cross-platform MCP proxy on macOS/Linux)
 - **Git**
@@ -22,7 +22,7 @@ git clone https://github.com/tumourlove/monolith.git Monolith
 git clone https://github.com/tumourlove/monolith.git C:\Projects\Monolith
 ```
 
-Generate project files and build from your UE project as usual. Monolith is an editor-only plugin — all 13 modules have `Type: "Editor"`.
+Generate project files and build from your UE project as usual. Monolith is an editor-facing plugin: every module is `Type: "Editor"` except the small `MonolithAudioRuntime` helper, which is `Type: "Runtime"`.
 
 ### Development Workflow
 
@@ -36,23 +36,32 @@ YourProject/Plugins/Monolith/   — edit, build, commit, push from here
 
 ## Code Structure
 
-Monolith has 13 modules, each owning a specific domain:
+Monolith ships **~1,400+ actions across 25+ namespaces** (an approximate, rounded-down figure -- run `monolith_discover()` for the live count; per-module counts are deliberately not listed here because they go stale the moment an action is added).
 
-| Module | Namespace | Actions | What It Does |
-|--------|-----------|---------|--------------|
-| **MonolithCore** | `monolith` | 4 | HTTP server, tool registry, discovery, settings, auto-updater |
-| **MonolithBlueprint** | `blueprint` | 86 | Blueprint read/write, variable/component/graph CRUD, node operations, compile, auto-layout |
-| **MonolithMaterial** | `material` | 57 | Material graph editing, inspection, CRUD, instances, functions, HLSL |
-| **MonolithAnimation** | `animation` | 115 | Sequences, montages, ABPs, curves, notifies, skeletons, PoseSearch, IKRig, Control Rig |
-| **MonolithNiagara** | `niagara` | 96 | Particle systems, emitters, modules, renderers, HLSL, dynamic inputs, event handlers, sim stages |
-| **MonolithMesh** | `mesh` | 242 | Mesh inspection, scene manipulation, spatial queries, blockout, procedural geometry, lighting, audio, town gen (197 core + 45 experimental) |
-| **MonolithEditor** | `editor` | 19 | Build triggers, live compile, log capture, crash context, scene capture, texture import |
-| **MonolithConfig** | `config` | 6 | INI resolution, explain, diff, search |
-| **MonolithIndex** | `project` | 7 | SQLite FTS5 deep project indexer |
-| **MonolithSource** | `source` | 11 | Engine source lookup, call graphs, class hierarchy |
-| **MonolithUI** | `ui` | 42 | Widget Blueprint CRUD, templates, styling, animation, settings scaffolding, accessibility |
-| **MonolithGAS** | `gas` | 130 | Gameplay Ability System: abilities, attributes, effects, ASC, tags, cues, targeting, input, inspect, scaffold |
-| **MonolithBABridge** | — | 0 | Optional Blueprint Assist integration bridge (no MCP actions — integration only) |
+Each module owns a specific domain:
+
+| Module | Namespace | What It Does |
+|--------|-----------|--------------|
+| **MonolithCore** | `monolith` | HTTP server, tool registry, discovery, bulk-fill/describe framework, settings, auto-updater |
+| **MonolithBlueprint** | `blueprint` | Blueprint read/write, variable/component/graph CRUD, node operations, compile, auto-layout |
+| **MonolithMaterial** | `material` | Material graph editing, inspection, CRUD, instances, functions, HLSL |
+| **MonolithAnimation** | `animation` | Sequences, montages, ABPs, curves, notifies, skeletons, PoseSearch, IKRig, Control Rig |
+| **MonolithNiagara** | `niagara` | Particle systems, emitters, modules, renderers, HLSL, dynamic inputs, event handlers, sim stages |
+| **MonolithMesh** | `mesh` | Mesh inspection, scene manipulation, spatial queries, blockout, procedural geometry, lighting, experimental town gen |
+| **MonolithEditor** | `editor`, `animation` | Build triggers, live compile, log capture, crash context, scene capture, texture import |
+| **MonolithConfig** | `config` | INI resolution, explain, diff, search |
+| **MonolithIndex** | `project` | SQLite FTS5 deep project indexer |
+| **MonolithSource** | `source` | Engine source lookup, call graphs, class hierarchy |
+| **MonolithUI** | `ui` | Widget Blueprint CRUD, templates, styling, animation, settings scaffolding, accessibility |
+| **MonolithGAS** | `gas` | Gameplay Ability System: abilities, attributes, effects, ASC, tags, cues, targeting, input, inspect, scaffold (gated on `WITH_GBA`) |
+| **MonolithAI** | `ai` | Behavior trees, blackboards, EQS, StateTree, SmartObjects, perception, navigation, AI controllers |
+| **MonolithAudio** | `audio` | Sound cues, waves, classes, submixes, attenuation, concurrency, MetaSounds |
+| **MonolithAudioRuntime** | -- | Runtime support for the audio module (registers no MCP actions) |
+| **MonolithLevelSequence** | `level_sequence` | Sequencer inspection: bindings, directors, event bindings |
+| **MonolithReflectionIntel** | `cppreflect`, `reflect`, `decision`, `risk`, `pipeline`, `network` (plus additions to existing namespaces) | Reflection intelligence over project C++ and assets: UCLASS/UPROPERTY/UFUNCTION queries, replication audits, decision records, churn/hotspot analysis, release readiness |
+| **MonolithComboGraph** | `combograph` | Optional ComboGraph integration (gated on `WITH_COMBOGRAPH`) |
+| **MonolithLogicDriver** | `logicdriver` | Optional Logic Driver Pro integration (gated on `WITH_LOGICDRIVER`) |
+| **MonolithBABridge** | -- | Optional Blueprint Assist integration bridge (registers no MCP actions) |
 
 Each module follows the same file structure:
 
@@ -285,7 +294,8 @@ Then use Claude Code or any MCP-compatible client to interact with the tools.
 4. **Update docs** — If you add actions, update:
    - The relevant skill in `Skills/`
    - `Docs/specs/SPEC_<Module>.md` action tables (per-module spec for the namespace you touched)
-   - `README.md` action counts (if totals change)
+   - `CHANGELOG.md` under `## [Unreleased]`
+   - `README.md` only if the approximate total crosses a rounded threshold. Public counts stay rounded down with a `+` (for example `~1,400+`); do not introduce exact integers.
 
 5. **Commit messages** — Use conventional format: `feat:`, `fix:`, `docs:`, `refactor:`
 
@@ -295,7 +305,7 @@ Then use Claude Code or any MCP-compatible client to interact with the tools.
 
 ## Architecture Notes
 
-- **Discovery/dispatch pattern** — Each domain exposes one `{namespace}_query(action, params)` MCP tool. The registry dispatches to the correct handler. This keeps AI context lean (15 tools instead of 815 individual endpoints).
+- **Discovery/dispatch pattern** — Each domain exposes one `{namespace}_query(action, params)` MCP tool. The registry dispatches to the correct handler. This keeps AI context lean (a couple of dozen dispatch tools instead of one endpoint per action).
 - **Thread safety** — `FMonolithToolRegistry` releases its lock before executing handlers. DB access uses `FCriticalSection`.
 - **Stateless server** — No session tracking. Every request is independent.
 - **MCP protocol version** — 2025-03-26, Streamable HTTP transport.
