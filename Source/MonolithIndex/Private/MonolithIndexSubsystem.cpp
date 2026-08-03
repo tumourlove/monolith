@@ -7,13 +7,16 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
 #include "Misc/Paths.h"
+#include "Misc/FileHelper.h"
 #include "HAL/FileManager.h"
 #include "HAL/RunnableThread.h"
 #include "IO/IoHash.h"
 #include "Async/Async.h"
 #include "Editor.h"
+#include "Engine/Blueprint.h"
 #include "Interfaces/IPluginManager.h"
 #include "HAL/IConsoleManager.h"
+#include "UObject/UObjectGlobals.h"
 
 // Indexers
 #include "Indexers/BlueprintIndexer.h"
@@ -60,6 +63,103 @@
 // live, so a file-static TUniquePtr is a safe owner and keeps the fix .cpp-only.
 namespace
 {
+	UObject* LoadAssetForDeepIndex(const FAssetData& AssetData)
+	{
+		UClass* AssetClass = AssetData.GetClass();
+		if (AssetClass && AssetClass->IsChildOf(UBlueprint::StaticClass()))
+		{
+			// Deep indexing reads the serialized graph; it must not compile arbitrary
+			// project Blueprints as a side effect. Broken compile-on-load state can
+			// assert before the exact-asset crash marker can make recovery attributable.
+			// This mirrors Epic's CompileAllBlueprints commandlet load path.
+			return StaticLoadObject(
+				AssetClass,
+				nullptr,
+				*AssetData.GetObjectPathString(),
+				nullptr,
+				LOAD_NoWarn | LOAD_DisableCompileOnLoad);
+		}
+
+		return AssetData.GetAsset();
+	}
+
+	enum class ECrashSafeDeepIndexResult : uint8
+	{
+		Indexed,
+		ControlledFailure,
+		TransactionFailure
+	};
+
+	ECrashSafeDeepIndexResult DeepIndexAssetCrashSafe(
+		FMonolithIndexDatabase& Database,
+		const FAssetData& AssetData,
+		int64 AssetId,
+		const TSharedPtr<IMonolithIndexer>& Indexer,
+		const FString& SavedHash)
+	{
+		// This committed marker names the one asset the engine is about to load.
+		// If the process dies anywhere before the successful work commit, the next
+		// run can quarantine this exact path without blaming its batch neighbours.
+		if (!Database.BeginTransaction()
+			|| !Database.BumpDeepIndexAttempts(AssetId)
+			|| !Database.CommitTransaction())
+		{
+			Database.RollbackTransaction();
+			UE_LOG(LogMonolithIndex, Error, TEXT("Could not persist the deep-index crash marker for %s"),
+				*AssetData.PackageName.ToString());
+			return ECrashSafeDeepIndexResult::TransactionFailure;
+		}
+
+		if (!Database.BeginTransaction())
+		{
+			UE_LOG(LogMonolithIndex, Error, TEXT("Could not begin deep-index work for %s"),
+				*AssetData.PackageName.ToString());
+			return ECrashSafeDeepIndexResult::TransactionFailure;
+		}
+
+		const bool bWasLoaded = AssetData.IsAssetLoaded();
+		UObject* LoadedAsset = LoadAssetForDeepIndex(AssetData);
+		const bool bIndexed = LoadedAsset && Indexer.IsValid()
+			&& Indexer->IndexAsset(AssetData, LoadedAsset, Database, AssetId);
+
+		if (LoadedAsset)
+		{
+			// Keep the marker armed through unloading as malformed resource state can
+			// also fail here. It is cleared only after every asset-owned operation ends.
+			FMonolithMemoryHelper::TryUnloadPackage(LoadedAsset, bWasLoaded);
+		}
+
+		if (bIndexed)
+		{
+			if (!Database.SetDeepIndexedHash(AssetId, SavedHash)
+				|| !Database.ClearDeepIndexAttempts(AssetId)
+				|| !Database.CommitTransaction())
+			{
+				Database.RollbackTransaction();
+				UE_LOG(LogMonolithIndex, Error, TEXT("Could not commit deep-index data for %s"),
+					*AssetData.PackageName.ToString());
+				return ECrashSafeDeepIndexResult::TransactionFailure;
+			}
+			return ECrashSafeDeepIndexResult::Indexed;
+		}
+
+		// A normal load/indexer failure is not a process crash. Roll back any partial
+		// child data, then clear the marker in a separate durable transaction.
+		Database.RollbackTransaction();
+		if (!Database.BeginTransaction()
+			|| !Database.ClearDeepIndexAttempts(AssetId)
+			|| !Database.CommitTransaction())
+		{
+			Database.RollbackTransaction();
+			return ECrashSafeDeepIndexResult::TransactionFailure;
+		}
+
+		UE_LOG(LogMonolithIndex, Warning, TEXT("Deep indexing failed without crashing for %s (class: %s)"),
+			*AssetData.PackageName.ToString(),
+			*AssetData.AssetClassPath.GetAssetName().ToString());
+		return ECrashSafeDeepIndexResult::ControlledFailure;
+	}
+
 	class FIncrementalReachabilityGCOverride
 	{
 	public:
@@ -108,8 +208,8 @@ namespace
 // invoke time so it stays valid across editor lifecycle.
 //
 // Bare `Monolith.StartIndex` RESUMES an interrupted index; `Monolith.StartIndex
-// force` wipes and starts over. Force is also the documented recovery for assets
-// the poison-pill rule dropped from deep indexing — it clears their counters.
+// force` wipes and starts over. Quarantined assets have a narrower recovery path
+// through Project Settings > Plugins > Monolith > Retry Fixed Assets.
 static FAutoConsoleCommand GMonolithStartIndexCommand(
 	TEXT("Monolith.StartIndex"),
 	TEXT("Starts a Monolith project index, resuming an interrupted one if present. Pass 'force' to wipe and start over."),
@@ -168,6 +268,7 @@ void UMonolithIndexSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		UE_LOG(LogMonolithIndex, Error, TEXT("Failed to open index database at %s"), *DbPath);
 		return;
 	}
+	RefreshQuarantineReport();
 
 	RegisterDefaultIndexers();
 
@@ -363,6 +464,36 @@ bool UMonolithIndexSubsystem::CanAcceptIndexRequest() const
 	return !bIsIndexing && Database.IsValid() && Database->IsOpen();
 }
 
+bool UMonolithIndexSubsystem::HasQuarantinedAssets() const
+{
+	return Database.IsValid() && Database->IsOpen() && Database->GetSkippedAssetPaths().Num() > 0;
+}
+
+bool UMonolithIndexSubsystem::RetryQuarantinedAssets()
+{
+	check(IsInGameThread());
+	if (!CanAcceptIndexRequest())
+	{
+		UE_LOG(LogMonolithIndex, Warning, TEXT("Cannot retry quarantined assets while indexing is active or the database is unavailable"));
+		return false;
+	}
+
+	TArray<FString> ReleasedPaths;
+	if (!Database->PrepareQuarantinedAssetRetry(ReleasedPaths))
+	{
+		UE_LOG(LogMonolithIndex, Warning, TEXT("No quarantined assets were released for retry"));
+		return false;
+	}
+
+	RefreshQuarantineReport();
+	UE_LOG(LogMonolithIndex, Log, TEXT("Retrying %d quarantined asset(s) through the resumable index path:"), ReleasedPaths.Num());
+	for (const FString& Path : ReleasedPaths)
+	{
+		UE_LOG(LogMonolithIndex, Log, TEXT("  %s"), *Path);
+	}
+	return ResumeFullIndex();
+}
+
 bool UMonolithIndexSubsystem::StartFullIndex()
 {
 	return StartFullIndexInternal(/*bForceReset=*/true);
@@ -496,7 +627,12 @@ TArray<FIndexedAsset> UMonolithIndexSubsystem::FindByType(const FString& AssetCl
 TSharedPtr<FJsonObject> UMonolithIndexSubsystem::GetStats()
 {
 	if (!Database.IsValid() || !Database->IsOpen()) return nullptr;
-	return Database->GetStats();
+	TSharedPtr<FJsonObject> Stats = Database->GetStats();
+	if (Stats.IsValid() && HasQuarantinedAssets())
+	{
+		Stats->SetStringField(TEXT("quarantine_report_path"), GetQuarantineReportPath());
+	}
+	return Stats;
 }
 
 TSharedPtr<FJsonObject> UMonolithIndexSubsystem::GetAssetDetails(const FString& PackagePath)
@@ -797,9 +933,9 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 				break;
 
 			case EMonolithDeepIndexQueueDecision::SkipPoisonAsset:
-				// Two runs started this asset and neither finished. Re-queueing it
-				// is a crash-every-launch loop, so drop it and stamp the current
-				// hash so it leaves the queue for good.
+				// The previous process committed this exact asset's marker but never
+				// cleared it. Quarantine only this package and let healthy indexing
+				// finish around it.
 				//
 				// The attempt counter is deliberately NOT cleared. Clearing it
 				// would make the skip depend entirely on the hash stamp, and an
@@ -888,22 +1024,21 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			AlreadyDeepIndexed);
 	}
 
-	// One poison asset takes its whole batch out of deep indexing (the attempt
-	// marker is batch-granular). That is a data-completeness loss the user cannot
-	// otherwise discover, so it is reported at ERROR — a Warning is invisible in a
-	// busy index log — and persisted so it outlives the session and the log.
+	// A marker left by the previous process names one exact package. Quarantine
+	// only that path, report it at Error, and persist it beyond this session/log.
 	if (PoisonedPaths.Num() > 0)
 	{
 		for (const FString& Path : PoisonedPaths)
 		{
 			UE_LOG(LogMonolithIndex, Error,
-				TEXT("Deep indexing skipped '%s': %d interrupted attempts. Its graph/variable data will be missing. Run 'Monolith.StartIndex force' (or monolith_reindex force=true) to clear the counters and retry."),
-				*Path, MonolithMaxDeepIndexAttempts);
+				TEXT("ASSET NEEDS TEAM REVIEW: '%s' interrupted the editor during deep indexing and is now quarantined. Fix it, then select 'Retry Fixed Assets' in Monolith Project Settings."),
+				*Path);
 		}
 		DB->RecordSkippedAssetPaths(PoisonedPaths);
+		Owner->RefreshQuarantineReport();
 		UE_LOG(LogMonolithIndex, Error,
-			TEXT("%d asset(s) were dropped from deep indexing after repeated interrupted attempts — see project get_stats 'skipped_assets'"),
-			PoisonedPaths.Num());
+			TEXT("%d asset(s) were quarantined. Review list: %s"),
+			PoisonedPaths.Num(), *Owner->GetQuarantineReportPath());
 	}
 
 	// ============================================================
@@ -990,42 +1125,10 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 
 			// Capture the slice for this batch
 			TArray<FDeepIndexEntry> BatchSlice;
-			TArray<int64> BatchAssetIds;
 			BatchSlice.Reserve(BatchEnd - BatchStart);
-			BatchAssetIds.Reserve(BatchEnd - BatchStart);
 			for (int32 j = BatchStart; j < BatchEnd; ++j)
 			{
 				BatchSlice.Add(DeepIndexQueue[j]);
-				BatchAssetIds.Add(DeepIndexQueue[j].AssetId);
-			}
-
-			// ------------------------------------------------------------------
-			// Poison-pill attempt marker — its OWN transaction, committed BEFORE
-			// the batch work transaction opens.
-			//
-			// This ordering is the entire mechanism. A write inside an open
-			// transaction is not durable: under `journal_mode=DELETE` a process
-			// death inside the work transaction below makes SQLite roll that whole
-			// transaction back on next open, which would take the marker with it.
-			// The counter would read 0 on resume, the same batch would re-queue,
-			// and the asset that killed the editor would kill it again — forever.
-			// The frame-budget commit inside the work lambda does not rescue it
-			// either: it only fires after at least one asset has been processed, so
-			// it never covers the FIRST asset of a batch, which is exactly where a
-			// resumed queue puts the poison one.
-			//
-			// Cost is one extra commit per BATCH (~6k on a 50k-asset project), not
-			// per asset — per-asset transactions stay off the table.
-			// ------------------------------------------------------------------
-			if (RequireTransaction(DB->BeginTransaction(), TEXT("deep attempt-marker begin")))
-			{
-				if (!DB->BumpDeepIndexAttempts(BatchAssetIds))
-				{
-					UE_LOG(LogMonolithIndex, Warning,
-						TEXT("Could not record deep-index attempts for batch %d — a crash in this batch would not be counted"),
-						BatchNumber);
-				}
-				RequireTransaction(DB->CommitTransaction(), TEXT("deep attempt-marker commit"));
 			}
 
 			FEvent* BatchEvent = FPlatformProcess::GetSynchEventFromPool(true);
@@ -1040,69 +1143,33 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
 				[DB, BatchSlice = MoveTemp(BatchSlice), &DeepIndexed, &DeepErrors, &bTransactionFailure, FrameBudgetSeconds]()
 			{
-				if (!DB->BeginTransaction())
-				{
-					bTransactionFailure = true;
-					UE_LOG(LogMonolithIndex, Error, TEXT("Index transaction failure (deep batch begin) — this run will not be marked complete"));
-					return;
-				}
 				double BatchStartTime = FPlatformTime::Seconds();
 
 				for (const FDeepIndexEntry& Entry : BatchSlice)
 				{
-					// Load asset on game thread — the dispatcher guarantees the asset
-					// compiler is idle before this runs, so GetAsset() won't reenter
-					// the texture compiler's PostCompilation guard.
-					// Capture residency BEFORE GetAsset() may load it (issue #81).
-					const bool bWasLoaded = Entry.AssetData.IsAssetLoaded();
-					UObject* LoadedAsset = Entry.AssetData.GetAsset();
-					if (LoadedAsset)
+					const ECrashSafeDeepIndexResult Result = DeepIndexAssetCrashSafe(
+						*DB, Entry.AssetData, Entry.AssetId, Entry.Indexer, Entry.SavedHash);
+					switch (Result)
 					{
-						if (Entry.Indexer->IndexAsset(Entry.AssetData, LoadedAsset, *DB, Entry.AssetId))
-						{
-							DeepIndexed++;
-
-							// Checkpoint INSIDE the transaction that carries this
-							// asset's child rows, so the two are atomic: a rollback
-							// loses both, never a checkpoint pointing at data that
-							// is not there.
-							DB->SetDeepIndexedHash(Entry.AssetId, Entry.SavedHash);
-							DB->ClearDeepIndexAttempts(Entry.AssetId);
-						}
-						else
-						{
-							DeepErrors++;
-							UE_LOG(LogMonolithIndex, Warning, TEXT("Deep indexer '%s' failed for: %s"),
-								*Entry.Indexer->GetName(),
-								*Entry.AssetData.PackageName.ToString());
-						}
-
-						// Mark asset for unloading to help GC
-						FMonolithMemoryHelper::TryUnloadPackage(LoadedAsset, bWasLoaded);
-					}
-					else
-					{
+					case ECrashSafeDeepIndexResult::Indexed:
+						DeepIndexed++;
+						break;
+					case ECrashSafeDeepIndexResult::ControlledFailure:
 						DeepErrors++;
-						UE_LOG(LogMonolithIndex, Warning, TEXT("Failed to load asset for deep indexing: %s (class: %s)"),
-							*Entry.AssetData.PackageName.ToString(),
-							*Entry.AssetData.AssetClassPath.GetAssetName().ToString());
+						break;
+					case ECrashSafeDeepIndexResult::TransactionFailure:
+					default:
+						bTransactionFailure = true;
+						return;
 					}
 
-					// If we've exceeded our frame budget, commit what we have and yield
+					// Every asset is already committed independently before yielding.
 					double Elapsed = FPlatformTime::Seconds() - BatchStartTime;
 					if (Elapsed > FrameBudgetSeconds)
 					{
-						DB->CommitTransaction();
 						FMonolithMemoryHelper::YieldToEditor();
-						DB->BeginTransaction();
 						BatchStartTime = FPlatformTime::Seconds();
 					}
-				}
-
-				if (!DB->CommitTransaction())
-				{
-					bTransactionFailure = true;
-					UE_LOG(LogMonolithIndex, Error, TEXT("Index transaction failure (deep batch commit) — this run will not be marked complete"));
 				}
 			},
 			BatchEvent);
@@ -1581,6 +1648,36 @@ FString UMonolithIndexSubsystem::GetDatabasePath() const
 	return FPaths::ProjectPluginsDir() / TEXT("Monolith") / TEXT("Saved") / TEXT("ProjectIndex.db");
 }
 
+FString UMonolithIndexSubsystem::GetQuarantineReportPath() const
+{
+	return FPaths::GetPath(GetDatabasePath()) / TEXT("AssetsNeedingReview.log");
+}
+
+void UMonolithIndexSubsystem::RefreshQuarantineReport() const
+{
+	if (!Database.IsValid() || !Database->IsOpen()) return;
+
+	const FString ReportPath = GetQuarantineReportPath();
+	const TArray<FString> Paths = Database->GetSkippedAssetPaths();
+	if (Paths.Num() == 0)
+	{
+		IFileManager::Get().Delete(*ReportPath, /*RequireExists=*/false, /*EvenReadOnly=*/true);
+		return;
+	}
+
+	FString Report = TEXT("Monolith assets needing team review\n");
+	Report += TEXT("These assets interrupted the editor while Monolith was loading them for deep indexing.\n");
+	Report += TEXT("Fix them, then use Project Settings > Plugins > Monolith > Retry Fixed Assets.\n\n");
+	Report += FString::Join(Paths, TEXT("\n"));
+	Report += TEXT("\n");
+
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(ReportPath), /*Tree=*/true);
+	if (!FFileHelper::SaveStringToFile(Report, *ReportPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+	{
+		UE_LOG(LogMonolithIndex, Error, TEXT("Failed to write quarantined asset report: %s"), *ReportPath);
+	}
+}
+
 bool UMonolithIndexSubsystem::ShouldAutoIndex() const
 {
 	if (!Database.IsValid() || !Database->IsOpen()) return false;
@@ -1850,10 +1947,18 @@ bool UMonolithIndexSubsystem::StartIncrementalIndex()
 	// PHASE 7: Deep-index
 	TSet<FString> PathStrings;
 	for (FName Path : PathsToIndex) PathStrings.Add(Path.ToString());
-	ProcessDeepIndexQueue(PathStrings);
-
-	// PHASE 8: Commit
+	// Per-asset crash markers need their own durable transactions, so close the
+	// metadata transaction before any package load begins.
 	Database->CommitTransaction();
+	if (!ProcessDeepIndexQueue(PathStrings))
+	{
+		UE_LOG(LogMonolithIndex, Error, TEXT("Incremental deep indexing stopped after a database transaction failure"));
+		bIsIndexing = false;
+		RegisterLiveCallbacks();
+		return false;
+	}
+
+	// PHASE 8: Each deep-indexed asset committed independently.
 
 	// PHASE 9: Sentinels (stub — implemented in Task 6)
 	// TSet<FString> RemovedPathStrings;
@@ -1879,15 +1984,27 @@ bool UMonolithIndexSubsystem::StartIncrementalIndex()
 // Stubs for Tasks 5-6
 // ============================================================
 
-void UMonolithIndexSubsystem::ProcessDeepIndexQueue(const TSet<FString>& PathsToIndex)
+bool UMonolithIndexSubsystem::ProcessDeepIndexQueue(const TSet<FString>& PathsToIndex)
 {
-	if (PathsToIndex.Num() == 0) return;
+	if (PathsToIndex.Num() == 0) return true;
 
 	IAssetRegistry& AR = IAssetRegistry::GetChecked();
 	int32 Indexed = 0;
+	int32 Quarantined = 0;
+	TSet<FString> QuarantinedPaths;
+	for (const FString& Path : Database->GetSkippedAssetPaths())
+	{
+		QuarantinedPaths.Add(Path);
+	}
 
 	for (const FString& PackagePath : PathsToIndex)
 	{
+		if (QuarantinedPaths.Contains(PackagePath))
+		{
+			++Quarantined;
+			continue;
+		}
+
 		TArray<FAssetData> Assets;
 		AR.GetAssetsByPackageName(FName(*PackagePath), Assets);
 
@@ -1900,16 +2017,42 @@ void UMonolithIndexSubsystem::ProcessDeepIndexQueue(const TSet<FString>& PathsTo
 			int64 AssetId = Database->GetAssetId(PackagePath);
 			if (AssetId <= 0) continue;
 
-			// Load the asset (must be game thread)
-			UObject* LoadedAsset = AssetData.GetAsset();
-			if (!LoadedAsset) continue;
+			const TOptional<FIndexedAsset> Existing = Database->GetAssetByPath(PackagePath);
+			if (Existing.IsSet() && Existing->DeepIndexAttempts >= MonolithMaxDeepIndexAttempts)
+			{
+				Database->RecordSkippedAssetPaths({ PackagePath });
+				QuarantinedPaths.Add(PackagePath);
+				++Quarantined;
+				UE_LOG(LogMonolithIndex, Error,
+					TEXT("ASSET NEEDS TEAM REVIEW: '%s' interrupted the editor during deep indexing and is now quarantined. Fix it, then select 'Retry Fixed Assets' in Monolith Project Settings."),
+					*PackagePath);
+				break;
+			}
 
-			(*Indexer)->IndexAsset(AssetData, LoadedAsset, *Database, AssetId);
-			++Indexed;
+			FString SavedHash;
+			if (TOptional<FAssetPackageData> PackageData = AR.GetAssetPackageDataCopy(AssetData.PackageName))
+			{
+				SavedHash = LexToString(PackageData->GetPackageSavedHash());
+			}
+
+			const ECrashSafeDeepIndexResult Result = DeepIndexAssetCrashSafe(
+				*Database, AssetData, AssetId, *Indexer, SavedHash);
+			if (Result == ECrashSafeDeepIndexResult::Indexed)
+			{
+				++Indexed;
+			}
+			else if (Result == ECrashSafeDeepIndexResult::TransactionFailure)
+			{
+				RefreshQuarantineReport();
+				return false;
+			}
 		}
 	}
 
-	UE_LOG(LogMonolithIndex, Log, TEXT("Deep-indexed %d assets from %d paths"), Indexed, PathsToIndex.Num());
+	RefreshQuarantineReport();
+	UE_LOG(LogMonolithIndex, Log, TEXT("Deep-indexed %d assets from %d paths (%d quarantined)"),
+		Indexed, PathsToIndex.Num(), Quarantined);
+	return true;
 }
 
 void UMonolithIndexSubsystem::RunScopedSentinels(const TSet<FString>& ChangedPaths, const TSet<FString>& RemovedPaths)
@@ -2195,11 +2338,16 @@ void UMonolithIndexSubsystem::ProcessPendingChanges()
 		}
 	}
 
-	// Deep-index within same transaction
-	if (PathsToDeepIndex.Num() > 0)
-		ProcessDeepIndexQueue(PathsToDeepIndex);
-
+	// Exact crash markers require no outer transaction around package loads.
 	Database->CommitTransaction();
+	if (PathsToDeepIndex.Num() > 0)
+	{
+		if (!ProcessDeepIndexQueue(PathsToDeepIndex))
+		{
+			UE_LOG(LogMonolithIndex, Error, TEXT("Live deep indexing stopped after a database transaction failure"));
+			return;
+		}
+	}
 
 	// Sentinels after commit (they manage own transactions)
 	if (PathsToDeepIndex.Num() > 0 || RemovedPaths.Num() > 0)

@@ -91,6 +91,14 @@ public:
 	UFUNCTION()
 	bool CanAcceptIndexRequest() const;
 
+	/** True when one or more interrupted asset loads need team review. */
+	UFUNCTION()
+	bool HasQuarantinedAssets() const;
+
+	/** Release quarantined assets and retry their missing deep-index data. */
+	UFUNCTION()
+	bool RetryQuarantinedAssets();
+
 	/** Is indexing currently in progress? */
 	bool IsIndexing() const { return bIsIndexing; }
 
@@ -155,13 +163,15 @@ private:
 	void OnAssetRegistryFilesLoadedIncremental();
 	void RegisterDefaultIndexers();
 	FString GetDatabasePath() const;
+	FString GetQuarantineReportPath() const;
+	void RefreshQuarantineReport() const;
 	bool ShouldAutoIndex() const;
 
 	/** Gather mount paths for enabled marketplace plugins */
 	TArray<FIndexedPluginInfo> GatherMarketplacePluginPaths() const;
 
-	/** Deep-index a set of asset paths (stub — implemented in Task 5) */
-	void ProcessDeepIndexQueue(const TSet<FString>& PathsToIndex);
+	/** Deep-index asset paths with exact crash markers. */
+	bool ProcessDeepIndexQueue(const TSet<FString>& PathsToIndex);
 
 	/** Run scoped sentinel indexers for changed/removed paths (stub — implemented in Task 6) */
 	void RunScopedSentinels(const TSet<FString>& ChangedPaths, const TSet<FString>& RemovedPaths);
