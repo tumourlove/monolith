@@ -95,7 +95,7 @@ Pattern table:
 
 | Action | Description |
 |--------|-------------|
-| `start_pie` | Begin a PIE session pinned to in-viewport mode (`EPlaySessionWorldType::PlayInEditor` + first active level viewport via `FLevelEditorModule::GetFirstActiveViewport`). Independent of the user's `LastExecutedPlayModeType` toolbar choice. Returns `started: true, mode: 'in_viewport'`. Refuses to queue duplicates when PIE is already running. |
+| `start_pie` | Begin a PIE session pinned to in-viewport mode (`EPlaySessionWorldType::PlayInEditor` + first active level viewport via `FLevelEditorModule::GetFirstActiveViewport`). Independent of the user's `LastExecutedPlayModeType` toolbar choice. Pre-flights loaded Blueprints for the engine's unresolved-compile-error condition. `on_compile_errors: "refuse"` (default) returns a structured error with `errored_blueprints` and does not start PIE; `"suppress"` starts anyway under a scoped `GIsRunningUnattendedScript` guard so the engine cannot open a modal that blocks the game thread and MCP server. Success returns `started`, `mode`, `compile_error_policy`, `errored_blueprint_count`, and `errored_blueprints`. Refuses to queue duplicates when PIE is already running. |
 | `stop_pie` | End the active PIE session via `GUnrealEd->RequestEndPlayMap()`. No-op (returns `stopped: false`) if PIE not active. |
 | `run_console_command` | Execute a console command. Routes to the first PIE PlayerController found (multi-client PIE not disambiguated); falls back to `GEngine->Exec` (with null-guard) when no PIE session is active. |
 

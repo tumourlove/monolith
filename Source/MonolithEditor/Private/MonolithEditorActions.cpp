@@ -527,9 +527,11 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("start_pie"),
-		TEXT("Start a Play-In-Editor session (equivalent to pressing Cmd+P in the editor)."),
+		TEXT("Start an in-viewport Play-In-Editor session. Pre-flights loaded Blueprint compile errors so the action never opens a blocking modal: on_compile_errors=\"refuse\" (default) returns the offending assets; \"suppress\" starts PIE anyway while silencing that prompt."),
 		FMonolithActionHandler::CreateStatic(&HandleStartPIE),
-		MakeShared<FJsonObject>());
+		FParamSchemaBuilder()
+			.Optional(TEXT("on_compile_errors"), TEXT("string"), TEXT("Policy when loaded Blueprints have unresolved compile errors: \"refuse\" (default, safe) returns an error + the offending {name,path} list without starting PIE; \"suppress\" starts PIE anyway and silences the engine's blocking compile-error modal."), TEXT("refuse"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("stop_pie"),
 		TEXT("Stop the active Play-In-Editor session."),
@@ -2017,8 +2019,36 @@ FMonolithActionResult FMonolithEditorActions::HandleStartPIE(const TSharedPtr<FJ
 		return FMonolithActionResult::Success(AlreadyRunning);
 	}
 
+	FString CompileMode = TEXT("refuse");
+	if (Params.IsValid())
+	{
+		Params->TryGetStringField(TEXT("on_compile_errors"), CompileMode);
+	}
+	const bool bRefuseCompileErrors = CompileMode.Equals(TEXT("refuse"), ESearchCase::IgnoreCase);
+	const bool bSuppressCompileErrors = CompileMode.Equals(TEXT("suppress"), ESearchCase::IgnoreCase);
+	if (!bRefuseCompileErrors && !bSuppressCompileErrors)
+	{
+		return FMonolithActionResult::Error(
+			FString::Printf(TEXT("Invalid on_compile_errors policy '%s'. Expected 'refuse' or 'suppress'."), *CompileMode),
+			-32602);
+	}
+
+	TArray<FErroredBlueprintEntry> Errored;
+	ScanErroredBlueprints(Errored);
+	if (Errored.Num() > 0 && bRefuseCompileErrors)
+	{
+		TSharedPtr<FJsonObject> ErrorData = MakeShared<FJsonObject>();
+		ErrorData->SetNumberField(TEXT("errored_blueprint_count"), Errored.Num());
+		ErrorData->SetArrayField(TEXT("errored_blueprints"), ErroredBlueprintsToJson(Errored));
+		return FMonolithActionResult::Error(
+			FString::Printf(TEXT("start_pie refused: %d Blueprint(s) have unresolved compile errors. ")
+				TEXT("Fix them, or pass on_compile_errors=\"suppress\" to start PIE without opening the blocking modal."),
+				Errored.Num()))
+			.WithErrorData(ErrorData);
+	}
+
 	FString StartError;
-	if (!StartPieInternal(StartError))
+	if (!StartPieInternal(StartError, bSuppressCompileErrors))
 	{
 		return FMonolithActionResult::Error(StartError);
 	}
@@ -2026,6 +2056,9 @@ FMonolithActionResult FMonolithEditorActions::HandleStartPIE(const TSharedPtr<FJ
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetBoolField(TEXT("started"), true);
 	Root->SetStringField(TEXT("mode"), TEXT("in_viewport"));
+	Root->SetStringField(TEXT("compile_error_policy"), bSuppressCompileErrors ? TEXT("suppress") : TEXT("refuse"));
+	Root->SetNumberField(TEXT("errored_blueprint_count"), Errored.Num());
+	Root->SetArrayField(TEXT("errored_blueprints"), ErroredBlueprintsToJson(Errored));
 	return FMonolithActionResult::Success(Root);
 }
 

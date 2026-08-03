@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`editor start_pie` no longer strands MCP behind the Blueprint compile-error dialog.** The action now pre-flights loaded Blueprints using the engine's own unresolved-error condition. Its default `on_compile_errors: "refuse"` policy returns the offending `{name, path}` entries without starting PIE; `"suppress"` explicitly starts anyway under a scoped unattended-script guard, so the confirmation modal cannot block the game thread and the in-process MCP server.
+
 ## [0.22.0] - 2026-08-01
 
 ### Internal

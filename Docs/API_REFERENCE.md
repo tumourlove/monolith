@@ -629,7 +629,7 @@ Execute a console command. Routes to the first PIE `PlayerController` found (so 
 
 ### `editor.start_pie` · `editor.stop_pie` · NEW in v0.14.10
 
-`start_pie` queues an in-viewport Play-In-Editor session (refuses to queue a duplicate when a PIE world is already alive); response includes `mode: 'in_viewport'`. `stop_pie` calls `RequestEndPlayMap` when a PIE world exists, no-op (`stopped: false`) otherwise. Both take *no parameters*. Pairs with `run_python` / `load_level` for fully automated in-game test flows.
+`start_pie` queues an in-viewport Play-In-Editor session (refuses to queue a duplicate when a PIE world is already alive); response includes `mode: 'in_viewport'`. It accepts `on_compile_errors: "refuse" | "suppress"` (`"refuse"` by default). Refuse mode returns the loaded Blueprints with unresolved compiler errors without starting PIE. Suppress mode starts PIE anyway under a narrowly scoped unattended-script guard, preventing the engine's compile-error confirmation from blocking the game thread and MCP server. `stop_pie` calls `RequestEndPlayMap` when a PIE world exists, no-op (`stopped: false`) otherwise. Pairs with `run_python` / `load_level` for fully automated in-game test flows.
 
 ### `editor.run_python` · NEW in v0.14.9
 
