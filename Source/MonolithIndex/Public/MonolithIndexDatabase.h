@@ -197,8 +197,8 @@ MONOLITHINDEX_API EMonolithDeepIndexQueueDecision MonolithDecideDeepIndexQueueEn
 	int32 StoredAttempts,
 	const FString& CurrentSavedHash);
 
-/** Attempts at which an asset is treated as poisonous and dropped from the queue. */
-inline constexpr int32 MonolithMaxDeepIndexAttempts = 2;
+/** A committed-but-unfinished asset load is quarantined on the next run. */
+inline constexpr int32 MonolithMaxDeepIndexAttempts = 1;
 
 /**
  * RAII wrapper around FSQLiteDatabase for the Monolith project index.
@@ -259,6 +259,7 @@ public:
 
 	// --- Actor CRUD ---
 	int64 InsertActor(const FIndexedActor& Actor);
+	bool ClearActorsForAsset(int64 AssetId);
 
 	// --- Tag CRUD ---
 	int64 InsertTag(const FIndexedTag& Tag);
@@ -301,22 +302,24 @@ public:
 	bool SetDeepIndexedHash(int64 AssetId, const FString& Hash);
 
 	/**
-	 * Increment `deep_index_attempts` for a whole batch. MUST be called in its
-	 * own transaction, committed BEFORE the batch's work transaction opens — a
-	 * write inside an open transaction is not durable, and under
-	 * `journal_mode=DELETE` a process death mid-batch rolls the work transaction
-	 * back on next open, which would take the marker with it.
+	 * Increment `deep_index_attempts` for exactly one asset. MUST be called in
+	 * its own transaction and committed immediately before that asset is loaded.
+	 * That makes a process death attributable without quarantining healthy batch
+	 * neighbours.
 	 */
-	bool BumpDeepIndexAttempts(const TArray<int64>& AssetIds);
+	bool BumpDeepIndexAttempts(int64 AssetId);
 
 	/** Reset the attempt counter after a successful deep index. */
 	bool ClearDeepIndexAttempts(int64 AssetId);
 
-	/** Paths dropped from the deep queue by the poison-pill rule, oldest first. */
+	/** Exact asset paths quarantined after an interrupted deep-index load, oldest first. */
 	TArray<FString> GetSkippedAssetPaths() const;
 
 	/** Merge newly skipped paths into the persisted list (deduplicated). */
 	bool RecordSkippedAssetPaths(const TArray<FString>& Paths);
+
+	/** Release quarantined assets and atomically arm a resumable retry pass. */
+	bool PrepareQuarantinedAssetRetry(TArray<FString>& OutReleasedPaths);
 
 	// --- Config CRUD ---
 	int64 InsertConfig(const FIndexedConfig& Config);

@@ -353,6 +353,27 @@ bool FMonolithIndexDatabase::Open(const FString& InDbPath)
 		}
 	}
 
+	// Marker format v1 incremented an entire deep-index batch and therefore could
+	// not identify the crashing asset. Clear those ambiguous counters/reports once
+	// before enabling v2's exact-asset, one-at-a-time marker contract.
+	if (FCString::Atoi(*ReadMeta(TEXT("schema_version"))) >= 3
+		&& ReadMeta(TEXT("deep_index_attempt_marker_version")) != TEXT("2"))
+	{
+		if (!BeginTransaction()
+			|| !ExecuteSQL(TEXT("UPDATE assets SET deep_indexed_hash = '' WHERE deep_index_attempts > 0;"))
+			|| !ExecuteSQL(TEXT("UPDATE assets SET deep_index_attempts = 0;"))
+			|| !DeleteMeta(TEXT("full_index_skipped_assets"))
+			|| !WriteMeta(TEXT("deep_index_attempt_marker_version"), TEXT("2"))
+			|| !CommitTransaction())
+		{
+			RollbackTransaction();
+			UE_LOG(LogMonolithIndex, Error,
+				TEXT("Failed to migrate legacy batch attempt markers; exact-asset crash quarantine is unavailable"));
+			return false;
+		}
+		UE_LOG(LogMonolithIndex, Log, TEXT("Migrated deep-index crash markers to exact-asset format v2"));
+	}
+
 	// Ensure hash index exists (safe for both fresh and migrated DBs)
 	ExecuteSQL(TEXT("CREATE INDEX IF NOT EXISTS idx_assets_hash ON assets(saved_hash);"));
 
@@ -412,7 +433,8 @@ bool FMonolithIndexDatabase::ResetDatabase()
 	// schema version" until the next Open(), and every version-gated path
 	// (incremental indexing, resume) silently degrades for the rest of the session.
 	ExecuteSQL(TEXT("CREATE INDEX IF NOT EXISTS idx_assets_hash ON assets(saved_hash);"));
-	return WriteMeta(TEXT("schema_version"), TEXT("3"));
+	return WriteMeta(TEXT("schema_version"), TEXT("3"))
+		&& WriteMeta(TEXT("deep_index_attempt_marker_version"), TEXT("2"));
 }
 
 // ============================================================
@@ -752,6 +774,16 @@ int64 FMonolithIndexDatabase::InsertActor(const FIndexedActor& Actor)
 	return Database->GetLastInsertRowId();
 }
 
+bool FMonolithIndexDatabase::ClearActorsForAsset(int64 AssetId)
+{
+	if (!IsOpen()) return false;
+
+	FSQLitePreparedStatement Stmt;
+	return Stmt.Create(*Database, TEXT("DELETE FROM actors WHERE asset_id = ?;")) &&
+		Stmt.SetBindingValueByIndex(1, AssetId) &&
+		Stmt.Execute();
+}
+
 // ============================================================
 // Tag CRUD
 // ============================================================
@@ -1008,27 +1040,19 @@ bool FMonolithIndexDatabase::SetDeepIndexedHash(int64 AssetId, const FString& Ha
 	return Stmt.Execute();
 }
 
-bool FMonolithIndexDatabase::BumpDeepIndexAttempts(const TArray<int64>& AssetIds)
+bool FMonolithIndexDatabase::BumpDeepIndexAttempts(int64 AssetId)
 {
 	if (!IsOpen()) return false;
-	if (AssetIds.Num() == 0) return true;
+	if (AssetId <= 0) return false;
 
 	FSQLitePreparedStatement Stmt;
-	if (!Stmt.Create(*Database, TEXT("UPDATE assets SET deep_index_attempts = deep_index_attempts + 1 WHERE id = ?;"),
-		ESQLitePreparedStatementFlags::Persistent))
+	if (!Stmt.Create(*Database, TEXT("UPDATE assets SET deep_index_attempts = deep_index_attempts + 1 WHERE id = ?;")))
 	{
 		return false;
 	}
 
-	// Execute() resets the statement itself, so rebinding index 1 each time is
-	// all that is needed to reuse it across the batch.
-	bool bSuccess = true;
-	for (const int64 AssetId : AssetIds)
-	{
-		Stmt.SetBindingValueByIndex(1, AssetId);
-		bSuccess &= Stmt.Execute();
-	}
-	return bSuccess;
+	Stmt.SetBindingValueByIndex(1, AssetId);
+	return Stmt.Execute();
 }
 
 bool FMonolithIndexDatabase::ClearDeepIndexAttempts(int64 AssetId)
@@ -1067,6 +1091,49 @@ bool FMonolithIndexDatabase::RecordSkippedAssetPaths(const TArray<FString>& Path
 	}
 
 	return WriteMeta(MonolithIndexMetaKeys::SkippedAssets, FString::Join(Merged, TEXT("\n")));
+}
+
+bool FMonolithIndexDatabase::PrepareQuarantinedAssetRetry(TArray<FString>& OutReleasedPaths)
+{
+	OutReleasedPaths = GetSkippedAssetPaths();
+	if (!IsOpen() || OutReleasedPaths.Num() == 0) return false;
+	if (!BeginTransaction()) return false;
+
+	FSQLitePreparedStatement ResetStmt;
+	if (!ResetStmt.Create(*Database,
+		TEXT("UPDATE assets SET deep_index_attempts = 0, deep_indexed_hash = '' WHERE package_path = ?;"),
+		ESQLitePreparedStatementFlags::Persistent))
+	{
+		RollbackTransaction();
+		return false;
+	}
+
+	for (const FString& Path : OutReleasedPaths)
+	{
+		ResetStmt.SetBindingValueByIndex(1, Path);
+		if (!ResetStmt.Execute())
+		{
+			RollbackTransaction();
+			return false;
+		}
+
+		const int64 AssetId = GetAssetId(Path);
+		if (AssetId > 0 && !DeleteChildDataForAsset(AssetId))
+		{
+			RollbackTransaction();
+			return false;
+		}
+	}
+
+	if (!DeleteMeta(MonolithIndexMetaKeys::SkippedAssets)
+		|| !WriteMeta(MonolithIndexMetaKeys::FullIndexState, MonolithIndexMetaKeys::FullIndexInProgress)
+		|| !DeleteMeta(MonolithIndexMetaKeys::LastFullIndex))
+	{
+		RollbackTransaction();
+		return false;
+	}
+
+	return CommitTransaction();
 }
 
 // ============================================================
@@ -1509,6 +1576,11 @@ TSharedPtr<FJsonObject> FMonolithIndexDatabase::GetStats()
 	Stats->SetNumberField(TEXT("configs"), GetCount(TEXT("configs")));
 	Stats->SetNumberField(TEXT("cpp_symbols"), GetCount(TEXT("cpp_symbols")));
 	Stats->SetNumberField(TEXT("datatable_rows"), GetCount(TEXT("datatable_rows")));
+	const FString LevelIndexState = ReadMeta(TEXT("level_index_state"));
+	if (!LevelIndexState.IsEmpty())
+	{
+		Stats->SetStringField(TEXT("level_index_state"), LevelIndexState);
+	}
 
 	// Asset class breakdown
 	auto ClassBreakdown = MakeShared<FJsonObject>();
@@ -1538,11 +1610,11 @@ TSharedPtr<FJsonObject> FMonolithIndexDatabase::GetStats()
 	}
 	Stats->SetObjectField(TEXT("module_breakdown"), ModuleBreakdown);
 
-	// Assets the poison-pill rule dropped from deep indexing. Surfaced here so an
-	// agent can see the data-completeness gap without reading the editor log —
-	// `monolith_reindex(force=true)` (or `Monolith.StartIndex force`) clears it.
+	// Exact paths quarantined after an interrupted deep-index load. The skipped_*
+	// names remain compatibility aliases for callers built against v0.22.0.
 	const TArray<FString> SkippedPaths = GetSkippedAssetPaths();
 	Stats->SetNumberField(TEXT("skipped_assets"), SkippedPaths.Num());
+	Stats->SetNumberField(TEXT("quarantined_assets"), SkippedPaths.Num());
 	if (SkippedPaths.Num() > 0)
 	{
 		constexpr int32 MaxReportedSkips = 50;
@@ -1552,6 +1624,7 @@ TSharedPtr<FJsonObject> FMonolithIndexDatabase::GetStats()
 			SkipValues.Add(MakeShared<FJsonValueString>(SkippedPaths[i]));
 		}
 		Stats->SetArrayField(TEXT("skipped_asset_paths"), SkipValues);
+		Stats->SetArrayField(TEXT("quarantined_asset_paths"), SkipValues);
 	}
 
 	return Stats;

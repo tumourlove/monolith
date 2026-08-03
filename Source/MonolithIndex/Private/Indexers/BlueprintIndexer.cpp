@@ -144,10 +144,12 @@ void FBlueprintIndexer::IndexVariables(UBlueprint* Blueprint, FMonolithIndexData
 		Var.VarType = VarDesc.VarType.PinCategory.ToString();
 		Var.Category = VarDesc.Category.ToString();
 		Var.DefaultValue = VarDesc.DefaultValue;
-		if (Var.DefaultValue.IsEmpty() && Blueprint->GeneratedClass)
+		if (Var.DefaultValue.IsEmpty() &&
+			Blueprint->GeneratedClass &&
+			Blueprint->GeneratedClass->HasAnyClassFlags(CLASS_CompiledFromBlueprint))
 		{
 			UObject* CDO = Blueprint->GeneratedClass->GetDefaultObject(false);
-			if (CDO)
+			if (CDO && CDO->HasAnyFlags(RF_ClassDefaultObject))
 			{
 				FProperty* Prop = Blueprint->GeneratedClass->FindPropertyByName(VarDesc.VarName);
 				if (Prop)

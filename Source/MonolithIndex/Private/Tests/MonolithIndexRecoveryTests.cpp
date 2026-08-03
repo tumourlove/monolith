@@ -10,12 +10,11 @@
 //     could keep the checkpoint, a resume would trust data that is not there.
 //   - The v2 -> v3 migration adds the two columns WITHOUT destroying existing
 //     rows. This is the case that can silently cost a user their whole index.
-//   - The poison pill: two interrupted attempts take an asset out of the queue,
-//     and -- the half that matters -- the attempt counter SURVIVES a rolled-back
-//     work transaction. A counter written inside that transaction would be rolled
-//     back with it, read 0 on resume, and the crash would repeat forever. A test
-//     that only checks "the counter increments" passes under that broken design,
-//     so the rollback assertion is the one that closes the hole.
+//   - Exact-asset quarantine: a marker committed immediately before one package
+//     load survives a rolled-back work transaction, while a healthy neighbour is
+//     never marked. A counter written inside the work transaction would roll back,
+//     read 0 on resume, and repeat the crash forever; the rollback assertion closes
+//     that hole. The same fixture verifies targeted retry and marker migration.
 //
 // These are pure database tests against their own temp SQLite file: no project
 // index, no editor subsystem, no indexing state.
@@ -329,14 +328,14 @@ bool FMonolithIndexRecoverySchemaMigrationTest::RunTest(const FString& /*Paramet
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: the poison pill -- skip contract AND the durability it rests on.
+// Test 4: exact-asset quarantine, retry, and the durability it rests on.
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FMonolithIndexRecoveryPoisonPillTest,
-	"Monolith.Index.Recovery.PoisonPillSkipsAfterTwoAttempts",
+	FMonolithExactAssetQuarantineTest,
+	"Monolith.Index.Recovery.ExactAssetQuarantineAfterOneCrash",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FMonolithIndexRecoveryPoisonPillTest::RunTest(const FString& /*Parameters*/)
+bool FMonolithExactAssetQuarantineTest::RunTest(const FString& /*Parameters*/)
 {
 	using namespace MonolithIndexRecoveryTestDetail;
 
@@ -355,40 +354,26 @@ bool FMonolithIndexRecoveryPoisonPillTest::RunTest(const FString& /*Parameters*/
 		return false;
 	}
 
-	// --- Part 1: the skip contract. ---------------------------------------
-
-	// One interrupted attempt is not enough -- a single crash could have been the
-	// editor being killed for any reason, and dropping an asset on that evidence
-	// would lose data for nothing.
-	TestTrue(TEXT("first attempt records"), Fixture.Database.BumpDeepIndexAttempts({ PoisonId, HealthyId }));
+	// Only the asset immediately about to load is marked. A process death after
+	// this commit therefore implicates this package, not its healthy neighbour.
+	TestTrue(TEXT("exact asset attempt records"), Fixture.Database.BumpDeepIndexAttempts(PoisonId));
 	TOptional<FIndexedAsset> AfterOne = Fixture.Database.GetAssetByPath(AssetPath);
 	if (!TestTrue(TEXT("asset reads back after one attempt"), AfterOne.IsSet()))
 	{
 		return false;
 	}
 	TestEqual(TEXT("one attempt is recorded"), AfterOne->DeepIndexAttempts, 1);
-	TestEqual(TEXT("an asset at one attempt is still queued"),
+	TestEqual(TEXT("one interrupted exact-asset attempt quarantines immediately"),
 		MonolithDecideDeepIndexQueueEntry(AfterOne->DeepIndexedHash, AfterOne->DeepIndexAttempts, ContentHash),
-		EMonolithDeepIndexQueueDecision::Queue);
-
-	// Two is the line.
-	TestTrue(TEXT("second attempt records"), Fixture.Database.BumpDeepIndexAttempts({ PoisonId }));
-	TOptional<FIndexedAsset> AfterTwo = Fixture.Database.GetAssetByPath(AssetPath);
-	if (!TestTrue(TEXT("asset reads back after two attempts"), AfterTwo.IsSet()))
-	{
-		return false;
-	}
-	TestEqual(TEXT("two attempts are recorded"), AfterTwo->DeepIndexAttempts, 2);
-	TestEqual(TEXT("an asset at two attempts is skipped as poisonous"),
-		MonolithDecideDeepIndexQueueEntry(AfterTwo->DeepIndexedHash, AfterTwo->DeepIndexAttempts, ContentHash),
 		EMonolithDeepIndexQueueDecision::SkipPoisonAsset);
 
-	// The healthy asset shares the batch but was only bumped once, so it stays.
+	// The healthy asset was never marked and remains eligible.
 	TOptional<FIndexedAsset> Healthy = Fixture.Database.GetAssetByPath(SecondAssetPath);
 	if (!TestTrue(TEXT("healthy asset reads back"), Healthy.IsSet()))
 	{
 		return false;
 	}
+	TestEqual(TEXT("healthy neighbour has no interrupted attempt"), Healthy->DeepIndexAttempts, 0);
 	TestEqual(TEXT("the healthy asset is still queued"),
 		MonolithDecideDeepIndexQueueEntry(Healthy->DeepIndexedHash, Healthy->DeepIndexAttempts, ContentHash),
 		EMonolithDeepIndexQueueDecision::Queue);
@@ -417,18 +402,53 @@ bool FMonolithIndexRecoveryPoisonPillTest::RunTest(const FString& /*Parameters*/
 		MonolithDecideDeepIndexQueueEntry(AfterSkip->DeepIndexedHash, AfterSkip->DeepIndexAttempts, TEXT("ffffffffffffffffffffffffffffffffffffffff")),
 		EMonolithDeepIndexQueueDecision::SkipPoisonAsset);
 
-	// A force reindex is the documented recovery: it wipes the row, which is
-	// equivalent to a cleared counter and no checkpoint.
-	TestTrue(TEXT("clearing the counter succeeds"), Fixture.Database.ClearDeepIndexAttempts(PoisonId));
+	// Persist the team-review list, then exercise the settings-button backend.
+	TestTrue(TEXT("quarantine list records"), Fixture.Database.RecordSkippedAssetPaths({ AssetPath }));
+	TArray<FString> ReleasedPaths;
+	if (!TestTrue(TEXT("quarantine retry prepares"), Fixture.Database.PrepareQuarantinedAssetRetry(ReleasedPaths)))
+	{
+		return false;
+	}
+	if (!TestEqual(TEXT("retry releases exactly one asset"), ReleasedPaths.Num(), 1))
+	{
+		return false;
+	}
+	TestEqual(TEXT("retry releases the quarantined path"), ReleasedPaths[0], FString(AssetPath));
+	TestEqual(TEXT("review list is cleared for the retry"), Fixture.Database.GetSkippedAssetPaths().Num(), 0);
+	TestTrue(TEXT("retry arms resumable indexing"), Fixture.Database.IsFullIndexInProgress());
+
 	TOptional<FIndexedAsset> AfterClear = Fixture.Database.GetAssetByPath(AssetPath);
-	if (!TestTrue(TEXT("asset reads back after the clear"), AfterClear.IsSet()))
+	if (!TestTrue(TEXT("asset reads back after release"), AfterClear.IsSet()))
 	{
 		return false;
 	}
 	TestEqual(TEXT("the counter is back to zero"), AfterClear->DeepIndexAttempts, 0);
+	TestTrue(TEXT("the quarantine checkpoint is cleared"), AfterClear->DeepIndexedHash.IsEmpty());
 	TestEqual(TEXT("a cleared, changed asset is queued again"),
 		MonolithDecideDeepIndexQueueEntry(AfterClear->DeepIndexedHash, AfterClear->DeepIndexAttempts, TEXT("ffffffffffffffffffffffffffffffffffffffff")),
 		EMonolithDeepIndexQueueDecision::Queue);
+
+	// Databases created by the former batch-wide marker cannot attribute their
+	// counters safely. Opening under marker format v2 clears those ambiguous rows.
+	TestTrue(TEXT("legacy marker format can be staged"),
+		Fixture.Database.WriteMeta(TEXT("deep_index_attempt_marker_version"), TEXT("1")));
+	TestTrue(TEXT("legacy skipped checkpoint stages"), Fixture.Database.SetDeepIndexedHash(HealthyId, ContentHash));
+	TestTrue(TEXT("legacy batch counter stages"), Fixture.Database.BumpDeepIndexAttempts(HealthyId));
+	TestTrue(TEXT("legacy review path stages"), Fixture.Database.RecordSkippedAssetPaths({ SecondAssetPath }));
+	if (!TestTrue(TEXT("database reopens for marker migration"), Fixture.Reopen()))
+	{
+		return false;
+	}
+	Healthy = Fixture.Database.GetAssetByPath(SecondAssetPath);
+	if (!TestTrue(TEXT("healthy asset survives marker migration"), Healthy.IsSet()))
+	{
+		return false;
+	}
+	TestEqual(TEXT("legacy batch counter is cleared"), Healthy->DeepIndexAttempts, 0);
+	TestTrue(TEXT("legacy ambiguous checkpoint is cleared"), Healthy->DeepIndexedHash.IsEmpty());
+	TestEqual(TEXT("legacy batch review list is cleared"), Fixture.Database.GetSkippedAssetPaths().Num(), 0);
+	TestEqual(TEXT("exact marker format is stamped"),
+		Fixture.Database.ReadMeta(TEXT("deep_index_attempt_marker_version")), FString(TEXT("2")));
 
 	// --- Part 2: durability. This half is the mechanism. ------------------
 	//
@@ -446,7 +466,7 @@ bool FMonolithIndexRecoveryPoisonPillTest::RunTest(const FString& /*Parameters*/
 
 	// The attempt marker: its own transaction, committed.
 	TestTrue(TEXT("marker transaction begins"), Fixture.Database.BeginTransaction());
-	TestTrue(TEXT("marker writes"), Fixture.Database.BumpDeepIndexAttempts({ DurabilityId }));
+	TestTrue(TEXT("marker writes"), Fixture.Database.BumpDeepIndexAttempts(DurabilityId));
 	TestTrue(TEXT("marker transaction commits"), Fixture.Database.CommitTransaction());
 
 	// The batch work, which the crash discards.

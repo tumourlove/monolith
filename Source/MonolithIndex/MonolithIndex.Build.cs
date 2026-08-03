@@ -69,6 +69,8 @@ public class MonolithIndex : ModuleRules
 			"Json",
 			"JsonUtilities",
 			"SQLiteCore",
+			"RenderCore",
+			"RHI",
 			"Slate",
 			"SlateCore",
 			"BlueprintGraph",

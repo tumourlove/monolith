@@ -58,6 +58,44 @@ void FMonolithSettingsCustomization::CustomizeDetails(IDetailLayoutBuilder& Deta
 			})
 		];
 
+	// Retry only assets quarantined after an interrupted deep-index load.
+	IndexCat.AddCustomRow(LOCTEXT("RetryQuarantinedAssetsRow", "Retry Quarantined Assets"))
+		.NameContent()
+		[
+			SNew(STextBlock)
+			.Text(LOCTEXT("QuarantinedAssetsLabel", "Assets Needing Review"))
+			.Font(IDetailLayoutBuilder::GetDetailFont())
+		]
+		.ValueContent()
+		[
+			SNew(SButton)
+			.Text(LOCTEXT("RetryQuarantinedAssetsBtn", "Retry Fixed Assets"))
+			.ToolTipText(LOCTEXT("RetryQuarantinedAssetsTooltip",
+				"Release quarantined assets after their underlying issues are fixed and update their missing index data."))
+			.IsEnabled_Lambda([]()
+			{
+				if (GEditor)
+				{
+					if (auto* Sub = GEditor->GetEditorSubsystem<UMonolithIndexSubsystem>())
+					{
+						return Sub->CanAcceptIndexRequest() && Sub->HasQuarantinedAssets();
+					}
+				}
+				return false;
+			})
+			.OnClicked_Lambda([]()
+			{
+				if (GEditor)
+				{
+					if (auto* Sub = GEditor->GetEditorSubsystem<UMonolithIndexSubsystem>())
+					{
+						Sub->RetryQuarantinedAssets();
+					}
+				}
+				return FReply::Handled();
+			})
+		];
+
 	// Re-Index Engine Source button
 	IndexCat.AddCustomRow(LOCTEXT("ReindexEngineRow", "Re-Index Engine Source"))
 		.NameContent()
