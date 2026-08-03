@@ -1240,7 +1240,13 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		}
 
 		FAssetData DummyData;
-		InIndexer->IndexAsset(DummyData, nullptr, *InDB, 0);
+		if (!InIndexer->IndexAsset(DummyData, nullptr, *InDB, 0))
+		{
+			InDB->RollbackTransaction();
+			bTransactionFailure = true;
+			UE_LOG(LogMonolithIndex, Error, TEXT("Post-pass indexer %s failed - transaction rolled back and this run will not be marked complete"), *InIndexer->GetName());
+			return;
+		}
 
 		if (!InDB->CommitTransaction())
 		{

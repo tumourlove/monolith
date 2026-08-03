@@ -5,6 +5,26 @@
 
 DECLARE_LOG_CATEGORY_EXTERN(LogMonolithMemory, Log, All);
 
+class UPackage;
+
+enum class EMonolithMemoryPressure : uint8
+{
+	None,
+	Soft,
+	Critical
+};
+
+/** Cross-platform snapshot used to make index throttling deterministic and testable. */
+struct MONOLITHINDEX_API FMonolithMemorySnapshot
+{
+	uint64 ProcessUsedPhysicalMB = 0;
+	uint64 AvailablePhysicalMB = 0;
+	uint64 TotalPhysicalMB = 0;
+	uint64 GPUBudgetMB = 0;
+	uint64 GPUUsedMB = 0;
+	bool bHasGPUStats = false;
+};
+
 /**
  * Helper utilities for memory management during indexing.
  * Provides memory monitoring, garbage collection, and package unloading.
@@ -29,6 +49,12 @@ struct MONOLITHINDEX_API FMonolithMemoryHelper
 	 */
 	static bool ShouldThrottle(SIZE_T BudgetMB);
 
+	/** Capture process/system memory and, on the game thread, available RHI budget data. */
+	static FMonolithMemorySnapshot CaptureMemorySnapshot(bool bIncludeGPUStats);
+
+	/** Classify a supplied snapshot. Critical pressure means no new heavy asset should be loaded. */
+	static EMonolithMemoryPressure ClassifyMemoryPressure(const FMonolithMemorySnapshot& Snapshot, SIZE_T BudgetMB);
+
 	/**
 	 * Force garbage collection to free unreferenced objects.
 	 * @param bFullPurge If true, performs a full purge including package unloading.
@@ -46,6 +72,13 @@ struct MONOLITHINDEX_API FMonolithMemoryHelper
 	 * @return true if the package was successfully marked for unload
 	 */
 	static bool TryUnloadPackage(UObject* Asset, bool bWasAlreadyLoaded);
+
+	/**
+	 * Release packages created transitively by one indexing load, then drain render/RHI deletes.
+	 * Only packages captured as new by the caller may be passed here; resident user packages must
+	 * never be stripped. RF_Standalone is restored on anything that survives collection.
+	 */
+	static bool ReleasePackagesLoadedForIndexing(const TArray<UPackage*>& Packages);
 
 	/**
 	 * Yield to the editor to allow UI updates and prevent freezing.
@@ -73,6 +106,9 @@ struct MONOLITHINDEX_API FMonolithMemoryHelper
 	 * memory-budget tier for low-spec machines.
 	 */
 	static int32 GetInstalledRamGB();
+
+	/** Convert physical bytes to the nearest advertised RAM tier (31.8 GiB -> 32 GB). */
+	static int32 RoundPhysicalBytesToRamGB(uint64 TotalPhysicalBytes);
 
 	/**
 	 * Returns the memory budget in MB, resolving the auto-detect sentinel (0)

@@ -752,6 +752,16 @@ int64 FMonolithIndexDatabase::InsertActor(const FIndexedActor& Actor)
 	return Database->GetLastInsertRowId();
 }
 
+bool FMonolithIndexDatabase::ClearActorsForAsset(int64 AssetId)
+{
+	if (!IsOpen()) return false;
+
+	FSQLitePreparedStatement Stmt;
+	return Stmt.Create(*Database, TEXT("DELETE FROM actors WHERE asset_id = ?;")) &&
+		Stmt.SetBindingValueByIndex(1, AssetId) &&
+		Stmt.Execute();
+}
+
 // ============================================================
 // Tag CRUD
 // ============================================================
@@ -1509,6 +1519,11 @@ TSharedPtr<FJsonObject> FMonolithIndexDatabase::GetStats()
 	Stats->SetNumberField(TEXT("configs"), GetCount(TEXT("configs")));
 	Stats->SetNumberField(TEXT("cpp_symbols"), GetCount(TEXT("cpp_symbols")));
 	Stats->SetNumberField(TEXT("datatable_rows"), GetCount(TEXT("datatable_rows")));
+	const FString LevelIndexState = ReadMeta(TEXT("level_index_state"));
+	if (!LevelIndexState.IsEmpty())
+	{
+		Stats->SetStringField(TEXT("level_index_state"), LevelIndexState);
+	}
 
 	// Asset class breakdown
 	auto ClassBreakdown = MakeShared<FJsonObject>();

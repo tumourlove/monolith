@@ -259,6 +259,7 @@ public:
 
 	// --- Actor CRUD ---
 	int64 InsertActor(const FIndexedActor& Actor);
+	bool ClearActorsForAsset(int64 AssetId);
 
 	// --- Tag CRUD ---
 	int64 InsertTag(const FIndexedTag& Tag);

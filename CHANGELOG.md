@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Level indexing now bounds CPU and GPU resource lifetime instead of accumulating every loaded map until the editor crashes.** World packages are processed one at a time regardless of the generic post-pass batch setting. Each load captures the root package plus packages created transitively for linked levels, finishes their outstanding asset compilation, tears down only worlds brought in by the indexer, performs a full collection, and drains deferred render/RHI resource deletion before loading the next map. Packages that were already resident, including the open editor world, are never stripped or torn down. The pass monitors process RAM, system headroom, and available RHI memory; after a cleanup retry, critical pressure stops additional map loads and records a visible `level_index_state` with the measured RAM/GPU values in `project get_stats` rather than risking a device-removed or out-of-memory crash. Resumed level passes replace actor rows per processed world, preserving the last known rows for worlds skipped by a degraded pass. Installed-RAM detection also rounds hardware-reported capacity to the nearest advertised tier, so a nominal 32 GB machine no longer falls into the sub-32 GB batch tier because firmware reports slightly less than 32 GiB.
+
 ## [0.22.0] - 2026-08-01
 
 ### Internal
