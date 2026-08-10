@@ -1290,6 +1290,28 @@ void FPieSmokeSessionManager::AdvanceSession(FPieSmokeSession& Session)
 
 			const FString FramePath = Session.OutputDir /
 				FString::Printf(TEXT("frame_%03d.png"), Session.CaptureFrameIndex);
+
+			// include_ui: ride the engine screenshot path (the `shot showui`
+			// mechanism) — Slate composites the full backbuffer (game + UMG)
+			// and writes the file at END OF FRAME. Asynchronous by nature:
+			// bSaved/uniformity can't be verified here, so these frames count
+			// as requested-valid and the clip directory holds the truth.
+			if (Session.bIncludeUi)
+			{
+				IFileManager::Get().MakeDirectory(*Session.OutputDir, true);
+				FScreenshotRequest::RequestScreenshot(FramePath, /*bShowUI*/true, /*bAddFilenameSuffix*/false);
+				Sample.FramePath = FramePath;
+				Sample.bFrameUniform = false;
+				Sample.bFrameValid = true;
+				if (Session.CaptureFrameIndex >= Session.DiscardFirstFrames)
+				{
+					++Session.ValidFrames;
+				}
+				Session.LastCaptureSeconds = SampleTime;
+				++Session.CaptureFrameIndex;
+			}
+			else
+			{
 			// #7 flush the render thread before the very first ReadPixels so a warm-up /
 			// uniform first frame is not produced in the first place.
 			const bool bFirstCapture = (Session.CaptureFrameIndex == 0);
@@ -1320,6 +1342,7 @@ void FPieSmokeSessionManager::AdvanceSession(FPieSmokeSession& Session)
 					TEXT("capture_pie_movement_clip: PIE viewport unavailable for session %s — capture deferred."),
 					*Session.Id);
 			}
+			} // !bIncludeUi (scene-only ReadPixels path)
 		}
 	}
 

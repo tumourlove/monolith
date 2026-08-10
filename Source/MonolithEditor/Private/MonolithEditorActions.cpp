@@ -610,6 +610,7 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.Optional(TEXT("marker"), TEXT("string"), TEXT("Log marker token. Default MONOLITH_CLIP."), TEXT("MONOLITH_CLIP"))
 			.Optional(TEXT("duration"), TEXT("number"), TEXT("Seconds the editor loop advances PIE before the session auto-completes (clamped 0-120). Default 5."), TEXT("5"))
 			.Optional(TEXT("capture_interval"), TEXT("number"), TEXT("Seconds between captured frames (clamped 0.05-5). Default 0.25."), TEXT("0.25"))
+			.Optional(TEXT("include_ui"), TEXT("boolean"), TEXT("Capture the composited backbuffer (game + UMG/Slate UI) via the engine screenshot path — the `shot showui` mechanism — instead of the scene-only viewport read. Frames land at end-of-frame (async), so per-frame uniformity validation is skipped. With PIE docked in the editor the backbuffer includes editor chrome; use new-window PIE for a clean game+UI clip. Default false."), TEXT("false"))
 			.Optional(TEXT("sample_vars"), TEXT("array"), TEXT("AnimInstance variable names sampled each frame. Default [GroundSpeed, bShouldMove, DesiredYawDelta]."))
 			.Optional(TEXT("pawn_class"), TEXT("string"), TEXT("Substring of the target pawn's class name to sample. Omit to use the first player controller's pawn."))
 			.Optional(TEXT("console_script"), TEXT("array"), TEXT("Console commands run on the PIE world at start (drive the movement)."))
@@ -6264,6 +6265,8 @@ FMonolithActionResult FMonolithEditorActions::HandleCapturePieMovementClip(const
 	Session.bCaptureFrames = true;
 	Session.CaptureInterval = Interval;
 	Session.OutputDir = OutputDir;
+	Params->TryGetBoolField(TEXT("include_ui"), Session.bIncludeUi);
+	const bool bIncludeUi = Session.bIncludeUi;
 
 	const FString SessionId = FPieSmokeSessionManager::Get().CreateSession(MoveTemp(Session));
 
@@ -6276,6 +6279,7 @@ FMonolithActionResult FMonolithEditorActions::HandleCapturePieMovementClip(const
 	Result->SetStringField(TEXT("resolved_output_dir"), OutputDir);   // explicit alias for callers
 	Result->SetNumberField(TEXT("duration"), Duration);
 	Result->SetNumberField(TEXT("capture_interval"), Interval);
+	Result->SetBoolField(TEXT("include_ui"), bIncludeUi);
 	return FMonolithActionResult::Success(Result);
 }
 

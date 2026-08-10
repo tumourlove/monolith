@@ -297,6 +297,13 @@ struct FPieSmokeSession
 	FString OutputDir;
 	int32 CaptureFrameIndex = 0;
 	bool bCaptureDeferred = false;    // set if viewport capture is unavailable in this build path
+	/** Capture the composited backbuffer (game + UMG/Slate UI) via the engine
+	 *  screenshot path — the `shot showui` mechanism — instead of the raw
+	 *  scene-only viewport read. Async (file lands at end of frame), so
+	 *  uniform-frame validity checks don't apply to these frames. NOTE: with
+	 *  PIE docked in the editor the backbuffer is the whole editor window;
+	 *  use new-window PIE for a clean game-plus-UI clip. */
+	bool bIncludeUi = false;
 
 	// #7 first-frame warm-up policy. The first DiscardFirstFrames captured frames are saved to
 	// disk (so the clip is complete) but are NOT counted toward ValidFrames / InvalidFrames —
