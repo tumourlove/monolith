@@ -33,8 +33,10 @@
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
 
+#include "Editor.h"
 #include "Engine/World.h"
 #include "Factories/WorldFactory.h"
+#include "LevelEditorSubsystem.h"
 
 #include "Misc/PackageName.h"
 #include "Modules/ModuleManager.h"
@@ -116,6 +118,7 @@ void FMonolithEditorMapActions::RegisterActions(FMonolithToolRegistry& Registry)
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("path"), TEXT("Asset path under /Game/... where the new UWorld is saved (e.g. /Game/Tests/Monolith/Audio/Map_Test)"))
 			.Optional(TEXT("map_template"), TEXT("string"), TEXT("Template variant: 'blank' (default). Reserved: 'vr_basic', 'thirdperson_basic' — return error in v1; UE 5.7 templates are populated client-side, not via UWorldFactory."), TEXT("blank"))
+			.Optional(TEXT("open"), TEXT("boolean"), TEXT("Load the new map in the editor after creation (same semantics as editor::load_level). Default false — creation alone never changes the open world; the response's current_world says where you actually are."), TEXT("false"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_module_status"),
@@ -202,12 +205,42 @@ FMonolithActionResult FMonolithEditorMapActions::HandleCreateEmptyMap(const TSha
 			TEXT("Created UWorld asset but failed to save to '%s'"), *PackageFilename));
 	}
 
+	// Optionally open the new map (same path as editor::load_level). Without
+	// it, creation must NOT touch the open world — and the response must say
+	// so explicitly: agents chain create→populate and silently edit whatever
+	// world happens to be open otherwise.
+	bool bOpen = false;
+	Params->TryGetBoolField(TEXT("open"), bOpen);
+
+	bool bOpened = false;
+	if (bOpen)
+	{
+		ULevelEditorSubsystem* LevelEd = GEditor ? GEditor->GetEditorSubsystem<ULevelEditorSubsystem>() : nullptr;
+		if (!LevelEd)
+		{
+			return FMonolithActionResult::Error(
+				TEXT("Created and saved the UWorld, but open=true failed: ULevelEditorSubsystem unavailable."));
+		}
+		bOpened = LevelEd->LoadLevel(InPath);
+		if (!bOpened)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Created and saved the UWorld at %s, but open=true failed to load it."), *InPath));
+		}
+	}
+
+	const UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	const FString CurrentWorld = EditorWorld ? EditorWorld->GetPathName() : FString();
+
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetBoolField(TEXT("ok"), true);
 	Result->SetStringField(TEXT("path"), InPath);
 	Result->SetStringField(TEXT("map_template"), TEXT("blank"));
-	Result->SetStringField(TEXT("message"),
-		FString::Printf(TEXT("Created blank UWorld at %s and saved package."), *InPath));
+	Result->SetBoolField(TEXT("opened"), bOpened);
+	Result->SetStringField(TEXT("current_world"), CurrentWorld);
+	Result->SetStringField(TEXT("message"), bOpened
+		? FString::Printf(TEXT("Created blank UWorld at %s, saved package, and opened it in the editor."), *InPath)
+		: FString::Printf(TEXT("Created blank UWorld at %s and saved package. Current editor world is UNCHANGED (%s) — pass open=true or call editor::load_level to open it."), *InPath, *CurrentWorld));
 	return FMonolithActionResult::Success(Result);
 }
 
