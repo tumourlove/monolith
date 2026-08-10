@@ -9,7 +9,8 @@
 void FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
     TUniqueFunction<void()> Work,
     FEvent* CompletionEvent,
-    float TimeoutSeconds)
+    float TimeoutSeconds,
+    TSharedPtr<TAtomic<bool>>* OutAbortToken)
 {
     // Start time captured by value so each tick can compute elapsed.
     const double StartTime = FPlatformTime::Seconds();
@@ -22,6 +23,7 @@ void FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
         FEvent* CompletionEvent = nullptr;
         double StartTime = 0.0;
         float TimeoutSeconds = 120.0f;
+        TSharedPtr<TAtomic<bool>> bAborted;
     };
 
     TSharedPtr<FDispatchState> State = MakeShared<FDispatchState>();
@@ -29,10 +31,26 @@ void FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
     State->CompletionEvent = CompletionEvent;
     State->StartTime = StartTime;
     State->TimeoutSeconds = TimeoutSeconds;
+    State->bAborted = MakeShared<TAtomic<bool>>(false);
+    if (OutAbortToken)
+    {
+        *OutAbortToken = State->bAborted;
+    }
 
     FTSTicker::GetCoreTicker().AddTicker(
         FTickerDelegate::CreateLambda([State](float /*DeltaTime*/) -> bool
         {
+            // Abandoned by the caller (shutdown): the Work captures may
+            // dangle — never invoke it. Trigger and go away.
+            if (State->bAborted->Load())
+            {
+                if (State->CompletionEvent)
+                {
+                    State->CompletionEvent->Trigger();
+                }
+                return false;
+            }
+
             const int32 RemainingAssets = FAssetCompilingManager::Get().GetNumRemainingAssets();
             const double Elapsed = FPlatformTime::Seconds() - State->StartTime;
             const bool bTimedOut = Elapsed >= static_cast<double>(State->TimeoutSeconds);

@@ -40,11 +40,21 @@ class FEvent;
  *   delegates are dropped at that point. The captured Work lambda and
  *   FEvent* are owned by the caller's stack frame — the caller already
  *   Waits on the event before returning, so the capture outlives the tick.
+ *
+ * Shutdown note (abort token):
+ *   The "caller Waits before returning" contract inverts into a DEADLOCK at
+ *   editor shutdown: the game thread blocks in Deinitialize's
+ *   WaitForCompletion while the worker blocks in CompletionEvent->Wait for a
+ *   tick that can never come. A caller that must abandon its wait (stop flag
+ *   + IsEngineExitRequested) sets OutAbortToken first: the ticker then skips
+ *   Work() — whose captures may now dangle — triggers the event, and
+ *   unregisters. See UMonolithIndexSubsystem::FIndexingTask.
  */
 struct MONOLITHINDEX_API FMonolithCompilerSafeDispatch
 {
     static void RunOnGameThreadWhenCompilerIdle(
         TUniqueFunction<void()> Work,
         FEvent* CompletionEvent = nullptr,
-        float TimeoutSeconds = 120.0f);
+        float TimeoutSeconds = 120.0f,
+        TSharedPtr<TAtomic<bool>>* OutAbortToken = nullptr);
 };

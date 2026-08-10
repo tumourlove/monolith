@@ -138,6 +138,29 @@ private:
 
 	private:
 		UMonolithIndexSubsystem* Owner;
+
+		/**
+		 * Wait for an event that only a game-thread task can trigger, without
+		 * deadlocking shutdown: at editor exit the game thread blocks in
+		 * Deinitialize's WaitForCompletion, so a queued task can never run and
+		 * a bare Wait() hangs the exit forever (the "QUIT_EDITOR during first
+		 * index" hang). Polls in 100ms slices; bails when stop is requested
+		 * AND the engine is exiting (a plain user cancel keeps waiting — the
+		 * game thread is alive and will serve the task).
+		 * @return true = event triggered (return it to the pool as usual);
+		 *         false = wait abandoned — the caller must NOT return the
+		 *         event to the pool (a later Trigger on a leaked event is
+		 *         harmless; on a recycled one it is corruption).
+		 */
+		bool WaitForGameThreadEvent(FEvent* Event);
+
+		/**
+		 * RunOnGameThreadWhenCompilerIdle + WaitForGameThreadEvent + the
+		 * abandon protocol (sets the dispatcher's abort token so the pending
+		 * Work — whose captures may dangle once Run() unwinds — is never
+		 * invoked). @return false = abandoned; caller should stop its pass.
+		 */
+		bool DispatchToGameThreadAndWait(TUniqueFunction<void()> Work);
 	};
 
 	/**
