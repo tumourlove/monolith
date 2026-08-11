@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Widgets/SWindow.h"
 #include "EditorSubsystem.h"
 #include "Dom/JsonObject.h"
 #include "Containers/Ticker.h"

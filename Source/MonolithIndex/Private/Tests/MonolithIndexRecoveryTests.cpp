@@ -25,6 +25,7 @@
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
 #include "HAL/PlatformFileManager.h"
+#include "GenericPlatform/GenericPlatformFile.h"
 #include "SQLiteDatabase.h"
 #include "MonolithIndexDatabase.h"
 

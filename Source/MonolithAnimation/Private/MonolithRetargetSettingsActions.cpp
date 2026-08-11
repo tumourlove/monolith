@@ -1,4 +1,5 @@
 #include "MonolithRetargetSettingsActions.h"
+#include "Runtime/Launch/Resources/Version.h"
 #include "MonolithAssetUtils.h"
 #include "MonolithParamSchema.h"
 

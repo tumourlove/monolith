@@ -1,4 +1,5 @@
 #include "MonolithAIControllerActions.h"
+#include "Editor.h"
 #include "MonolithParamSchema.h"
 #include "MonolithAssetUtils.h"
 

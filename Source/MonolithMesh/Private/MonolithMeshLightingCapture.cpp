@@ -1,4 +1,5 @@
 #include "MonolithMeshLightingCapture.h"
+#include "UObject/Package.h"
 
 #include "Engine/World.h"
 #include "Engine/TextureRenderTarget2D.h"

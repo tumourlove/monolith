@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Modules/ModuleInterface.h"
+#include "Delegates/IDelegateInstance.h"
 
 class FMonolithAIModule : public IModuleInterface
 {

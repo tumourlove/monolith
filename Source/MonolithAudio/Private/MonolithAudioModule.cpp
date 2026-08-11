@@ -1,4 +1,5 @@
 #include "MonolithAudioModule.h"
+#include "Modules/ModuleManager.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithSettings.h"
 #include "MonolithJsonUtils.h"

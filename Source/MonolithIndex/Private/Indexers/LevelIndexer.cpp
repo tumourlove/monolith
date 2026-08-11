@@ -1,4 +1,5 @@
 #include "Indexers/LevelIndexer.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "MonolithMemoryHelper.h"
 #include "MonolithSettings.h"
 #include "AssetRegistry/AssetRegistryModule.h"

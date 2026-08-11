@@ -18,6 +18,9 @@
 // after structural mesh asset changes.
 
 #include "MonolithMeshBulkFillAdapter.h"
+#include "Serialization/JsonWriter.h"
+#include "Serialization/JsonSerializer.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "MonolithBulkFillRegistry.h"
 #include "MonolithBulkFillTypes.h"
 #include "Reflection/MonolithReflectionWalker.h"

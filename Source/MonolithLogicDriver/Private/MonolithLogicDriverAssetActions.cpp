@@ -1,4 +1,5 @@
 #include "MonolithLogicDriverAssetActions.h"
+#include "AssetRegistry/AssetData.h"
 #include "MonolithParamSchema.h"
 
 #if WITH_LOGICDRIVER

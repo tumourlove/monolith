@@ -1,4 +1,6 @@
 #include "MonolithAIBehaviorTreeActions.h"
+#include "UObject/TextProperty.h"
+#include "UObject/UnrealType.h"
 #include "MonolithParamSchema.h"
 #include "MonolithAssetUtils.h"
 #include "MonolithJsonUtils.h"

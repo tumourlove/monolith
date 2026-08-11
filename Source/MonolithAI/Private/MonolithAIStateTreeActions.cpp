@@ -1,4 +1,5 @@
 #include "MonolithAIStateTreeActions.h"
+#include "EdGraph/EdGraph.h"
 #include "MonolithParamSchema.h"
 #include "MonolithAssetUtils.h"
 

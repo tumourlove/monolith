@@ -2,6 +2,7 @@
 
 #if WITH_LOGICDRIVER
 
+#include "AssetRegistry/AssetData.h"
 #include "Engine/Blueprint.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"

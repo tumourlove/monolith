@@ -1,4 +1,5 @@
 #include "Indexers/DependencyIndexer.h"
+#include "AssetRegistry/AssetData.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
 

@@ -1,4 +1,5 @@
 #include "MonolithSourceDatabase.h"
+#include "GenericPlatform/GenericPlatformFile.h"
 #include "MonolithSourceSchema.h"
 #include "SQLiteDatabase.h"
 #include "Misc/Paths.h"

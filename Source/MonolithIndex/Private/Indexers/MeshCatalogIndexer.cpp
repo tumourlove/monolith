@@ -1,4 +1,7 @@
 #include "Indexers/MeshCatalogIndexer.h"
+#include "AssetRegistry/AssetData.h"
+#include "Misc/Paths.h"
+#include "StaticMeshResources.h"
 #include "MonolithIndexDatabase.h"
 #include "MonolithMemoryHelper.h"
 #include "MonolithSettings.h"

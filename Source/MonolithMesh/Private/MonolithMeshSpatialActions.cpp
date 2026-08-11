@@ -1,4 +1,6 @@
 #include "MonolithMeshSpatialActions.h"
+#include "StaticMeshResources.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
 #include "MonolithMeshUtils.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithParamSchema.h"

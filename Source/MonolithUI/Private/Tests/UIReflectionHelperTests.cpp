@@ -2,6 +2,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "CoreMinimal.h"
+#include "UObject/Package.h"
 #include "Misc/AutomationTest.h"
 
 #include "Blueprint/WidgetTree.h"

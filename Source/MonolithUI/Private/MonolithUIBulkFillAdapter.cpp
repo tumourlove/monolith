@@ -31,6 +31,9 @@
 // race against the editor's DataTable mutation cradle.
 
 #include "MonolithUIBulkFillAdapter.h"
+#include "Serialization/JsonWriter.h"
+#include "Serialization/JsonSerializer.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "MonolithJsonUtils.h"
 #include "MonolithBulkFillRegistry.h"
 #include "MonolithBulkFillTypes.h"

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "MonolithIndexer.h"
+#include "Dom/JsonObject.h"
 
 /**
  * Indexes UDataAsset subclasses by serializing all UPROPERTY defaults to JSON.

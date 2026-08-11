@@ -1,4 +1,7 @@
 #include "Indexers/DataTableIndexer.h"
+#include "UObject/TextProperty.h"
+#include "AssetRegistry/AssetData.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "MonolithSettings.h"
 #include "Engine/DataTable.h"
 #include "AssetRegistry/AssetRegistryModule.h"

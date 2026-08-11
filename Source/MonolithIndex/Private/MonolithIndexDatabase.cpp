@@ -1,4 +1,5 @@
 #include "MonolithIndexDatabase.h"
+#include "GenericPlatform/GenericPlatformFile.h"
 #include "SQLiteDatabase.h"
 #include "Misc/Paths.h"
 #include "HAL/PlatformFileManager.h"

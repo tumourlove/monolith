@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "EdGraph/EdGraphPin.h"
 #include "MonolithToolRegistry.h"
 #include "NiagaraCommon.h"
 

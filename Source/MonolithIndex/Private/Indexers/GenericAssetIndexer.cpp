@@ -1,4 +1,7 @@
 #include "Indexers/GenericAssetIndexer.h"
+#include "StaticMeshResources.h"
+#include "Animation/Skeleton.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/Texture2D.h"

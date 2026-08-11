@@ -1,4 +1,6 @@
 #include "Indexers/MaterialIndexer.h"
+#include "Engine/Texture.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialExpression.h"

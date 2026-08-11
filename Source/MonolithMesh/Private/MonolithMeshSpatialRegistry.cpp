@@ -1,4 +1,5 @@
 #include "MonolithMeshSpatialRegistry.h"
+#include "Containers/Queue.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithParamSchema.h"
 #include "MonolithJsonUtils.h"

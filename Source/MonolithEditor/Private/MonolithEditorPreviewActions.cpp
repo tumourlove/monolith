@@ -34,6 +34,7 @@
 // =============================================================================
 
 #include "MonolithEditorActions.h"
+#include "UObject/Package.h"
 #include "MonolithJsonUtils.h"
 
 #include "CoreMinimal.h"

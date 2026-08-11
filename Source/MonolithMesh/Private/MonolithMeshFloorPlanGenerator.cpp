@@ -1,4 +1,6 @@
 #include "MonolithMeshFloorPlanGenerator.h"
+#include "Containers/Queue.h"
+#include "Math/RandomStream.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithParamSchema.h"
 #include "MonolithJsonUtils.h"

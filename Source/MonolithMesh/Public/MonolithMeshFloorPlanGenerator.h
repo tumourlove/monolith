@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Math/RandomStream.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithMeshBuildingTypes.h"
 

@@ -1,4 +1,5 @@
 #include "MonolithLogicDriverDiscoveryActions.h"
+#include "AssetRegistry/AssetData.h"
 #include "MonolithParamSchema.h"
 #include "MonolithLogicDriverInternal.h"
 

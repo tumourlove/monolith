@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Dom/JsonObject.h"
 #include "IO/IoHash.h"
 #include "SQLiteDatabase.h"
 #include "MonolithIndexLog.h"

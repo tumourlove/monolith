@@ -1,4 +1,5 @@
 #include "MonolithGASModule.h"
+#include "Modules/ModuleManager.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithSettings.h"
 #include "MonolithGASAbilityActions.h"

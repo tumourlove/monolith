@@ -1,4 +1,6 @@
 #include "MonolithAIScaffoldActions.h"
+#include "AssetRegistry/AssetData.h"
+#include "Misc/PackageName.h"
 #include "MonolithParamSchema.h"
 #include "MonolithAssetUtils.h"
 

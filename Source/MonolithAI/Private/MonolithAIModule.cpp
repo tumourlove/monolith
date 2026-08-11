@@ -1,4 +1,5 @@
 #include "MonolithAIModule.h"
+#include "Modules/ModuleManager.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithSettings.h"
 #include "MonolithAIBlackboardActions.h"

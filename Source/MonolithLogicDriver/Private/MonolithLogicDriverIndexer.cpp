@@ -1,4 +1,5 @@
 #include "MonolithLogicDriverIndexer.h"
+#include "AssetRegistry/AssetData.h"
 
 #if WITH_LOGICDRIVER
 

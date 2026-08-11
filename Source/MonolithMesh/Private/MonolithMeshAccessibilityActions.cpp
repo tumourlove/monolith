@@ -1,4 +1,6 @@
 #include "MonolithMeshAccessibilityActions.h"
+#include "Materials/MaterialInterface.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
 #include "MonolithMeshUtils.h"
 #include "MonolithMeshAnalysis.h"
 #include "MonolithToolRegistry.h"

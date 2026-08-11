@@ -1,4 +1,6 @@
 #include "MonolithAIIndexer.h"
+#include "AssetRegistry/AssetData.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "MonolithSettings.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"

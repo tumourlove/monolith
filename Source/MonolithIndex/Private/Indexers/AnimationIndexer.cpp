@@ -1,4 +1,6 @@
 #include "Indexers/AnimationIndexer.h"
+#include "AssetRegistry/AssetData.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "MonolithSettings.h"
 #include "MonolithMemoryHelper.h"
 #include "Animation/AnimSequence.h"

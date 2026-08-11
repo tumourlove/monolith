@@ -1,4 +1,5 @@
 #include "MonolithComboGraphModule.h"
+#include "Modules/ModuleManager.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithSettings.h"
 #include "MonolithComboGraphActions.h"

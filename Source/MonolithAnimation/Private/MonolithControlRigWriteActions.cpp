@@ -1,4 +1,6 @@
 #include "MonolithControlRigWriteActions.h"
+#include "Serialization/JsonWriter.h"
+#include "Serialization/JsonSerializer.h"
 #include "MonolithAssetUtils.h"
 #include "MonolithParamSchema.h"
 #include "MonolithJsonUtils.h"

@@ -1,5 +1,6 @@
 // Copyright tumourlove. All Rights Reserved.
 #include "Animation/UIAnimationMovieSceneBuilder.h"
+#include "UObject/Package.h"
 
 #include "Spec/UISpec.h"
 #include "Actions/Hoisted/AnimationCoreActions.h"

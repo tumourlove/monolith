@@ -27,6 +27,7 @@
 #include "Misc/ScopeExit.h"
 #include "Math/NumericLimits.h"
 #include "HAL/PlatformFileManager.h"
+#include "GenericPlatform/GenericPlatformFile.h"
 #include "Dom/JsonObject.h"
 #include "Actions/ProjectSearchAction.h"
 #include "MonolithIndexDatabase.h"
