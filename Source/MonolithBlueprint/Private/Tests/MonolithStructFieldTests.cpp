@@ -169,9 +169,11 @@ bool FMonolithStructFieldTypeRoundTripTest::RunTest(const FString& /*Parameters*
 		}
 
 		// Round-trip through the description, which is the path get_struct_fields
-		// takes: description -> ToPinType() -> PinTypeToString().
+		// takes. The container prefix is a SEPARATE helper -- PinTypeToString alone
+		// reports `array:int` as plain `int`, which is what this test caught.
 		const FStructVariableDescription& Desc = FStructureEditorUtils::GetVarDesc(Struct).Last();
-		const FString Reported = MonolithPinTypeGrammar::PinTypeToString(Desc.ToPinType());
+		const FString Reported = MonolithPinTypeGrammar::ContainerPrefix(Desc.ToPinType())
+			+ MonolithPinTypeGrammar::PinTypeToString(Desc.ToPinType());
 		const FEdGraphPinType Reparsed = MonolithPinTypeGrammar::ParsePinTypeFromString(Reported);
 
 		TestEqual(FString::Printf(TEXT("%s round-trips to an equivalent pin type (reported as %s)"),

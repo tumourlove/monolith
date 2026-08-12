@@ -1337,12 +1337,26 @@ namespace MonolithStructFieldDetail
 		return FString::Join(Names, TEXT(", "));
 	}
 
+	/**
+	 * Render a pin type in the grammar the writers parse.
+	 *
+	 * PinTypeToString alone drops the container: an `array:int` field comes back as
+	 * plain `int`, which silently breaks the get -> add round-trip for every
+	 * container-typed field. The prefix is a separate helper, and pairing the two is
+	 * the convention the rest of the module already uses (see SerializePin).
+	 */
+	static FString DescribePinType(const FEdGraphPinType& PinType)
+	{
+		return MonolithPinTypeGrammar::ContainerPrefix(PinType)
+			+ MonolithPinTypeGrammar::PinTypeToString(PinType);
+	}
+
 	static TSharedPtr<FJsonObject> DescribeField(const FStructVariableDescription& D)
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		Obj->SetStringField(TEXT("name"), D.FriendlyName.IsEmpty() ? D.VarName.ToString() : D.FriendlyName);
 		// Reported in the same grammar the writers accept, so get -> add round-trips.
-		Obj->SetStringField(TEXT("type"), MonolithPinTypeGrammar::PinTypeToString(D.ToPinType()));
+		Obj->SetStringField(TEXT("type"), DescribePinType(D.ToPinType()));
 		Obj->SetStringField(TEXT("guid"), D.VarGuid.ToString());
 		Obj->SetStringField(TEXT("var_name"), D.VarName.ToString());
 		if (!D.DefaultValue.IsEmpty()) { Obj->SetStringField(TEXT("default_value"), D.DefaultValue); }
@@ -1592,7 +1606,7 @@ FMonolithActionResult FMonolithBlueprintStructActions::HandleSetStructFieldType(
 	}
 
 	const FGuid TargetGuid = Target->VarGuid;
-	const FString PreviousType = MonolithPinTypeGrammar::PinTypeToString(Target->ToPinType());
+	const FString PreviousType = DescribePinType(Target->ToPinType());
 
 	const FEdGraphPinType PinType = MonolithPinTypeGrammar::ParsePinTypeFromString(TypeStr);
 	if (!FStructureEditorUtils::ChangeVariableType(Struct, TargetGuid, PinType))
