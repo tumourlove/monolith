@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **User Defined Structs are editable after creation.** `create_user_defined_struct` authors a struct once, and there was no way to change or even *read* one afterwards — adding a single field to a struct that shipping Blueprints already break had to be done by hand in the editor, and its schema could only be recovered by dumping raw T3D through `project export_asset_text`. Five actions close that: `get_struct_fields`, `add_struct_field`, `remove_struct_field`, `rename_struct_field`, `set_struct_field_type`.
+
+  No new engine surface was needed — `FStructureEditorUtils` was already included and already driving `create_user_defined_struct`; it was simply unreachable for an existing asset. Fields are targeted by display name (`Mobility`) rather than the serialized `VarName` (`Mobility_36_31089BED…`), though either resolves, and a miss lists the names that do exist. `get_struct_fields` reports types through `PinTypeToString`, the same grammar the writers parse, so its output feeds straight back into `add_struct_field`.
+
+  Three behaviours are deliberate rather than incidental. `RemoveVariable` hardcodes `bAllowToMakeEmpty = false` and returns `false` for *both* "would empty the struct" and "no such field", distinguishing them only in a log line — so `remove_struct_field` pre-checks the count and says which happened. `RenameVariable` preserves `VarGuid`, which is why a rename does not disconnect existing Break/Make pins, whereas `set_struct_field_type` does and is documented as a migration. And every engine writer opens its own `FScopedTransaction`, so these actions open none; nesting would only widen the undo scope.
+
+  `add_struct_field` takes an optional `after` to position the new member, resolving the anchor's GUID *before* mutating because `AddVariable` reallocates the description array.
+
+  Tests lock the engine contract the handlers depend on (empty-struct refusal, GUID survival across rename, append ordering, `MoveVariable(PositionBelow)`, and a type-grammar round-trip across eight types) plus the action-level validation paths.
+
+- **`project search` gains an `asset_class` filter.** Takes a bare string (`"Blueprint"`) or an array (`["Blueprint","WidgetBlueprint"]`), matches case-insensitively, de-duplicates, and is capped at 32 entries. Searching a common token in a project with a large third-party content folder previously buried the target: a real `E_` search over this project returned 16 `UserDefinedEnum` rows under 21 `Texture2D`, 10 `NiagaraEmitter` and 3 `StaticMesh` — the data needed to filter was already on every result row, but there was no way to ask for it.
+
+  The predicate is applied **inside the SQL**, not as a pass over the returned array. `LIMIT` is applied by the query, so a post-hoc filter would return fewer rows than the caller asked for — frequently zero — while matching assets sat below the cut; `limit` now counts *matching* rows. Both FTS statements already `JOIN assets`, so no extra join was needed and a graph-node text hit inside a Blueprint still survives a `Blueprint` filter. Only the placeholder count is interpolated into the SQL; every class name stays bound.
+
+  The parameter is type-checked against `EJson` rather than read through `TryGetStringField`, which coerces — a numeric `7` would otherwise arrive as the string `"7"` and become a filter for a class of that name, i.e. zero results presented as a valid search instead of a `-32602`. Whitespace-only input is likewise a caller error rather than a silent widening to unfiltered. A class no asset uses is a successful empty result.
+
+  Mirrored into `monolith_query.exe` and `monolith_offline.py`, whose search path `verify_offline_parity.py` does not gate (`SPEC_MonolithIndex` asks for these three to be kept in step by hand). `Args::options` in the C++ tool is single-valued, so both CLIs take the list comma-separated; the Python tool additionally accepts a repeated `--asset-class`.
+
+  Two automation tests: `Monolith.ProjectSearch.AssetClassFilter` locks the in-SQL behaviour with a deliberately lopsided fixture (10 noise assets, 3 wanted) that a post-hoc implementation cannot pass by luck, and covers case-insensitivity, multi-class union and unknown classes; `Monolith.ProjectSearch.AssetClassValidation` covers the `-32602` paths.
+
 ## [0.22.0] - 2026-08-01
 
 ### Internal

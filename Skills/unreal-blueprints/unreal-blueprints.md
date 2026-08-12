@@ -150,7 +150,7 @@ Also works on: Level Blueprints (map path or `$current`), Widget Blueprints.
 | `add_timeline_track` | `asset_path`, `timeline_name`, `track_name`, `track_type`? | float/vector/event/color track |
 | `set_timeline_keys` | `asset_path`, `timeline_name`, `track_name`, `keys` | `[{time, value, interp_mode?}]` |
 
-### Struct, Enum & DataTable (6)
+### Struct, Enum & DataTable (11)
 
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
@@ -160,6 +160,23 @@ Also works on: Level Blueprints (map path or `$current`), Widget Blueprints.
 | `create_data_asset` | `save_path`, `class_name`, `skip_save`? | Raw UObject (DataAssets, MPCs, etc.) |
 | `add_data_table_row` | `asset_path`, `row_name`, `values` | `{column: value}` |
 | `get_data_table_rows` | `asset_path`, `row_name`? | Read rows |
+
+**Editing an existing struct.** `create_user_defined_struct` authors a struct once;
+these change one afterwards. Target fields by their **display name** (`Mobility`),
+not the serialized `VarName` (`Mobility_36_31089BED...`), though either resolves.
+
+| Action | Key Params | Purpose |
+|--------|-----------|---------|
+| `get_struct_fields` | `asset_path` | Read the field schema in declaration order. Types come back in the same grammar the writers accept, so `get` -> `add` round-trips |
+| `add_struct_field` | `asset_path`, `name`, `type`, `default_value`?, `after`?, `skip_save`? | Append a field, optionally positioned after an existing one |
+| `remove_struct_field` | `asset_path`, `name`, `skip_save`? | Remove a field. **A struct cannot be left empty** -- removing the last one is refused |
+| `rename_struct_field` | `asset_path`, `name`, `new_name`, `skip_save`? | Rename. The GUID is preserved, so existing Break/Make pins keep their connections |
+| `set_struct_field_type` | `asset_path`, `name`, `type`, `skip_save`? | Retype a field. Pins of the old type **are disconnected** by the recompile -- a migration, not a rename |
+
+Each writer recompiles the struct, which propagates the change to every Blueprint
+that breaks it. Audit references before removing or retyping: a removed member
+takes its pins with it, and a green compile afterwards is not evidence the
+callers still do the right thing.
 
 ### Build from Spec (1)
 
