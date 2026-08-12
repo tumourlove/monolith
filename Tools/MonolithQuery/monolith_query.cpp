@@ -536,7 +536,7 @@ static Args parse_args(int argc, char* argv[]) {
                   << "  lint_header <file_path>\n"
                   << "  generate_class_stub <parent> <class_name> <module>\n"
                   << "\nProject actions:\n"
-                  << "  search <query> [--limit=N]\n"
+                  << "  search <query> [--limit=N] [--asset-class=CLASS[,CLASS...]]\n"
                   << "  find_by_type <asset_class> [--limit=N] [--offset=N]\n"
                   << "  find_references <asset_path>\n"
                   << "  get_stats\n"
@@ -578,7 +578,7 @@ static Args parse_args(int argc, char* argv[]) {
         "scope", "limit", "module", "kind", "max_lines", "ref_kind",
         "direction", "depth", "context_lines", "start", "end",
         // project.*
-        "offset",
+        "offset", "asset_class",
         // monolith.guide
         "section",
         // RI shared
@@ -1990,7 +1990,9 @@ public:
         // than a repeated flag; the Python tool accepts the same syntax.
         std::vector<std::string> class_filter;
         {
-            const std::string raw_classes = args.opt("asset-class");
+            // parse_args normalises hyphens to underscores, so `--asset-class`
+            // and `--asset_class` both land under this key.
+            const std::string raw_classes = args.opt("asset_class");
             size_t start = 0;
             while (start <= raw_classes.size() && !raw_classes.empty()) {
                 const size_t comma = raw_classes.find(',', start);
