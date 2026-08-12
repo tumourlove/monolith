@@ -1513,6 +1513,8 @@ class SourceActions:
 # Upper bound on a project search query, mirroring
 # MonolithProjectSearchActionDetail::MaxQueryLength.
 PROJECT_SEARCH_MAX_QUERY_LENGTH = 4096
+# Each entry becomes one bound placeholder in an IN clause; mirrors the live cap.
+PROJECT_SEARCH_MAX_CLASS_FILTERS = 32
 
 # Diagnostics emitted by the FTS5 MATCH expression parser rather than by
 # storage/schema access. Mirrors MonolithProjectSearchDetail::IsFts5QuerySyntaxError.
@@ -1581,6 +1583,31 @@ class ProjectActions:
         limit = max(1, min(1000, args.limit))
         sqlite3 = self._sqlite3
 
+        # Mirrors the live `asset_class` filter (SPEC_MonolithIndex "Asset-Class
+        # Filtering"). Nothing gates this parity, so it is kept in step by hand.
+        class_filter = []
+        # Comma-separated within each occurrence, so `--asset-class A,B` and a
+        # repeated `--asset-class` both work. The C++ tool's option map is
+        # single-valued and only accepts the comma form, so this keeps the two
+        # tools accepting the same syntax.
+        for occurrence in (getattr(args, "asset_class", None) or []):
+            for entry in (occurrence or "").split(","):
+                entry = entry.strip()
+                if entry and entry not in class_filter:
+                    class_filter.append(entry)
+        if len(class_filter) > PROJECT_SEARCH_MAX_CLASS_FILTERS:
+            emit_error(
+                f"'asset_class' must list {PROJECT_SEARCH_MAX_CLASS_FILTERS} classes or fewer "
+                f"(got {len(class_filter)})"
+            )
+            return
+
+        # Only the placeholder count is interpolated; the names stay bound.
+        class_predicate = ""
+        if class_filter:
+            placeholders = ",".join("?" for _ in class_filter)
+            class_predicate = f" AND a.asset_class COLLATE NOCASE IN ({placeholders})"
+
         results = []
         # Per-table verdicts: None = completed, or the unknown-column message.
         not_applicable = []
@@ -1588,7 +1615,7 @@ class ProjectActions:
         def run_search(sql, table_name):
             """Returns True to continue, False once a failure has been emitted."""
             try:
-                rows = self.db.execute(sql, (query, limit)).fetchall()
+                rows = self.db.execute(sql, (query, *class_filter, limit)).fetchall()
             except sqlite3.DatabaseError as exc:
                 # DatabaseError (not just OperationalError) so DatabaseCorruptError
                 # is reported as a structured failure instead of a traceback.
@@ -1616,20 +1643,20 @@ class ProjectActions:
             return True
 
         if not run_search(
-            """SELECT a.package_path, a.asset_name, a.asset_class, a.module_name,
+            f"""SELECT a.package_path, a.asset_name, a.asset_class, a.module_name,
                       snippet(fts_assets, 2, '>>>', '<<<', '...', 32) as ctx, rank
                FROM fts_assets f JOIN assets a ON a.id = f.rowid
-               WHERE fts_assets MATCH ? ORDER BY rank LIMIT ?""",
+               WHERE fts_assets MATCH ?{class_predicate} ORDER BY rank LIMIT ?""",
             "assets",
         ):
             return
 
         if not run_search(
-            """SELECT a.package_path, a.asset_name, a.asset_class, a.module_name,
+            f"""SELECT a.package_path, a.asset_name, a.asset_class, a.module_name,
                       snippet(fts_nodes, 0, '>>>', '<<<', '...', 32) as ctx, f.rank
                FROM fts_nodes f JOIN nodes n ON n.id = f.rowid
                JOIN assets a ON a.id = n.asset_id
-               WHERE fts_nodes MATCH ? ORDER BY f.rank LIMIT ?""",
+               WHERE fts_nodes MATCH ?{class_predicate} ORDER BY f.rank LIMIT ?""",
             "nodes",
         ):
             return
@@ -2661,6 +2688,8 @@ def build_parser():
     p = prj_sub.add_parser("search")
     p.add_argument("query")
     p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--asset-class", dest="asset_class", action="append",
+                   help="Restrict to this asset class (repeatable, case-insensitive)")
 
     p = prj_sub.add_parser("find_by_type")
     p.add_argument("asset_class")

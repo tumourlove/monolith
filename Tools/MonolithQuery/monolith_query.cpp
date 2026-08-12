@@ -481,6 +481,8 @@ static std::string describe_unknown_column(const std::string& message) {
 // Upper bound on a project search query, mirroring
 // MonolithProjectSearchActionDetail::MaxQueryLength.
 static const size_t PROJECT_SEARCH_MAX_QUERY_LENGTH = 4096;
+// Each entry becomes one bound placeholder in an IN clause; mirrors the live cap.
+static const size_t PROJECT_SEARCH_MAX_CLASS_FILTERS = 32;
 
 // ============================================================
 // CLI argument parser
@@ -1982,6 +1984,45 @@ public:
             return;
         }
 
+        // Mirrors the live `asset_class` filter (SPEC_MonolithIndex "Asset-Class
+        // Filtering"). Nothing gates this parity, so it is kept in step by hand.
+        // Args::options is single-valued, so the list is comma-separated rather
+        // than a repeated flag; the Python tool accepts the same syntax.
+        std::vector<std::string> class_filter;
+        {
+            const std::string raw_classes = args.opt("asset-class");
+            size_t start = 0;
+            while (start <= raw_classes.size() && !raw_classes.empty()) {
+                const size_t comma = raw_classes.find(',', start);
+                const size_t stop = (comma == std::string::npos) ? raw_classes.size() : comma;
+                size_t b = start, e = stop;
+                while (b < e && std::isspace(static_cast<unsigned char>(raw_classes[b]))) ++b;
+                while (e > b && std::isspace(static_cast<unsigned char>(raw_classes[e - 1]))) --e;
+                if (e > b) {
+                    const std::string name = raw_classes.substr(b, e - b);
+                    if (std::find(class_filter.begin(), class_filter.end(), name) == class_filter.end())
+                        class_filter.push_back(name);
+                }
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+            }
+            if (class_filter.size() > PROJECT_SEARCH_MAX_CLASS_FILTERS) {
+                emit_failure("'asset_class' must list "
+                             + std::to_string(PROJECT_SEARCH_MAX_CLASS_FILTERS)
+                             + " classes or fewer (got " + std::to_string(class_filter.size()) + ")");
+                return;
+            }
+        }
+
+        // Only the placeholder count is interpolated; the names stay bound.
+        std::string class_predicate;
+        if (!class_filter.empty()) {
+            class_predicate = " AND a.asset_class COLLATE NOCASE IN (";
+            for (size_t i = 0; i < class_filter.size(); ++i)
+                class_predicate += (i == 0) ? "?" : ",?";
+            class_predicate += ")";
+        }
+
         json results = json::array();
         // Per-table verdicts: a table that reports an unknown column is simply not
         // the one that can answer this query. Only both refusing is a caller error.
@@ -1992,7 +2033,12 @@ public:
         auto run_search = [&](const std::string& sql, const char* table_name) -> bool {
             Rows rows;
             std::string error;
-            if (!query_checked(db, sql, {Bind(q), Bind::Integer(limit)}, rows, error)) {
+            std::vector<Bind> binds;
+            binds.reserve(class_filter.size() + 2);
+            binds.push_back(Bind(q));
+            for (const std::string& c : class_filter) binds.push_back(Bind(c));
+            binds.push_back(Bind::Integer(limit));
+            if (!query_checked(db, sql, binds, rows, error)) {
                 if (is_fts5_unknown_column_error(error)) {
                     ++not_applicable;
                     if (first_not_applicable.empty()) first_not_applicable = error;
@@ -2024,7 +2070,7 @@ public:
                 "SELECT a.package_path, a.asset_name, a.asset_class, a.module_name, "
                 "snippet(fts_assets, 2, '>>>', '<<<', '...', 32) as ctx, rank "
                 "FROM fts_assets f JOIN assets a ON a.id = f.rowid "
-                "WHERE fts_assets MATCH ? ORDER BY rank LIMIT ?",
+                "WHERE fts_assets MATCH ?" + class_predicate + " ORDER BY rank LIMIT ?",
                 "assets"))
             return;
 
@@ -2034,7 +2080,7 @@ public:
                 "snippet(fts_nodes, 0, '>>>', '<<<', '...', 32) as ctx, f.rank "
                 "FROM fts_nodes f JOIN nodes n ON n.id = f.rowid "
                 "JOIN assets a ON a.id = n.asset_id "
-                "WHERE fts_nodes MATCH ? ORDER BY f.rank LIMIT ?",
+                "WHERE fts_nodes MATCH ?" + class_predicate + " ORDER BY f.rank LIMIT ?",
                 "nodes"))
             return;
 

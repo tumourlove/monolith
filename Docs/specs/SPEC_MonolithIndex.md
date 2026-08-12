@@ -39,7 +39,7 @@
 
 | Action | Params | Description |
 |--------|--------|-------------|
-| `search` | `query` (required, max 4096 chars), `limit` (50, clamped 1-1000) | FTS5 full-text search over the `fts_assets` and `fts_nodes` columns. **Not** variables or parameters — those are structured rows, reachable via `get_asset_details`. See **Search Error Contract** below |
+| `search` | `query` (required, max 4096 chars), `limit` (50, clamped 1-1000), `asset_class` (string or array, max 32, case-insensitive) | FTS5 full-text search over the `fts_assets` and `fts_nodes` columns. **Not** variables or parameters — those are structured rows, reachable via `get_asset_details`. See **Search Error Contract** and **Asset-Class Filtering** below |
 | `find_references` | `asset_path` (required) | Bidirectional dependency lookup |
 | `find_by_type` | `asset_type` (required), `limit` (100), `offset` (0) | Filter assets by class with pagination |
 | `get_stats` | none | Row counts for all 13 tables + asset class breakdown (top 20) + `skipped_assets` / `skipped_asset_paths` (assets the poison-pill rule dropped from deep indexing — see **Full-Index Resume**) |
@@ -130,6 +130,35 @@ The offline `monolith_query.exe` and `monolith_offline.py` mirror this
 classification and these limits. Note `verify_offline_parity.py` has **no
 `project.*` cases**, so nothing gates that mirroring — keep the three in step by
 hand when editing any of them.
+
+### Asset-Class Filtering
+
+`asset_class` restricts results to one or more asset classes. It takes a bare
+string (`"Blueprint"`) or an array (`["Blueprint","WidgetBlueprint"]`), matches
+**case-insensitively** (`COLLATE NOCASE`, so `"blueprint"` works), de-duplicates,
+and is capped at **32 entries** — each becomes one bound placeholder in an `IN`
+clause, bounding the statement a single call can ask SQLite to prepare.
+
+Three properties are load-bearing:
+
+- **The predicate lives in the SQL, not in a post-pass over the results.** `LIMIT`
+  is applied by the query, so filtering the returned array would yield fewer rows
+  than the caller asked for — frequently zero — while matching assets sat below
+  the cut. `limit` counts *matching* rows. `Monolith.ProjectSearch.AssetClassFilter`
+  locks this with a deliberately lopsided fixture (10 noise assets, 3 wanted) that
+  a post-hoc implementation cannot pass by luck.
+- **Node hits are filtered by their owning asset's class.** Both statements already
+  `JOIN assets`, so a graph-node text match inside a Blueprint still survives a
+  `Blueprint` filter.
+- **The parameter is type-checked against `EJson`, not read through
+  `TryGetStringField`.** That accessor coerces, so a numeric `7` would arrive as
+  the string `"7"` and become a filter for a class of that name — zero results
+  presented as a valid search rather than a `-32602`. Whitespace-only input is
+  likewise a caller error, not a request to widen the search.
+
+Absent `asset_class` is unfiltered, which is the pre-0.22 behaviour. A class no
+asset uses is a successful empty result, not an error — it is a legitimate
+question with a legitimate answer.
 
 ### Incremental Indexing
 

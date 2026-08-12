@@ -1327,7 +1327,8 @@ EMonolithProjectSearchStatus FMonolithIndexDatabase::FullTextSearch(
 	const FString& Query,
 	int32 Limit,
 	TArray<FSearchResult>& OutResults,
-	FString& OutError)
+	FString& OutError,
+	const TArray<FString>& AssetClassFilter)
 {
 	OutResults.Reset();
 	OutError.Reset();
@@ -1340,6 +1341,23 @@ EMonolithProjectSearchStatus FMonolithIndexDatabase::FullTextSearch(
 
 	const int32 ClampedLimit = FMath::Clamp(Limit, 1, 1000);
 
+	// Only the placeholder COUNT is interpolated; every class name is still bound as a
+	// parameter, so this does not build SQL out of caller-supplied text. The count comes
+	// from the array length, never from the strings themselves.
+	const int32 FilterNum = AssetClassFilter.Num();
+	FString ClassPredicate;
+	if (FilterNum > 0)
+	{
+		FString Placeholders;
+		for (int32 i = 0; i < FilterNum; ++i)
+		{
+			Placeholders += (i == 0) ? TEXT("?") : TEXT(",?");
+		}
+		// COLLATE NOCASE on the left operand governs the IN comparison, so a caller
+		// passing "blueprint" still matches the indexed "Blueprint".
+		ClassPredicate = FString::Printf(TEXT(" AND a.asset_class COLLATE NOCASE IN (%s)"), *Placeholders);
+	}
+
 	// One table's verdict on the query. NotApplicable is not yet a failure: the
 	// sibling table gets its turn before an unknown column becomes a caller error.
 	enum class EAttempt : uint8
@@ -1350,7 +1368,7 @@ EMonolithProjectSearchStatus FMonolithIndexDatabase::FullTextSearch(
 		InternalError
 	};
 
-	auto RunSearch = [this, &OutResults, &Query, ClampedLimit](
+	auto RunSearch = [this, &OutResults, &Query, ClampedLimit, &AssetClassFilter](
 		const TCHAR* SQL,
 		const TCHAR* TableName,
 		FString& AttemptError) -> EAttempt
@@ -1369,7 +1387,22 @@ EMonolithProjectSearchStatus FMonolithIndexDatabase::FullTextSearch(
 			AttemptError = FString::Printf(TEXT("Failed to bind the %s FTS query"), TableName);
 			return EAttempt::InternalError;
 		}
-		if (!Stmt.SetBindingValueByIndex(2, ClampedLimit))
+
+		// Class filters occupy 2..N+1; the limit is always last so its index moves with
+		// the filter count rather than being hardcoded.
+		int32 BindIndex = 2;
+		for (const FString& ClassName : AssetClassFilter)
+		{
+			if (!Stmt.SetBindingValueByIndex(BindIndex, ClassName))
+			{
+				AttemptError = FString::Printf(
+					TEXT("Failed to bind the %s FTS asset_class filter"), TableName);
+				return EAttempt::InternalError;
+			}
+			++BindIndex;
+		}
+
+		if (!Stmt.SetBindingValueByIndex(BindIndex, ClampedLimit))
 		{
 			AttemptError = FString::Printf(TEXT("Failed to bind the %s FTS result limit"), TableName);
 			return EAttempt::InternalError;
@@ -1431,11 +1464,14 @@ EMonolithProjectSearchStatus FMonolithIndexDatabase::FullTextSearch(
 			: EMonolithProjectSearchStatus::InternalError;
 	};
 
-	// Search assets FTS
-	const TCHAR* const AssetSQL = TEXT("SELECT a.package_path, a.asset_name, a.asset_class, a.module_name, snippet(fts_assets, 2, '>>>', '<<<', '...', 32) as ctx, rank FROM fts_assets f JOIN assets a ON a.id = f.rowid WHERE fts_assets MATCH ? ORDER BY rank LIMIT ?;");
+	// Search assets FTS. Both statements already JOIN assets, so the class predicate
+	// needs no extra join -- it slots in beside the MATCH.
+	const FString AssetSQL = FString::Printf(
+		TEXT("SELECT a.package_path, a.asset_name, a.asset_class, a.module_name, snippet(fts_assets, 2, '>>>', '<<<', '...', 32) as ctx, rank FROM fts_assets f JOIN assets a ON a.id = f.rowid WHERE fts_assets MATCH ?%s ORDER BY rank LIMIT ?;"),
+		*ClassPredicate);
 
 	FString AssetError;
-	const EAttempt AssetAttempt = RunSearch(AssetSQL, TEXT("assets"), AssetError);
+	const EAttempt AssetAttempt = RunSearch(*AssetSQL, TEXT("assets"), AssetError);
 	if (AssetAttempt == EAttempt::InvalidQuery || AssetAttempt == EAttempt::InternalError)
 	{
 		OutResults.Reset();
@@ -1443,11 +1479,14 @@ EMonolithProjectSearchStatus FMonolithIndexDatabase::FullTextSearch(
 		return ToStatus(AssetAttempt);
 	}
 
-	// Also search nodes FTS
-	const TCHAR* const NodeSQL = TEXT("SELECT a.package_path, a.asset_name, a.asset_class, a.module_name, snippet(fts_nodes, 0, '>>>', '<<<', '...', 32) as ctx, f.rank FROM fts_nodes f JOIN nodes n ON n.id = f.rowid JOIN assets a ON a.id = n.asset_id WHERE fts_nodes MATCH ? ORDER BY f.rank LIMIT ?;");
+	// Also search nodes FTS. The class filter applies to the OWNING asset, so a node-text
+	// hit inside a Blueprint still survives a `Blueprint` filter.
+	const FString NodeSQL = FString::Printf(
+		TEXT("SELECT a.package_path, a.asset_name, a.asset_class, a.module_name, snippet(fts_nodes, 0, '>>>', '<<<', '...', 32) as ctx, f.rank FROM fts_nodes f JOIN nodes n ON n.id = f.rowid JOIN assets a ON a.id = n.asset_id WHERE fts_nodes MATCH ?%s ORDER BY f.rank LIMIT ?;"),
+		*ClassPredicate);
 
 	FString NodeError;
-	const EAttempt NodeAttempt = RunSearch(NodeSQL, TEXT("nodes"), NodeError);
+	const EAttempt NodeAttempt = RunSearch(*NodeSQL, TEXT("nodes"), NodeError);
 	if (NodeAttempt == EAttempt::InvalidQuery || NodeAttempt == EAttempt::InternalError)
 	{
 		OutResults.Reset();

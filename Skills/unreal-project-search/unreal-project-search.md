@@ -29,7 +29,7 @@ All asset paths follow UE content browser format (no .uasset extension):
 
 | Action | Params | Purpose |
 |--------|--------|---------|
-| `search` | `query` (string), `limit`? (integer) | Full-text search across indexed asset metadata and graph-node metadata |
+| `search` | `query` (string), `limit`? (integer), `asset_class`? (string or array) | Full-text search across indexed asset metadata and graph-node metadata, optionally narrowed to given asset classes |
 | `find_references` | `asset_path` (string) | Find all assets that reference a given asset |
 | `find_by_type` | `asset_type` (string), `module`? (string) | List all assets of a specific type, optionally filtered by plugin/module |
 | `get_asset_details` | `asset_path` (string) | Detailed metadata for a specific asset |
@@ -46,6 +46,26 @@ All asset paths follow UE content browser format (no .uasset extension):
 
 Variables and parameters are **not** in the full-text index — they are indexed as
 structured rows, so reach them via `get_asset_details`, not `search`.
+
+## Narrowing by Asset Class
+
+A bare token in a project with a large third-party content folder buries what you
+were after. `asset_class` restricts the result set:
+
+```
+project search  query="E_"  asset_class="UserDefinedEnum"
+project search  query="Ship"  asset_class=["Blueprint","WidgetBlueprint"]
+```
+
+Case-insensitive, de-duplicated, max 32 entries. The filter runs **inside the
+query**, so `limit` counts matching rows — you get the top N of what you asked
+for, not the top N of everything followed by a cull. A node-text hit is filtered
+by the class of the asset that **owns** the node, so searching graph text with
+`asset_class="Blueprint"` behaves as expected.
+
+A class no asset uses returns `count: 0` with `success: true` — it is a real
+question with a real answer, not an error. Omit `asset_class` for the unfiltered
+behaviour.
 
 ## FTS5 Search Syntax
 

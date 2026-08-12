@@ -333,12 +333,19 @@ public:
 	/**
 	 * Search both project FTS tables without conflating a caller's bad query with an
 	 * index/storage failure. OutResults is left empty for every non-Succeeded outcome.
+	 *
+	 * AssetClassFilter, when non-empty, restricts results to those asset classes. It is
+	 * applied INSIDE the SQL rather than to the returned array, because LIMIT is applied
+	 * by the query: filtering afterwards would return fewer rows than the caller asked
+	 * for -- often zero -- while matching assets sat below the cut. Matching is
+	 * case-insensitive so callers need not reproduce UClass casing exactly.
 	 */
 	EMonolithProjectSearchStatus FullTextSearch(
 		const FString& Query,
 		int32 Limit,
 		TArray<FSearchResult>& OutResults,
-		FString& OutError);
+		FString& OutError,
+		const TArray<FString>& AssetClassFilter = TArray<FString>());
 
 	// --- Stats ---
 	TSharedPtr<FJsonObject> GetStats();
