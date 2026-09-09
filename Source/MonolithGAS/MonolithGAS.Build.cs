@@ -24,6 +24,12 @@ public class MonolithGAS : ModuleRules
 			"GameplayAbilitiesEditor", "GameplayTasksEditor",
 			"GameplayTagsEditor",
 			"EnhancedInput",
+			// AssetRegistry: FARFilter discovery for the `input` namespace.
+			// InputCore: FKey / EKeys — EnhancedInput keeps InputCore private, so it is
+			// not inherited from there. Both also reach us via Engine's public list;
+			// listed explicitly because this module uses them directly.
+			"AssetRegistry",
+			"InputCore",
 			"EditorScriptingUtilities",
 			"Json", "JsonUtilities",
 			// UMGEditor: editor-side UWidgetBlueprintExtension + FWidgetBlueprintCompilerContext
