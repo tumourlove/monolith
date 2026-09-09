@@ -2,7 +2,7 @@
 
 **Parent:** [SPEC_CORE.md](../SPEC_CORE.md)
 **Engine:** Unreal Engine 5.7+
-**Version:** 0.22.0 (Beta)
+**Version:** 0.23.0 (Beta)
 
 ---
 
@@ -37,6 +37,10 @@ These exist because Epic's `FNiagaraStackGraphUtilities` functions lack `NIAGARA
 > **Note:** All Niagara actions accept `asset_path` (preferred) or `system_path` (backward compatible) for the system asset path parameter.
 >
 > **Input name conventions:** `get_module_inputs` returns short names (no `Module.` prefix). All write actions that accept input names (`set_module_input_value`, `set_module_input_binding`, `set_module_input_di`, `set_curve_value`) accept both short names and `Module.`-prefixed names. For CustomHlsl modules, `get_module_inputs` and `set_module_input_value` fall back to reading/writing the FunctionCall node's typed input pins directly (CustomHlsl inputs don't appear in the ParameterMap history).
+>
+> **Rapid-iteration parameters (v0.23.0, #143).** A module input set in the Niagara **stack editor** does not necessarily have a graph override pin — the engine may store it in the owning script's rapid-iteration parameter store instead. `get_module_input_value` / `get_module_inputs` used to see no override pin there and report `(default)`, which read as "this input was never touched". Both now fall back to the rapid-iteration store when an input has no override pin, and report `source: "rapid_iteration"` on those values. **Only values that differ from the module's declared default are reported as set**, because the engine seeds that store with defaults at compile time — reporting the whole store would flip the same failure the other way. Values are formatted with the engine's own pin-literal writer, so they round-trip through `set_module_input_value` unchanged.
+>
+> **Per-type pin literal syntax (v0.23.0, #122/#143).** `set_module_input_value` writes each type in the engine's own pin grammar. LinearColor emits `(R=..,G=..,B=..,A=..)` and vec2 emits `X=.. Y=..`. The JSON object form for colour (`{"r":..,"g":..,"b":..,"a":..}`) previously emitted a comma-separated literal that the engine's colour pin parser rejects — it then silently substituted black-with-alpha-1, which is the "only the alpha applied" symptom. Object values that arrive as a serialized JSON string are also accepted, since some MCP clients serialize nested params to text.
 >
 > **Param name aliases:** The canonical param names registered in schemas are `module_node` and `input`. All module write actions also accept these aliases: `module_node` → `module_name`, `module`; `input` → `input_name`. Use the canonical names when possible — aliases exist for backward compatibility.
 >

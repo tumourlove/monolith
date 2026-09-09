@@ -2,7 +2,7 @@
 
 **Parent:** [SPEC_CORE.md](../SPEC_CORE.md)
 **Engine:** Unreal Engine 5.7+
-**Version:** 0.22.0 (Beta) — architecture expansion Phase A–L landed 2026-04-26 (plan: [`Docs/plans/2026-04-25-monolith-ui-architecture-expansion.md`](../../../../Docs/plans/2026-04-25-monolith-ui-architecture-expansion.md)); optional EffectSurface provider decouple (Wave 1/2 + Final.1) landed 2026-04-27.
+**Version:** 0.23.0 (Beta) — architecture expansion Phase A–L landed 2026-04-26 (plan: [`Docs/plans/2026-04-25-monolith-ui-architecture-expansion.md`](../../../../Docs/plans/2026-04-25-monolith-ui-architecture-expansion.md)); optional EffectSurface provider decouple (Wave 1/2 + Final.1) landed 2026-04-27.
 
 ---
 
@@ -418,10 +418,24 @@ The Spec System promotes MonolithUI from a flat action toolbox into a schema-dri
 
 | Mode | Effect |
 |---|---|
+| `mode: "rebuild"` | **Default.** Tear the existing widget tree down and recreate it from the spec. Behaviour is unchanged from pre-v0.23.0. |
+| `mode: "patch"` | Reuse existing widgets by id; write only what the spec names. See § Build modes below. |
 | `dry_run: true` | Validate + walk + report a diff; no asset mutation. Returns before package creation, transaction, compile, or save. |
 | `treat_warnings_as_errors: true` | Validator warnings (missing styleRef / animationRef etc.) escalate to errors and abort the build. |
 | `raw_mode: true` | Bypass the per-write allowlist gate (legacy compat for callers that pre-date the gate). |
-| `overwrite: false` | Refuse if an asset already exists at `asset_path`. |
+| `overwrite: false` | Refuse if an asset already exists at `asset_path`. Ignored when `mode: "patch"`. |
+
+### Build modes: `rebuild` vs `patch` (v0.23.0, issue #139)
+
+`build_ui_from_spec` had exactly one behaviour: tear the widget tree down and recreate it. That is correct for authoring a screen from nothing and **silently destructive** for iterating on one — every property the spec schema does not model reset to its class default, with nothing in the response saying so.
+
+**`mode: "patch"`** matches spec nodes to existing widgets by **id + exact class**, reuses those widget and slot objects, reorders them to spec order, and adds or removes only what the spec adds or removes. Custom `WidgetStyle` tints, `BackgroundBlur.BlurStrength`, tooltips, render transforms and unmodelled slot fields survive. An `FText` whose value is unchanged is left untouched, which preserves its localization namespace and key.
+
+**`mode: "rebuild"` now audits before it destroys.** A pre-teardown pass reports every editable property that differs from its class default and is not restored by the spec builders, naming the widget and the dotted path (`Button_Play.WidgetStyle.Normal.TintColor`), plus one warning per keyed `FText` whose loc key the rebuild would reassign. **The audit runs on `dry_run: true` as well**, so the loss can be inspected before it happens.
+
+**An unrecognised `mode` value is rejected with `-32602`. It never falls back to rebuild** — a typo in the mode is exactly the case where a silent default costs the caller their properties.
+
+`ui::build_menu_from_spec` takes the same `mode` and reports `aggregate_data_loss`; `ui::dump_ui_spec_schema` documents both modes under `build_modes`.
 
 **Limits & guards:**
 
@@ -435,7 +449,8 @@ The Spec System promotes MonolithUI from a flat action toolbox into a schema-dri
 ui::build_ui_from_spec({
   spec: <FUISpecDocument JSON>,
   asset_path: "/Game/UI/MyWidget",
-  overwrite: true,             // default
+  mode: "rebuild",             // default; or "patch"
+  overwrite: true,             // default; ignored when mode="patch"
   dry_run: false,              // default
   request_id: "<caller-uuid>", // optional, echoed back
   treat_warnings_as_errors: false,
@@ -449,14 +464,25 @@ ui::build_ui_from_spec({
 {
   bSuccess: bool,
   asset_path: str,
+  mode: "rebuild" | "patch",
+  teardown: bool,
+  error_count: N,
+  warning_count: N,
   request_id?: str,
   validation: { is_valid: bool, llm_report: str },
-  node_counts: { created: N, modified: N, removed: N },
+  node_counts: { created: N, modified: N, removed: N, reused: N, semantics: str },
+  data_loss?: {
+    property_count: N, widget_count: N, widgets_audited: N,
+    localization_keys_reset: N, suppressed: N, advice: str,
+    properties: [{ kind, widget, widget_class, property_path, current_value, resets_to }]
+  },
   errors?: [{ category, widget_id, message, json_path, suggested_fix }],
   warnings?: [{ category, widget_id, message, suggested_fix }],
   diff?: { lines: [str], dry_run: bool }
 }
 ```
+
+**Reading the response (v0.23.0).** `node_counts.semantics` is a prose string spelling out what the counts mean for the mode that ran — `created:N / modified:0 / removed:N` reads like bookkeeping when it actually means the whole tree was destroyed and rebuilt, so the action says so rather than leaving it to be inferred. `data_loss` is present **only** when a teardown was about to drop something. `warnings[]` now includes validator-surface findings, so its length matches `warning_count`.
 
 **`ui::dump_ui_spec_schema`** returns a JSON-Schema-style description of `FUISpecDocument` plus the live allowlist projection per widget type. LLMs use it to build valid spec inputs without crawling our headers.
 

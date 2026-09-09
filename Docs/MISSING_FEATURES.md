@@ -6,6 +6,24 @@
 
 ---
 
+## 2026-09-10 — OPEN: carried into 0.23.0
+
+Four items known-open at the 0.23.0 release. None of them blocks it; each is stated here so nobody rediscovers them.
+
+1. **PR #123 (index memory-pressure hardening) is deferred, not rejected.** It overlaps the editor-exit deadlock fix that shipped in 0.23.0 — both rework the same indexing-worker wait/dispatch paths in the same file, and the deadlock fix changed the shape those waits have (bounded polling with a provably-stopped abandon condition, plus an abort token on game-thread dispatches). Landing #123 on top of that as a merge would produce a file neither change was designed against.
+   - **Add:** a combined design pass over the worker's wait, dispatch and memory-pressure behaviour, then reimplement #123's intent against the post-0.23.0 shape.
+
+2. **PR #104 (updater release-asset selection) is still open, pending an end-to-end Windows install rehearsal.** The auto-update path is client-side and time-shifted — it only runs when a NEWER release exists, and the code that runs is the *old installed version's*, not HEAD. "It compiles and the dialog appears" is not the path; v0.14.7 shipped an install path that could never once succeed on Windows and no release in fifteen cycles noticed (issues #90/#94).
+   - **Add:** point a client at a real release and drive the full Install click through hash verification to staged swap, on Windows, before merging. This is the standing rule for any change to the update path, not a one-off for this PR.
+
+3. **Issue #142 — shipped binaries are unsigned.** Windows Smart App Control blocks them when it is in enforcement mode. This is not a code defect and cannot be fixed in the source tree: it needs a code-signing certificate and a signing step in `make_release.ps1`.
+   - **Add:** acquire a code-signing certificate, then sign the per-engine DLLs and `monolith_query.exe` / `monolith_proxy.exe` as part of the release pipeline.
+
+4. **One un-migrated UE 5.8 sampler call site.** `MonolithMaterial/Private/MonolithMaterialActions.cpp` still calls the deprecated `UMaterialExpressionTextureBase::GetSamplerTypeForTexture` directly rather than `MonolithMaterialSamplerCompat::GetSamplerTypeForTexture`, so it still emits C4996 on 5.8. Missed by the 0.23.0 deprecation sweep because the shim was introduced for the `MonolithIndex` call site.
+   - **Add:** route it through the shim. One line, plus the `MonolithMaterialSamplerCompat.h` include.
+
+---
+
 ## 2026-08-01 — OPEN: Blueprint pin-type and component-resolver follow-ups
 
 Raised by the code review of the #115 / #116 / #102-part-1 work and deliberately not folded into it — none of them block those fixes, and each is a behaviour change that deserves its own verification rather than riding along.
@@ -47,6 +65,7 @@ Scoped out while replacing the hardcoded git roots with runtime discovery (`Reso
 Scoped out while classifying search errors and validating `project search` input. Neither blocks that work.
 
 1. **Offline `project.*` parity is ungated.** `Scripts/verify_offline_parity.py` asserts live-vs-offline byte-identical output for `cppreflect`, `network`, `decision`, `risk` and `source` — it has **no `project` cases**. Verified in the script's own case list. So the three `project search` implementations (live `MonolithIndex`, `Tools/MonolithQuery/monolith_query.cpp`, `Scripts/monolith_offline.py`) are kept in step only by hand, and `make_release.ps1`'s parity gate cannot catch a drift between them. A drift here produces a wrong result *shape* from the offline tools, not a crash. Until it is closed, treat any edit to one of the three as an edit to all three.
+   - **Still open as of 0.23.0, and the surface grew.** The `asset_class` filter added in 0.23.0 was mirrored into all three implementations by hand, including its validation rules (`EJson` type check, 32-entry cap, whitespace rejection) and its `--asset-class` CLI spelling. None of that is gated, so the three can now drift on filter semantics as well as on result shape.
    - **Add:** `project` cases to the parity harness. They need a project index present on the machine running the gate — the reason they were skipped originally.
 
 2. **`project search` cannot answer a query whose column filters span both FTS tables.** `asset_name:BP_Enemy` and `node_name:Branch` each work, because the table that does not carry the column is skipped as not-applicable. But `asset_name:X OR node_name:Y` names columns from both tables, no single table can satisfy it, and it is refused as an invalid query. Serving it would require projecting the query separately onto each table's column set. PR #113 proposed exactly that as a 1449-line hand-written FTS5 grammar parser; that parser was **rejected** — fuzzing showed its AST destructor recursed without a depth guard, killing the editor process on a query of roughly 12,000 chained terms, and a 15,935-query differential against real SQLite found 62 false accepts and 315 false rejects.

@@ -2,7 +2,7 @@
 
 **Parent:** [SPEC_CORE.md](../SPEC_CORE.md)
 **Engine:** Unreal Engine 5.7+
-**Version:** 0.22.0 (Beta)
+**Version:** 0.23.0 (Beta)
 
 ---
 
@@ -39,7 +39,7 @@
 
 | Action | Params | Description |
 |--------|--------|-------------|
-| `search` | `query` (required, max 4096 chars), `limit` (50, clamped 1-1000) | FTS5 full-text search over the `fts_assets` and `fts_nodes` columns. **Not** variables or parameters — those are structured rows, reachable via `get_asset_details`. See **Search Error Contract** below |
+| `search` | `query` (required, max 4096 chars), `limit` (50, clamped 1-1000), `asset_class` (string or array, optional) | FTS5 full-text search over the `fts_assets` and `fts_nodes` columns. **Not** variables or parameters — those are structured rows, reachable via `get_asset_details`. See **Search Error Contract** and **`asset_class` filter** below |
 | `find_references` | `asset_path` (required) | Bidirectional dependency lookup |
 | `find_by_type` | `asset_type` (required), `limit` (100), `offset` (0) | Filter assets by class with pagination |
 | `get_stats` | none | Row counts for all 13 tables + asset class breakdown (top 20) + `skipped_assets` / `skipped_asset_paths` (assets the poison-pill rule dropped from deep indexing — see **Full-Index Resume**) |
@@ -66,6 +66,22 @@
 - `fts_nodes` — content=nodes, tokenize='porter unicode61', columns: node_name, node_class, node_type
 
 **DB Location:** `Plugins/Monolith/Saved/ProjectIndex.db`
+
+### `asset_class` filter (v0.23.0)
+
+`search` accepts an optional `asset_class`: a bare string (`"Blueprint"`) or an array (`["Blueprint","WidgetBlueprint"]`). Matching is case-insensitive, the list is de-duplicated, and it is capped at 32 entries. Absent means unfiltered. Responses echo the applied filter as `asset_class_filter`.
+
+**The predicate is applied inside the SQL**, as `AND a.asset_class COLLATE NOCASE IN (?,?,...)`, not as a pass over the returned array. That distinction is the whole point: **`limit` counts *matching* rows** rather than returning the top N of everything and then culling. Searching a common token in a project with a large third-party content folder previously buried the target — a real `E_` search returned 16 `UserDefinedEnum` rows underneath 21 `Texture2D`, 10 `NiagaraEmitter` and 3 `StaticMesh`.
+
+Both FTS statements already `JOIN assets`, so a **graph-node text hit inside a Blueprint still survives a `Blueprint` filter** — node hits are filtered by their owning asset's class, which is the only class a node has.
+
+**Injection surface.** Only the placeholder count is interpolated into the statement; every class name stays a bound parameter.
+
+**Validation.** `asset_class` is type-checked against `EJson` rather than read through `TryGetStringField`, because that coerces: a numeric `7` would otherwise become a filter for a class of that name — zero results dressed up as a valid search — instead of a `-32602`. Whitespace-only input and over-cap lists are likewise `-32602`. A class no asset uses is a **successful empty result**, not an error.
+
+**Offline parity.** Mirrored into `monolith_query.exe` and `monolith_offline.py`; both accept `--asset-class A,B` and the Python tool also accepts a repeated flag. Note that `Scripts/verify_offline_parity.py` has **no `project` cases**, so this parity is maintained by hand — see `Docs/MISSING_FEATURES.md`.
+
+**Coverage.** `Monolith.ProjectSearch.AssetClassFilter` uses a lopsided 10-noise/3-wanted fixture that a post-hoc filter cannot pass by luck; `Monolith.ProjectSearch.AssetClassValidation` covers the rejection cases.
 
 ### Search Error Contract
 
@@ -219,6 +235,19 @@ At two interrupted attempts an asset is dropped from the deep queue and stamped 
 - **Post-pass sentinels always re-run from the start.** `FAnimationIndexer` operates on the `__Animations__` sentinel rather than on `assets` rows with ids, so `deep_indexed_hash` / `deep_index_attempts` do not apply to it; the same holds for the dependency, level, DataTable, config, C++, gameplay-tag and Niagara passes. A resume therefore repeats whichever post-pass work the interrupted run had done, and those indexers append rather than replace — so an interruption **during the post-pass phase** (as opposed to the far longer deep pass, where crashes normally happen) leaves duplicate `dependencies` / `actors` / `configs` / `cpp_symbols` / `tag_references` rows and duplicate animation nodes. `monolith_reindex force=true` clears them. Per-indexer post-pass checkpointing is tracked in `MISSING_FEATURES.md`.
 - The animation pass gets **per-batch transactions** (bounding an interruption's loss to one batch instead of the whole pass) but no checkpoint and no poison protection; its SEH guard already isolates per-asset crashes.
 - `monolith_reindex()` with no arguments on an interrupted index still takes the full-reset path (`CanDoIncrementalIndex()` requires `last_full_index`, which an interrupted run does not have). Use `Monolith.StartIndex` to resume.
+
+### Editor-exit shutdown (v0.23.0)
+
+**Quitting the editor while a project index was running hung the process forever.** The indexing worker parked in an unbounded `FEvent::Wait()` at **fourteen** points, every one of them waiting on work that only the game thread can run — while `Deinitialize()` blocked the game thread joining that same worker. Neither side could move.
+
+**The fix, and its shape.** Those waits now poll in 100 ms slices and abandon **only when the game thread has provably stopped serving them** — a shutdown join or engine exit. The provably-stopped condition is what keeps this from being a timeout: a slow game thread is not a stopped one, so a legitimately long dispatch still completes. A force-stopped index now exits in well under a second. **A user-initiated cancel is unaffected and still runs to a clean finish** — cancel and shutdown are different paths, and only the latter abandons work.
+
+Two related corrections landed with it:
+
+- **An abandoned game-thread dispatch is withdrawn through an abort token before the worker unwinds**, so its payload can never run against a retired stack frame. The asset-registry scan now owns its state outright instead of borrowing that frame.
+- **`Deinitialize` completes the progress notification before destroying it**, so interrupting an index by closing the editor no longer trips `"AsyncTaskNotification was still pending when destroyed"`. That assert had been hiding behind the deadlock — the process never got far enough to fire it.
+
+> **Note for future work in this file:** PR #123 (index memory-pressure hardening) overlaps this change and is deferred pending a combined design pass. See `Docs/MISSING_FEATURES.md`.
 
 **IMonolithIndexer Interface Additions**
 

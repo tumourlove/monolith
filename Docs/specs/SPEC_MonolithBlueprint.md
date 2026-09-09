@@ -2,7 +2,7 @@
 
 **Parent:** [SPEC_CORE.md](../SPEC_CORE.md)
 **Engine:** Unreal Engine 5.7+
-**Version:** 0.22.0 (Beta)
+**Version:** 0.23.0 (Beta)
 
 ---
 
@@ -126,7 +126,17 @@ Reconcile the member-variable surface of one class against another by name + typ
 **Layout (1)**
 | Action | Params | Description |
 |--------|--------|-------------|
-| `auto_layout` | `asset_path`, `graph_name`?, `formatter`? | Auto-arrange nodes in a Blueprint graph. `formatter`: `"auto"` (default) — uses Blueprint Assist if available, falls back to built-in hierarchical layout; `"blueprint_assist"` — requires BA, errors if not present; `"builtin"` — built-in layout only |
+| `auto_layout` | `asset_path`, `graph_name`?, `horizontal_spacing`?, `vertical_spacing`?, `layout_mode`?, `node_ids`?, `formatter`? | Auto-arrange nodes in a Blueprint graph. `formatter`: `"auto"` (default) — uses Blueprint Assist if available, falls back to the built-in Sugiyama layout; `"blueprint_assist"` — requires BA, errors if not present; `"monolith"` — built-in layout only. `layout_mode`: `"all"` (default), `"new_only"`, `"selected"` (requires a non-empty `node_ids`). An unrecognised value for either is an error. `layout_mode` and `node_ids` are ignored by the Blueprint Assist formatter, which warns when they are supplied |
+
+### Node placement and `new_only` layout (v0.23.0, #132)
+
+Two coupled behaviours, because the second depended on a bug in the first.
+
+**`add_node` places unpositioned nodes in clear space.** Omitting `position` used to default to `[0,0]`, so a graph authored entirely through MCP came out as one unreadable stack at the origin. A node with no explicit `position` is now placed in clear space relative to the graph's existing content, keeping a fixed clearance from everything already there. An explicit `position` is still authoritative, and the first node in an empty graph still lands at `[0,0]`. The response reports the chosen position plus `position_source` (`"explicit"` or `"auto"`).
+
+**`auto_layout(layout_mode: "new_only")` unpins piles, not just the origin.** Its rule was "unpinned only if at `(0,0)`" — which quietly depended on the origin-stacking bug above to have anything to find. A node is now treated as new if it is at the origin **or** piled on another node. "Piled" is measured as intersection area against the **smaller** of the two nodes, at a 25% threshold (`MonolithBlueprintNodeGeometry::RectsFormPile`): a quarter is high enough to leave edge contact in a hand-laid graph alone, and far below the 100% coverage that several nodes stacked on one point produce. The response gained `nodes_pinned`, so "moved nothing" is no longer indistinguishable from "nothing needed moving".
+
+> **Consequence worth knowing:** because `add_node` now lands unpositioned nodes in clear space, those nodes are **not** `new_only` candidates. Use `layout_mode: "all"` to fold freshly-added nodes into the graph's flow.
 
 **Spawn (2)**
 | Action | Params | Description |
@@ -185,6 +195,30 @@ Reconcile the member-variable surface of one class against another by name + typ
 > - `project.get_asset_details` is **neither** — it is the stale indexed snapshot, not a live verify, and should not be used to confirm a write.
 
 > **Inherited native component count (2026-06-07).** `get_blueprint_info` now reports `native_component_count` alongside the existing SCS-node `component_count` — a data-only child of a C++ `ACharacter`-like parent (no SCS nodes) previously reported `component_count: 0` despite inheriting native components. `native_component_count` deliberately stays keyed on `ParentClass`: it is counting *natives*, which is correct.
+
+### User Defined Struct fields (5 — new in v0.23.0)
+
+`create_user_defined_struct` authored a struct once and there was no way to change one afterwards, nor any way to read one at all. These five close that. No new engine surface was needed — `FStructureEditorUtils` already drove `create_user_defined_struct` and was simply unreachable for an existing asset.
+
+| Action | Params | Description |
+|--------|--------|-------------|
+| `get_struct_fields` | `asset_path` | Read the field schema in declaration order. Returns per field `name` (the display name the writers target), `type`, `guid`, `var_name`, `default_value`, `tooltip` |
+| `add_struct_field` | `asset_path`, `name`, `type`, `default_value`?, `after`?, `skip_save`? | Append a field, or insert it directly after a named field. `type` uses the same grammar as `add_variable` |
+| `remove_struct_field` | `asset_path`, `name`, `skip_save`? | Remove a field |
+| `rename_struct_field` | `asset_path`, `name`, `new_name`, `skip_save`? | Rename a field. The underlying GUID is preserved, so existing Break/Make nodes keep their connections |
+| `set_struct_field_type` | `asset_path`, `name`, `type`, `skip_save`? | Retype a field |
+
+**Fields are targeted by display name.** `Mobility`, not the serialized `VarName` (`Mobility_36_31089BED...`) — though either resolves. A miss lists the names that do exist. `get_struct_fields` reports types in the grammar the writers parse, containers included, so its output feeds straight back into `add_struct_field`.
+
+**Each writer reports what it recompiled, what it dirtied, and which assets reference the struct.** Those `dependents` are **not** recompiled by the call — audit them before a removal or a retype, because the recompile drops the member from every Blueprint the change breaks. `set_struct_field_type` additionally reports the default value the engine discards, because **a retype is a migration, not a rename**: the field's default is cleared and pins of the old type on existing Break/Make nodes are disconnected by the recompile.
+
+**Three engine behaviours are answered rather than passed through**, because each returns a bare `false` for two different reasons:
+
+- `RemoveVariable` returns false for both "would empty the struct" (a struct cannot be left with no fields) and "no such field".
+- `ChangeVariableType` / `RenameVariable` return false for a no-op. Names compare case-insensitively, so a case-only rename is refused by the engine.
+- `MoveVariable` returns false when the field is already in the requested slot.
+
+`default_value` on `add_struct_field` is applied via `ChangeVariableDefaultValue`; the engine validates it against the field type and silently keeps the type default if it does not parse, so the response reports whether it took.
 
 ### Component resolver (2026-08-01, issue #116 + PR #102 part 1)
 

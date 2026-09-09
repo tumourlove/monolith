@@ -2,7 +2,7 @@
 
 **Parent:** [SPEC_CORE.md](../SPEC_CORE.md)
 **Engine:** Unreal Engine 5.7+
-**Version:** 0.22.0 (Beta)
+**Version:** 0.23.0 (Beta)
 
 ---
 
@@ -62,13 +62,13 @@ Pattern table:
 | `get_log_stats` | Log stats: total, fatal, error, warning, log, verbose counts |
 | `get_compile_output` | Structured compile report: result, time, log lines from compile categories (LogLiveCoding, LogCompile, LogLinker), error/warning counts, patch status. Time-windowed to last compile |
 | `get_crash_context` | CrashContext.runtime-xml + Ensures.log + 20 recent errors. Truncated at 4096 chars |
-| `capture_scene_preview` | Capture screenshot of Niagara or material asset in preview scene. Params: `asset_path`, `asset_type`, `seek_time`, `camera`, `resolution`, `output_path` |
+| `capture_scene_preview` | Capture screenshot of Niagara or material asset in preview scene. Params: `asset_path`, `asset_type`, `seek_time`, `camera`, `resolution`, `width`, `height`, `output_path`. **v0.23.0 (#141, @Alexbeav):** scalar `width` / `height` (1-8192, default 512 each) are now declared in the action schema and honoured — they previously came back as `Unknown param` warnings while the capture silently stayed 512x512. They override the matching element of the `resolution: [w,h]` array when both are supplied; existing `resolution`-only callers are unchanged. Use them to match a widget's design frame (a square capture yields false layout conclusions). Non-positive sizes and sides beyond 8192 px are rejected as `-32602`; the widget branch's scale-adjusted physical target is clamped to the same ceiling |
 | `capture_sequence_frames` | Multi-frame temporal capture at specified timestamps. Returns array of frame PNGs. Params: `asset_path`, `timestamps[]`, `camera`, `resolution` |
 | `import_texture` | Import external image (PNG/TGA/EXR/HDR) as UTexture2D with settings (compression, sRGB, tiling, LOD group). Params: `source_path`, `destination`, `settings` |
 | `stitch_flipbook` | Stitch multiple texture assets into a flipbook atlas. Params: `frames[]`, `columns`, `save_path` |
 | `delete_assets` | Delete one or more assets by path. Params: `asset_paths[]` (required), `allowed_prefixes[]` (optional path guard), `force` (optional bool, default `false`). Before deleting each target the action clears its package dirty flag and closes any open asset editor, then runs the delete inside an **unattended-script guard** so the engine never raises a blocking "asset in use" / "save changes" modal (which would freeze an unattended MCP session). `force=false` soft-deletes after closing editors; `force=true` calls `ForceDeleteObjects`, nulling referencers. Per-asset failures are reported in a `failed_to_delete[]` response array rather than aborting the call. **Known limitation:** a NiagaraScript created + compiled in the same session can't be deleted until its compile state clears — a transient compilation/traversal graph holds a reference (the engine's own Content Browser hits the same wall); it becomes deletable after the state clears (e.g. editor restart). |
 | `get_viewport_info` | Get active editor viewport camera location, rotation, FOV, resolution, realtime state |
-| `create_empty_map` | **Phase J F8.** Create a fully blank UWorld asset at `path` and save the package. v1 supports `map_template="blank"` only. Errors cleanly on path collision, malformed package path, factory/save failure |
+| `create_empty_map` | **Phase J F8.** Create a fully blank UWorld asset at `path` and save the package. `map_template="blank"` only. Errors cleanly on path collision, malformed package path, factory/save failure. **v0.23.0 (@whalemenace):** gained `open` (default `false`) and `dirty_policy` (default `refuse`) — see § create_empty_map does not change the open world |
 | `get_module_status` | **Phase J F8.** Report `{ module_name, plugin_name, enabled, loaded, is_runtime, version? }` for the named modules (or all Monolith modules if `module_names` is omitted). Unknown modules return `enabled=false / loaded=false / plugin_name=""` without error |
 
 **Capture (1 additional from v0.14.7+)**
@@ -95,9 +95,31 @@ Pattern table:
 
 | Action | Description |
 |--------|-------------|
-| `start_pie` | Begin a PIE session pinned to in-viewport mode (`EPlaySessionWorldType::PlayInEditor` + first active level viewport via `FLevelEditorModule::GetFirstActiveViewport`). Independent of the user's `LastExecutedPlayModeType` toolbar choice. Returns `started: true, mode: 'in_viewport'`. Refuses to queue duplicates when PIE is already running. |
+| `start_pie` | Begin a PIE session pinned to in-viewport mode (`EPlaySessionWorldType::PlayInEditor` + first active level viewport via `FLevelEditorModule::GetFirstActiveViewport`). Independent of the user's `LastExecutedPlayModeType` toolbar choice. Returns `started: true, mode: 'in_viewport'`. Refuses to queue duplicates when PIE is already running. **v0.23.0:** gained `on_compile_errors` — see § start_pie compile-error policy |
 | `stop_pie` | End the active PIE session via `GUnrealEd->RequestEndPlayMap()`. No-op (returns `stopped: false`) if PIE not active. |
 | `run_console_command` | Execute a console command. Routes to the first PIE PlayerController found (multi-client PIE not disambiguated); falls back to `GEngine->Exec` (with null-guard) when no PIE session is active. |
+
+### `start_pie` compile-error policy (v0.23.0, thanks @Hvizeu)
+
+Starting PIE with a Blueprint in an unresolved error state raises the engine's blocking compile-error modal. That modal runs a nested modal loop on the game thread, which **starves the in-process MCP server** — the session hangs rather than returning a result.
+
+`start_pie` now pre-flights every loaded Blueprint against the engine's own unresolved-error condition (`BS_Error && bDisplayCompilePIEWarning` — the exact test `FInternalPlayLevelUtils::ResolveDirtyBlueprints` uses) and applies `on_compile_errors`:
+
+| Value | Effect |
+|-------|--------|
+| `"refuse"` | **Default.** Returns an error with the offending `{name, path}` list and does NOT start PIE. |
+| `"suppress"` | Starts PIE anyway under a scoped `GIsRunningUnattendedScript` guard, so `ShowBlueprintErrorDialog` early-outs instead of running the nested modal loop. |
+
+An unrecognised policy is rejected as `-32602` **before any editor-state check**. A successful start reports `compile_error_policy`, `errored_blueprint_count` and `errored_blueprints`.
+
+### `create_empty_map` does not change the open world (v0.23.0, thanks @whalemenace)
+
+The action saves a `UWorld` **asset** and leaves the editor on whatever level was already loaded. It always did — but the response did not say so, and agents chaining create -> populate silently edited the wrong world.
+
+- The response now **always** carries `current_world` (the editor world after the call, as a package name directly comparable to `path`) and `opened`, and the success message states outright that the open world is unchanged and how to switch.
+- `open: true` (default `false`) loads the new map by delegating to `editor::load_level`, inheriting its dirty-current-map refusal, PIE-teardown guard and stale-resident-world guard.
+- `dirty_policy` (`"refuse"` default, or `"discard"`) is forwarded to `load_level` when `open=true`, and ignored otherwise.
+- **If the map is created but the open is refused, the call still SUCCEEDS** with `opened=false` and `open_error` explaining why. The asset exists on disk either way, so retrying `create_empty_map` would just collide.
 
 **Preview & Inspection (4 — v0.16.0)**
 
@@ -125,6 +147,13 @@ Plus `capture_scene_preview` (in Base section above) was **extended** in v0.16.0
 **Async PIE design rationale.** `run_pie_smoke` / `capture_pie_movement_clip` are an async session family rather than a single blocking call because a synchronous in-handler engine pump is impossible: the MCP handler runs *inside* the editor's frame, so calling `GEditor->Tick` / `UWorld::Tick` / `ProcessAsyncLoading` from within the handler re-enters the engine tick and trips re-entrancy asserts (the prior synchronous pump re-entered `UWorld::Tick` and crashed). The async design sidesteps this: `run` starts PIE and registers a frame observer, then returns a `session_id` immediately; the editor's own real frame loop advances PIE and accumulates AnimInstance samples + post-marker log-pattern counts; `poll` reads the accumulated state; `stop` force-ends and cleans up (the shared observer self-unregisters when no sessions remain). `capture_pie_movement_clip` reuses the same session model, adding per-interval viewport capture.
 
 **Grouped log patterns + teardown bucketing.** `log_patterns` accepts either the legacy **flat array** (back-compat — every entry is treated as `must_absent`) or a **grouped object** `{ must_absent, must_present, observe_only, warn }`. `must_absent`: any match fails `ok` (default-set substrings are always added here). `must_present`: every pattern must match `>=1` for `ok`. `observe_only`: counted + reported, never affects `ok`. `warn`: surfaces a `warnings[]` list, never affects `ok`. Independently, post-marker entries are split at the first `ignore_after_pattern` (default `"BeginTearingDown"`) hit into an **active-runtime** bucket (before) and a **teardown** bucket (after); `ok` consumes the active-runtime bucket only, and with `teardown_allowed=true` (default) teardown-bucket hits never affect `ok`. This fixes the known false-fail where a post-`BeginTearingDown` `"Unable to find RecastNavMesh..."` warning wrongly failed an otherwise-clean smoke.
+
+**Capturing UMG in a PIE clip (`include_ui`, v0.23.0, thanks @whalemenace).** `capture_pie_movement_clip`'s default capture path is `FViewport::ReadPixels`, which only ever sees the **scene render target** — Slate composites UMG into the backbuffer afterwards, so a UI capture came back as an empty scene. `include_ui: true` (default `false`, no behaviour change when absent) routes frames through the engine screenshot path instead (`FScreenshotRequest::RequestScreenshot` — the `shot showui` mechanism), so the written PNG contains game + UMG.
+
+Two caveats, both reported rather than hidden:
+
+- **Frames are written asynchronously at end of frame**, so the per-frame uniformity/validity check does not apply to them. `capture_validity` reports `uniformity_checked: false` plus a note; the clip directory is the ground truth for what was captured.
+- **With PIE docked in the editor, the backbuffer is the whole editor window.** Use new-window PIE for a clean game+UI clip.
 
 **Delayed in-session probes (`probe_scripts`).** Start-time `console_script` / `python_script` run once against the PIE world the instant PIE is requested; an external `editor.run_python` issued later races teardown. `probe_scripts` (`[{ at_seconds, python?, console?[] }]`) instead fires each probe ONCE from the per-frame observer (which already holds the live PIE world each frame) when session elapsed reaches `at_seconds`, using the same `IPythonScriptPlugin::ExecPythonCommandEx` / `PlayerController::ConsoleCommand` mechanism. Each probe's fire time + python output/error are reported under `probes[]`.
 

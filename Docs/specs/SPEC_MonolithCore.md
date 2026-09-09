@@ -2,7 +2,7 @@
 
 **Parent:** [SPEC_CORE.md](../SPEC_CORE.md)
 **Engine:** Unreal Engine 5.7+
-**Version:** 0.22.0 (Beta)
+**Version:** 0.23.0 (Beta)
 
 ---
 
@@ -36,6 +36,19 @@
 |--------|--------|---------------|
 | `MonolithPinTypeGrammar::{TryParsePinType, ParsePinTypeFromString, PinTypeToString, ContainerPrefix, ResolveEnumByNameOrPath}` | `MonolithPinTypeGrammar.h` (header-only inline) | The single implementation of the MCP-friendly pin-type token grammar and its inverse — `bool` / `int` / `struct:Vector` / `enum:ESlateVisibility` / `array:object:StaticMesh` / `map:string:int` and so on. It previously existed twice (MonolithBlueprint + MonolithUI) and the copies drifted, which is what shipped enum widget variables that compiled to `int` (issue #115). `TryParsePinType` is the preferred entry point: it fails **by token** — an `object:` / `class:` / `struct:` / `enum:` / `softobject:` / `softclass:` sub-object that does not resolve, an unknown base token, or a bad container value type is a hard `false` with a caller-facing reason, and `Out` is left untouched. `ParsePinTypeFromString` keeps the historical best-effort shape (bool fallback, null sub-object) for un-migrated call sites. **Linkage invariant:** MonolithCore does not link `BlueprintGraph`, so this header is inline-only and must NEVER be included from a MonolithCore `.cpp` (or a MonolithCore test) — the `UEdGraphSchema_K2::PC_*` constants are dllimport'd from `BlueprintGraph` and referencing them from a MonolithCore translation unit is an LNK2019. Same pattern, and same reason, as `MonolithPropertyAccessReader.h` and `MonolithAnimNodeBindingReader.h`. The modules that do link `BlueprintGraph` and may include it from a `.cpp`: MonolithAI, MonolithAnimation, MonolithBlueprint, MonolithComboGraph, MonolithGAS, MonolithIndex, MonolithLevelSequence, MonolithLogicDriver, MonolithUI. |
 | `MonolithCore::ValidatePackagePath(const FString&)` | `MonolithPackagePathValidator.h` (inline) | Wraps `FPackageName::IsValidLongPackageName` with an empty-string-on-success / error-msg-on-failure contract. Rejects empty input, double-slash (`//Game/...`), missing `/Game/` root, trailing slash, illegal chars. Added `dv.367` after a fatal `UObjectGlobals.cpp:1012` ensure from a malformed `//Game/...` JSON payload reaching `CreatePackage`. Routing is incremental and module-keyed. Current owners: MonolithUI (`HandleCreateWidgetBlueprint`, the original crash site), MonolithAI (`MonolithAIInternal::GetOrCreatePackage`), MonolithGAS (`MonolithGASInternal::GetOrCreatePackage`); MonolithBlueprint, MonolithMaterial and MonolithNiagara are being wired now. Grep the Source tree for `ValidatePackagePath` for the current owner list rather than trusting a count here. |
+
+### Engine-version compat headers
+
+UE 5.7 is the compile floor and every change must build on both 5.7 and 5.8. Where 5.8 moved or deprecated an API that Monolith calls from more than one place, the version gate lives in **one** header in `MonolithCore/Public` rather than at every call site — otherwise a single 5.8 deprecation scatters `ENGINE_MINOR_VERSION` checks across the tree and the next one is missed.
+
+| Header | Resolves | Why it exists |
+|--------|----------|---------------|
+| `MonolithCoreDelegatesCompat.h` | `MonolithCoreDelegatesCompat::GetOnPostEngineInit()` -> `FSimpleMulticastDelegate&` | UE 5.8 deprecated the `FCoreDelegates::OnPostEngineInit` **data member** in favour of a `GetOnPostEngineInit()` accessor; 5.7 ships only the data member. Consumers: MonolithAI, MonolithLevelSequence, MonolithUI (both `AddLambda` and `Remove` call sites) |
+| `MonolithMaterialSamplerCompat.h` | `MonolithMaterialSamplerCompat::GetSamplerTypeForTexture(const UTexture*, bool bForceNoVirtualTexture = false)` -> `EMaterialSamplerType` | UE 5.8 moved `GetSamplerTypeForTexture` from `UMaterialExpressionTextureBase` to the `MaterialExpressionUtils` namespace and deprecated the former entry point. **5.7 does not ship `MaterialExpressionUtils.h` at all**, so the include itself has to be gated, not just the call. Consumer: MonolithIndex (`Indexers/GenericAssetIndexer.cpp`) |
+
+Both are header-only `FORCEINLINE` shims gated on `ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8`, and both are safe to include from any module — neither pulls a dependency `MonolithCore` does not already carry.
+
+> **One un-migrated sampler call site.** `MonolithMaterial/Private/MonolithMaterialActions.cpp` still calls `UMaterialExpressionTextureBase::GetSamplerTypeForTexture` directly, so it still emits the 5.8 C4996 there. It is a single-line migration to the shim; tracked in [`MISSING_FEATURES.md`](../MISSING_FEATURES.md).
 
 ### Actions (4 — namespace: "monolith")
 

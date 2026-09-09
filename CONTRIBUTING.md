@@ -36,7 +36,7 @@ YourProject/Plugins/Monolith/   — edit, build, commit, push from here
 
 ## Code Structure
 
-Monolith ships **~1,400+ actions across 25+ namespaces** (an approximate, rounded-down figure -- run `monolith_discover()` for the live count; per-module counts are deliberately not listed here because they go stale the moment an action is added).
+Monolith ships **~1,400+ actions across 26 namespaces** (an approximate, rounded-down figure -- run `monolith_discover()` for the live count; per-module counts are deliberately not listed here because they go stale the moment an action is added).
 
 Each module owns a specific domain:
 

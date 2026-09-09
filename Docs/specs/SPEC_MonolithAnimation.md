@@ -2,7 +2,7 @@
 
 **Parent:** [SPEC_CORE.md](../SPEC_CORE.md)
 **Engine:** Unreal Engine 5.7+
-**Version:** 0.22.0 (Beta)
+**Version:** 0.23.0 (Beta)
 
 ---
 
@@ -411,9 +411,11 @@ Node-level write operations over Animation Blueprint graphs, built for AnimBP re
 
 ---
 
-## Chooser Namespace (10 — namespace: "chooser")
+## Chooser Namespace (16 — namespace: "chooser")
 
-A dedicated namespace for inspecting and editing `UChooserTable` assets, registered from `MonolithAnimation`. **All actions are `#if WITH_CHOOSER` gated** — they register only when the Chooser plugin (`Engine/Plugins/Chooser`) is present. The namespace registers no actions in builds without it.
+A dedicated namespace for inspecting and editing `UChooserTable` assets, registered from `MonolithAnimation`.
+
+**Two registration tiers, and the difference matters.** The 10 authoring/edit actions below are `#if WITH_CHOOSER` gated — they register only when the Chooser plugin (`Engine/Plugins/Chooser`) is present. The **6 read-only actions added in v0.23.0 are NOT gated**: they read `UChooserTable` through reflection only, with no `Chooser.h` include, so they compile and register identically with the plugin enabled or disabled. With it disabled they return an explicit availability error (or, for registry-only discovery, `available=false` metadata) rather than synthesized data.
 
 | Action | Description |
 |--------|-------------|
@@ -432,5 +434,24 @@ A dedicated namespace for inspecting and editing `UChooserTable` assets, registe
 | `add_chooser_column` | Append a column. `column_kind` is `Bool` / `Enum` / `GameplayTag` / `FloatRange` / `OutputObject`. Input (filter) columns take an optional `binding_property` dotted path setting the `InputValue` binding chain. For an `Enum` column, an optional `enum_class` (resolved from an enum path/name) sets the column's enum type so cell values validate against the right `UEnum`. The new column's per-row value array is grown to the table's current row count so all parallel arrays stay aligned. Marks the package dirty. |
 | `add_chooser_row` | Append a row. `cells` is one entry per INPUT column in column order (`Bool`: bool/`any`; `Enum`: int; `FloatRange`: `{min,max}`; `GameplayTag`: tag string); `output_psd` is the asset the row selects (written as an `FAssetChooser` result). Every parallel array (per-column value arrays, `OutputObject` `RowValues`, `ResultsStructs`, `DisabledRows`) grows by exactly 1 atomically. Marks the package dirty. |
 | `set_chooser_cell` | Set a single cell value at `(row, column)` in an existing chooser table. Dispatches per column kind to the matching predicate-cell write (`Bool` → bool/`any`; `Enum` → int validated against the column's `enum_class`; `FloatRange` → `{min,max}`; `GameplayTag` → tag string), keeping the typed predicate arrays aligned. Marks the package dirty. |
+
+**Chooser read-only inspection (6 — new in v0.23.0)** — bounded, non-mutating reads over a `UChooserTable`. Ungated (reflection-only, see the two-tier note above).
+
+| Action | Description |
+|--------|-------------|
+| `list_chooser_tables` | AssetRegistry `UChooserTable` discovery with **boundary-exact** package-prefix filtering — `/Game/Choosers` never matches `/Game/ChoosersOld` — and stable bounded pagination. Params: `path_filter` (canonical mounted long package prefix; aliases and backslash spellings are rejected, not repaired), `offset`, `limit` (1-1000, default 200). Reports `total` + `has_more`, so a truncated page is never mistaken for the whole project. Registry-only, so it answers with metadata (`available=false`) even when the Chooser plugin is disabled |
+| `get_chooser_table` | Bounded summary: row / column / result / cooked-result / disabled-row / nested / context counts, bounded column summaries, the fallback result, and the bounded reference scan with its completeness fields. Params: `asset_path` (required), `include_rows` (default `false`), `row_limit` (1-500, default 50). Strictly read-only — never compiles, saves or dirties |
+| `list_chooser_columns` | Reflected column inventory: per-column struct type, output/input role, disabled state, the **active** row-value property name + element type, and its row-value count. Bounded at 512 columns with an explicit truncation flag. Params: `asset_path` (required) |
+| `list_chooser_rows` | Bounded page of result rows with per-column reflected cell values. Params: `asset_path` (required), `start_row`, `limit` (1-500, default 100). Reports `row_cells_per_row` against `column_count`, so a partially-celled wide row is never mistaken for a complete one, plus `has_more` for the page itself |
+| `list_chooser_references` | Stable, deduplicated page of every hard and soft reference reachable by reflection, each with its source property chain and **exact existence evidence** — a loaded empty package shell or a deleted export reads as `exists=false`. Params: `asset_path` (required), `offset`, `limit` (1-1000, default 200). Reports `scan_truncated` / `scan_depth_limited` / `scan_complete`, so an unfinished walk is never reported as clean |
+| `validate_chooser_table` | Non-mutating structural preflight: per-column row-value alignment against the row count, `ResultsStructs` / `DisabledRows` alignment, result-target validity per result kind, and unresolved soft references. Params: `asset_path` (required). `complete` is false whenever any bound stopped the check short |
+
+> **`validate_chooser_table` is DISTINCT from `validate_chooser` — neither replaces the other.** `validate_chooser` (above) runs `Compile(true)`; it is the compile-oriented pass and it is the one to use when you want the engine's own verdict. `validate_chooser_table` **never compiles, mutates, saves or dirties a package** — it is a structural preflight you can run against content you do not want to touch. The names are close because the surfaces are close; the mutation contract is what separates them.
+
+**Bounding contract.** Every response from the six is finite. Independent table / row / column / reference / depth / field / container / string / global-visit bounds apply, and **each cutoff is reported through an explicit truncation or `complete` field** — a short answer is never indistinguishable from a whole one.
+
+**Two reflection details worth knowing.** Column readback reads the ACTIVE per-row array (`RowValuesWithAny`), not the UHT-registered deprecated `RowValues`, which is why bool columns report their real cell counts rather than zero. And stale `CookedResults` are counted separately rather than being allowed to inflate the authoritative editor row count.
+
+**Path handling.** Canonical paths only. Aliases, redirectors, backslash spellings and case-only variants are **rejected rather than silently normalized** — a read action that repairs its input teaches the caller a path that the write actions will refuse.
 
 ---

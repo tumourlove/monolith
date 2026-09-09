@@ -2,7 +2,7 @@
 
 **Parent:** [SPEC_CORE.md](../SPEC_CORE.md)
 **Engine:** Unreal Engine 5.7+
-**Version:** 0.22.0 (Beta) — includes the 12 MetaSound document introspection actions
+**Version:** 0.23.0 (Beta) — includes the 12 MetaSound document introspection actions
 
 ---
 
@@ -126,6 +126,10 @@ Companion deep indexer: `FMetaSoundIndexer` lives in `MonolithIndex/Private/Inde
 ### Notes
 
 > **Sound Cue connection semantics.** `from` is the child (data source), `to` is the parent (consumer). This matches the `ChildNodes[]` model where the parent holds references to its inputs.
+>
+> **Sound Cue editor-graph guard (v0.23.0, issue #125, reported by @M0rtaI).** A `USoundCue` whose asset editor has never been opened has **no editor graph**. `FinalizeCue` called `USoundCue::LinkGraphNodesFromSoundNodes()` unconditionally, and that engine implementation `CastChecked`s every sound node's editor graph-node back pointer — a fatal assert (`Cast of nullptr to SoundCueGraphNode failed`), not a soft failure, so `audio.add_sound_cue_node` and four sibling actions **took the editor down** when the target cue's editor was closed. `audio.connect_sound_cue_nodes` crashed earlier still: `USoundNode::InsertChildNode` routes through `FSoundCueAudioEditor::CreateInputPin` and `CastChecked`s the same back pointer before `FinalizeCue` is ever reached.
+>
+> Sound Cue edits now **rebuild a missing editor graph before touching it** (`USoundCue::CreateGraph` / `SetupSoundNode`), and **skip the graph link entirely when it still cannot be linked safely**, instead of asserting. The runtime node chain — the part that actually plays — is updated either way. All **twelve** Sound Cue mutation actions report `graph_link_skipped: true` in their JSON response (and log a warning) when the visual graph link had to be skipped, so a cue that is correct at runtime but unlinked in the editor graph is a stated outcome rather than a silent one.
 >
 > **MetaSound Builder lifecycle.** For multi-step operations, the builder is cached via `FindOrBeginBuilding()`. If the editor restarts, the builder is lost and individual mutation actions return `METASOUND_BUILDER_LOST`. The recommended workflow is `build_metasound_from_spec` for full graph creation in one call.
 >
