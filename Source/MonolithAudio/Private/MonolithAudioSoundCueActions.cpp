@@ -35,6 +35,12 @@
 // Factory
 #include "Factories/SoundCueFactoryNew.h"
 
+// Sound Cue editor graph (AudioEditor) - the back pointers the engine graph helpers CastCheck
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
+#include "SoundCueGraph/SoundCueGraphNode.h"
+#include "SoundCueGraph/SoundCueGraphNode_Root.h"
+
 // Editor utilities
 #include "Editor.h" // GEditor
 #include "ObjectTools.h"
@@ -530,10 +536,148 @@ bool FMonolithAudioSoundCueActions::SetNodeProperty(USoundNode* Node, const FStr
 	return false;
 }
 
-void FMonolithAudioSoundCueActions::FinalizeCue(USoundCue* Cue)
+// Restores the editor-only Sound Cue graph that the AudioEditor graph helpers assume is present.
+//
+// A cue that is loaded without its asset editor can carry a null SoundCueGraph - the engine only
+// ensure()s on that state (Engine/Private/SoundCue.cpp, USoundCue::PostLoad) and skips its own
+// graph work - and sound nodes built while the graph is missing keep a null GraphNode back
+// pointer. Every AudioEditor entry point we drive CastChecks that back pointer:
+// FSoundCueAudioEditor::LinkGraphNodesFromSoundNodes and ::CreateInputPin (reached from
+// USoundNode::InsertChildNode) both live in Editor/AudioEditor/Private/SoundCueGraph.cpp and use
+// CastChecked, which is a fatal assert rather than a soft failure.
+//
+// Rebuilding here is cheap and idempotent: CreateGraph() is a no-op when a graph already exists,
+// and SetupSoundNode() only runs for nodes that have no graph node yet (it check()s that itself).
+// Repaired nodes land at the graph origin; the cue editor can lay them out again.
+bool FMonolithAudioSoundCueActions::EnsureSoundCueGraph(USoundCue* Cue)
 {
+	if (!Cue || !USoundCue::GetSoundCueAudioEditor().IsValid())
+	{
+		return false;
+	}
+
+	if (!Cue->GetGraph())
+	{
+		Cue->CreateGraph();
+		if (!Cue->GetGraph())
+		{
+			return false;
+		}
+		UE_LOG(LogMonolith, Warning, TEXT("Sound Cue '%s' had no editor graph; rebuilt it before editing."), *Cue->GetPathName());
+	}
+
+#if WITH_EDITORONLY_DATA
+	// LinkGraphNodesFromSoundNodes walks AllNodes, FirstNode and every ChildNodes entry, and
+	// CastChecks the graph node of each - collect all three sets, not just AllNodes.
+	TSet<USoundNode*> NodesToRepair;
+	for (USoundNode* Node : Cue->AllNodes)
+	{
+		if (Node)
+		{
+			NodesToRepair.Add(Node);
+			for (USoundNode* Child : Node->ChildNodes)
+			{
+				if (Child)
+				{
+					NodesToRepair.Add(Child);
+				}
+			}
+		}
+	}
+	if (Cue->FirstNode)
+	{
+		NodesToRepair.Add(Cue->FirstNode.Get());
+	}
+
+	for (USoundNode* Node : NodesToRepair)
+	{
+		if (!Node->GetGraphNode())
+		{
+			Cue->SetupSoundNode(Node, /*bSelectNewNode=*/false);
+		}
+	}
+#endif
+
+	return true;
+}
+
+// Mirrors every fatal precondition of FSoundCueAudioEditor::LinkGraphNodesFromSoundNodes
+// (Editor/AudioEditor/Private/SoundCueGraph.cpp): a graph, exactly one root node with a pin, a
+// USoundCueGraphNode for every sound node it walks, and one input pin per child slot.
+bool FMonolithAudioSoundCueActions::CanLinkGraphNodes(USoundCue* Cue)
+{
+	if (!Cue) return false;
+
+	UEdGraph* Graph = Cue->GetGraph();
+	if (!Graph) return false;
+
+#if WITH_EDITORONLY_DATA
+	if (Cue->FirstNode)
+	{
+		TArray<USoundCueGraphNode_Root*> RootNodes;
+		Graph->GetNodesOfClass<USoundCueGraphNode_Root>(RootNodes);
+		if (RootNodes.Num() != 1 || RootNodes[0]->Pins.Num() == 0)
+		{
+			return false;
+		}
+
+		USoundCueGraphNode* FirstGraphNode = Cast<USoundCueGraphNode>(Cue->FirstNode->GetGraphNode());
+		if (!FirstGraphNode || !FirstGraphNode->GetOutputPin())
+		{
+			return false;
+		}
+	}
+
+	for (USoundNode* Node : Cue->AllNodes)
+	{
+		if (!Node) continue;
+
+		USoundCueGraphNode* GraphNode = Cast<USoundCueGraphNode>(Node->GetGraphNode());
+		if (!GraphNode) return false;
+
+		TArray<UEdGraphPin*> InputPins;
+		GraphNode->GetInputPins(InputPins);
+		if (InputPins.Num() != Node->ChildNodes.Num()) return false;
+
+		for (USoundNode* Child : Node->ChildNodes)
+		{
+			if (!Child) continue;
+			USoundCueGraphNode* ChildGraphNode = Cast<USoundCueGraphNode>(Child->GetGraphNode());
+			if (!ChildGraphNode || !ChildGraphNode->GetOutputPin()) return false;
+		}
+	}
+#endif
+
+	return true;
+}
+
+void FMonolithAudioSoundCueActions::FinalizeCue(USoundCue* Cue, bool* bOutGraphLinkSkipped)
+{
+	if (bOutGraphLinkSkipped)
+	{
+		*bOutGraphLinkSkipped = false;
+	}
 	if (!Cue) return;
-	Cue->LinkGraphNodesFromSoundNodes();
+
+	// Repair first, then verify. If the graph still cannot be linked safely, skip the link
+	// instead of asserting inside the engine: the runtime chain (FirstNode -> ChildNodes) is
+	// already correct, so the cue plays back as authored.
+	EnsureSoundCueGraph(Cue);
+	if (CanLinkGraphNodes(Cue))
+	{
+		Cue->LinkGraphNodesFromSoundNodes();
+	}
+	else
+	{
+		if (bOutGraphLinkSkipped)
+		{
+			*bOutGraphLinkSkipped = true;
+		}
+		UE_LOG(LogMonolith, Warning,
+			TEXT("Sound Cue '%s': skipped the editor graph link (no usable Sound Cue graph). The sound node chain was still updated."),
+			*Cue->GetPathName());
+	}
+
 	Cue->CacheAggregateValues();
 	Cue->GetPackage()->MarkPackageDirty();
 }
@@ -815,6 +959,8 @@ FMonolithActionResult FMonolithAudioSoundCueActions::CreateSoundCue(const TShare
 		return FMonolithActionResult::Error(Error);
 	}
 
+	bool bGraphLinkSkipped = false;
+
 	// Optional: auto-create WavePlayers from sound_waves array
 	const TArray<TSharedPtr<FJsonValue>>* WavesArray = nullptr;
 	if (Params->TryGetArrayField(TEXT("sound_waves"), WavesArray) && WavesArray && WavesArray->Num() > 0)
@@ -856,7 +1002,7 @@ FMonolithActionResult FMonolithAudioSoundCueActions::CreateSoundCue(const TShare
 			}
 		}
 
-		FinalizeCue(Cue);
+		FinalizeCue(Cue, &bGraphLinkSkipped);
 	}
 
 	auto Result = MakeShared<FJsonObject>();
@@ -866,6 +1012,10 @@ FMonolithActionResult FMonolithAudioSoundCueActions::CreateSoundCue(const TShare
 	Result->SetNumberField(TEXT("node_count"), Cue->AllNodes.Num());
 #endif
 
+	if (bGraphLinkSkipped)
+	{
+		Result->SetBoolField(TEXT("graph_link_skipped"), true);
+	}
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -961,6 +1111,10 @@ FMonolithActionResult FMonolithAudioSoundCueActions::AddSoundCueNode(const TShar
 
 	Cue->Modify();
 
+	// ConstructSoundNode -> USoundCue::SetupSoundNode dereferences the cue's editor graph, so the
+	// graph has to exist before we build anything (issue #125).
+	EnsureSoundCueGraph(Cue);
+
 	USoundNode* NewNode = Cue->ConstructSoundNode<USoundNode>(NodeClass);
 	if (!NewNode)
 	{
@@ -982,12 +1136,17 @@ FMonolithActionResult FMonolithAudioSoundCueActions::AddSoundCueNode(const TShar
 		}
 	}
 
-	FinalizeCue(Cue);
+	bool bGraphLinkSkipped = false;
+	FinalizeCue(Cue, &bGraphLinkSkipped);
 
 	auto Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("node_id"), MakeNodeId(Cue, NewNode));
 	Result->SetStringField(TEXT("type"), NodeType);
 	Result->SetObjectField(TEXT("properties"), SerializeNode(Cue, NewNode)->GetObjectField(TEXT("properties")));
+	if (bGraphLinkSkipped)
+	{
+		Result->SetBoolField(TEXT("graph_link_skipped"), true);
+	}
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -1039,10 +1198,15 @@ FMonolithActionResult FMonolithAudioSoundCueActions::RemoveSoundCueNode(const TS
 	Cue->AllNodes.Remove(NodeToRemove);
 #endif
 
-	FinalizeCue(Cue);
+	bool bGraphLinkSkipped = false;
+	FinalizeCue(Cue, &bGraphLinkSkipped);
 
 	auto Result = MakeShared<FJsonObject>();
 	Result->SetBoolField(TEXT("success"), true);
+	if (bGraphLinkSkipped)
+	{
+		Result->SetBoolField(TEXT("graph_link_skipped"), true);
+	}
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -1075,6 +1239,10 @@ FMonolithActionResult FMonolithAudioSoundCueActions::ConnectSoundCueNodes(const 
 	}
 
 	Cue->Modify();
+
+	// InsertChildNode below routes through FSoundCueAudioEditor::CreateInputPin, which CastChecks
+	// the target node's graph node - make sure the graph and its back pointers exist first.
+	EnsureSoundCueGraph(Cue);
 
 	// Determine child index
 	int32 ChildIndex = -1;
@@ -1110,11 +1278,16 @@ FMonolithActionResult FMonolithAudioSoundCueActions::ConnectSoundCueNodes(const 
 
 	ToNode->ChildNodes[ChildIndex] = FromNode;
 
-	FinalizeCue(Cue);
+	bool bGraphLinkSkipped = false;
+	FinalizeCue(Cue, &bGraphLinkSkipped);
 
 	auto Result = MakeShared<FJsonObject>();
 	Result->SetBoolField(TEXT("success"), true);
 	Result->SetNumberField(TEXT("child_index"), ChildIndex);
+	if (bGraphLinkSkipped)
+	{
+		Result->SetBoolField(TEXT("graph_link_skipped"), true);
+	}
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -1142,11 +1315,17 @@ FMonolithActionResult FMonolithAudioSoundCueActions::SetSoundCueFirstNode(const 
 
 	Cue->Modify();
 	Cue->FirstNode = Node;
-	FinalizeCue(Cue);
+
+	bool bGraphLinkSkipped = false;
+	FinalizeCue(Cue, &bGraphLinkSkipped);
 
 	auto Result = MakeShared<FJsonObject>();
 	Result->SetBoolField(TEXT("success"), true);
 	Result->SetStringField(TEXT("first_node"), MakeNodeId(Cue, Node));
+	if (bGraphLinkSkipped)
+	{
+		Result->SetBoolField(TEXT("graph_link_skipped"), true);
+	}
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -1187,12 +1366,17 @@ FMonolithActionResult FMonolithAudioSoundCueActions::SetSoundCueNodeProperty(con
 		return FMonolithActionResult::Error(PropError);
 	}
 
-	FinalizeCue(Cue);
+	bool bGraphLinkSkipped = false;
+	FinalizeCue(Cue, &bGraphLinkSkipped);
 
 	auto Result = MakeShared<FJsonObject>();
 	Result->SetBoolField(TEXT("success"), true);
 	Result->SetStringField(TEXT("node_id"), NodeId);
 	Result->SetStringField(TEXT("property_name"), PropName);
+	if (bGraphLinkSkipped)
+	{
+		Result->SetBoolField(TEXT("graph_link_skipped"), true);
+	}
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -1566,12 +1750,17 @@ FMonolithActionResult FMonolithAudioSoundCueActions::BuildSoundCueFromSpec(const
 	}
 
 	// Step 6: Finalize
-	FinalizeCue(Cue);
+	bool bGraphLinkSkipped = false;
+	FinalizeCue(Cue, &bGraphLinkSkipped);
 
 	auto Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("asset_path"), Cue->GetPathName());
 	Result->SetNumberField(TEXT("node_count"), NodeMap.Num());
 	Result->SetNumberField(TEXT("connection_count"), ConnectionCount);
+	if (bGraphLinkSkipped)
+	{
+		Result->SetBoolField(TEXT("graph_link_skipped"), true);
+	}
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -1651,11 +1840,17 @@ FMonolithActionResult FMonolithAudioSoundCueActions::CreateRandomSoundCue(const 
 	}
 
 	Cue->FirstNode = RandomNode;
-	FinalizeCue(Cue);
+
+	bool bGraphLinkSkipped = false;
+	FinalizeCue(Cue, &bGraphLinkSkipped);
 
 	auto Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("asset_path"), Cue->GetPathName());
 	Result->SetNumberField(TEXT("wave_count"), WaveNodes.Num());
+	if (bGraphLinkSkipped)
+	{
+		Result->SetBoolField(TEXT("graph_link_skipped"), true);
+	}
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -1734,11 +1929,17 @@ FMonolithActionResult FMonolithAudioSoundCueActions::CreateLayeredSoundCue(const
 	}
 
 	Cue->FirstNode = MixerNode;
-	FinalizeCue(Cue);
+
+	bool bGraphLinkSkipped = false;
+	FinalizeCue(Cue, &bGraphLinkSkipped);
 
 	auto Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("asset_path"), Cue->GetPathName());
 	Result->SetNumberField(TEXT("wave_count"), WaveNodes.Num());
+	if (bGraphLinkSkipped)
+	{
+		Result->SetBoolField(TEXT("graph_link_skipped"), true);
+	}
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -1839,13 +2040,19 @@ FMonolithActionResult FMonolithAudioSoundCueActions::CreateLoopingAmbientCue(con
 	LoopingNode->ChildNodes[0] = DelayNode;
 
 	Cue->FirstNode = LoopingNode;
-	FinalizeCue(Cue);
+
+	bool bGraphLinkSkipped = false;
+	FinalizeCue(Cue, &bGraphLinkSkipped);
 
 	auto Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("asset_path"), Cue->GetPathName());
 	Result->SetNumberField(TEXT("wave_count"), WaveNodes.Num());
 	Result->SetNumberField(TEXT("delay_min"), DelayMin);
 	Result->SetNumberField(TEXT("delay_max"), DelayMax);
+	if (bGraphLinkSkipped)
+	{
+		Result->SetBoolField(TEXT("graph_link_skipped"), true);
+	}
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -1958,11 +2165,17 @@ FMonolithActionResult FMonolithAudioSoundCueActions::CreateDistanceCrossfadeCue(
 	}
 
 	Cue->FirstNode = CrossFadeNode;
-	FinalizeCue(Cue);
+
+	bool bGraphLinkSkipped = false;
+	FinalizeCue(Cue, &bGraphLinkSkipped);
 
 	auto Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("asset_path"), Cue->GetPathName());
 	Result->SetNumberField(TEXT("band_count"), BandsArray->Num());
+	if (bGraphLinkSkipped)
+	{
+		Result->SetBoolField(TEXT("graph_link_skipped"), true);
+	}
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -2024,12 +2237,18 @@ FMonolithActionResult FMonolithAudioSoundCueActions::CreateSwitchSoundCue(const 
 	}
 
 	Cue->FirstNode = SwitchNode;
-	FinalizeCue(Cue);
+
+	bool bGraphLinkSkipped = false;
+	FinalizeCue(Cue, &bGraphLinkSkipped);
 
 	auto Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("asset_path"), Cue->GetPathName());
 	Result->SetStringField(TEXT("parameter_name"), ParameterName);
 	Result->SetNumberField(TEXT("variant_count"), WaveNodes.Num());
+	if (bGraphLinkSkipped)
+	{
+		Result->SetBoolField(TEXT("graph_link_skipped"), true);
+	}
 	return FMonolithActionResult::Success(Result);
 }
 

@@ -65,8 +65,23 @@ private:
 	/** Load a USoundCue by path */
 	static USoundCue* LoadSoundCue(const FString& AssetPath, FString& OutError);
 
-	/** Finalize a sound cue after graph modifications */
-	static void FinalizeCue(USoundCue* Cue);
+	/**
+	 * Rebuild the editor-only Sound Cue graph if it is missing, and give every sound node a
+	 * graph-node back pointer. The AudioEditor graph helpers CastCheck that back pointer, so a
+	 * cue whose asset editor was never opened would otherwise assert. Returns true if a graph
+	 * exists once the call returns.
+	 */
+	static bool EnsureSoundCueGraph(USoundCue* Cue);
+
+	/** True when USoundCue::LinkGraphNodesFromSoundNodes() can run without tripping an engine check */
+	static bool CanLinkGraphNodes(USoundCue* Cue);
+
+	/**
+	 * Finalize a sound cue after graph modifications.
+	 * Sets bOutGraphLinkSkipped when the editor graph link had to be skipped (the sound node
+	 * chain is still updated; only the visual graph is left untouched).
+	 */
+	static void FinalizeCue(USoundCue* Cue, bool* bOutGraphLinkSkipped = nullptr);
 
 	/** Create a sound cue package + empty cue object */
 	static USoundCue* CreateEmptySoundCue(const FString& AssetPath, FString& OutError);
