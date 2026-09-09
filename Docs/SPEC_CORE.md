@@ -453,6 +453,12 @@ Everything lives in one place: `YourProject/Plugins/Monolith/`
 
 This folder is both the working copy and the git repo (`git@github.com:tumourlove/monolith.git`). Edit, build, commit, push, and release all happen here — no file copying.
 
+#### Native proxy publication
+
+`Tools\MonolithProxy\build_proxy.bat` is the authoritative Windows native-proxy build; `build.bat` delegates to it. Compilation is isolated in a private staging directory and never writes the compiler output directly over the live proxy. Publication uses a unique candidate in the destination directory, verifies the candidate byte count, and replaces `Binaries\monolith_proxy.exe` only as the final same-directory move. Every directory, copy, move, existence, and size gate fails with a non-zero exit code and no success message. Failures before replacement preserve the existing executable, and cleanup is restricted to staging and candidate paths created by the active invocation.
+
+The regression harness is `Scripts\test_proxy_build.ps1`. It builds through both entry points in a GUID-named temporary root, injects an invalid translation unit, locks a sentinel destination executable to force native publication failure, verifies exact prior bytes are preserved, checks candidates/staging are removed, and never targets the repository `Binaries` directory.
+
 #### Publishing a release
 
 1. Bump version in `Source/MonolithCore/Public/MonolithCoreModule.h` (`MONOLITH_VERSION`) and `Monolith.uplugin` (`VersionName`)

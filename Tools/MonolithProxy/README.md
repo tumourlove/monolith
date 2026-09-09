@@ -39,6 +39,14 @@ Then restart Claude Code.
 - **Backend:** Both connect to the same Monolith HTTP server running in the Unreal Editor
 - **Editor-down startup:** Both proxies return a cached Monolith tool list when available, or a stable seed list of namespace/meta tools. This prevents MCP clients that do not fully refresh on `tools/list_changed` from starting with an empty Monolith catalog.
 
+## Native Proxy Build
+
+Run `build_proxy.bat` from `Tools\MonolithProxy`; `build.bat` is a compatibility entry point that delegates to the same implementation. The build uses `cl.exe` from the active developer environment or discovers the installed x64 Visual C++ toolchain through `vswhere.exe`.
+
+Compilation happens in a private staging directory. Publication then copies the completed executable to a unique candidate beside the destination, verifies its size, and renames that candidate over `Binaries\monolith_proxy.exe`. Output-directory creation, candidate copy, final replacement, and final size are all checked. A failure returns non-zero without printing success, removes only files owned by that invocation, and preserves any existing proxy when replacement did not occur.
+
+For isolated verification, `MONOLITH_PROXY_SOURCE_FILE`, `MONOLITH_PROXY_OUTPUT_DIR`, and `MONOLITH_PROXY_STAGING_DIR` override the source, destination, and not-yet-existing staging directory. `MONOLITH_PROXY_VSWHERE` may point to an explicit `vswhere.exe`. Run `powershell -NoProfile -ExecutionPolicy Bypass -File Scripts\test_proxy_build.ps1` to verify both entry points plus compile- and publication-failure preservation without writing to the repository's `Binaries` directory.
+
 ## Call Log
 
 Both proxies append one JSONL line per upstream MCP roundtrip to:
