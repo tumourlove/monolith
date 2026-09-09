@@ -1,4 +1,5 @@
 #include "MonolithBlueprintNodeActions.h"
+#include "MonolithBlueprintNodeGeometry.h"
 #include "MonolithBlueprintInternal.h"
 #include "MonolithBlueprintVariableActions.h"
 #include "MonolithBlueprintComponentActions.h"
@@ -595,7 +596,7 @@ void FMonolithBlueprintNodeActions::RegisterActions(FMonolithToolRegistry& Regis
 			.RequiredAssetPath(TEXT("asset_path"),       TEXT("Blueprint asset path"))
 			.Required(TEXT("node_type"),         TEXT("string"),  TEXT("Node type: CallFunction (or 'function'/'call'), VariableGet (or 'get'), VariableSet (or 'set'), CustomEvent (or 'event'), Branch (or 'if'), Sequence, MacroInstance (or 'macro'), SpawnActorFromClass (or 'spawn'), DynamicCast (or 'cast'), Self, Return, MakeStruct (or 'make_struct'), BreakStruct (or 'break_struct'), SwitchOnEnum (or 'switch_enum'), SwitchOnInt (or 'switch_int'), SwitchOnString (or 'switch_string'), FormatText (or 'format_text'), MakeArray (or 'make_array'), Select. Shortcuts: ForEachLoop, ForLoop, DoOnce, FlipFlop, Gate, IsValid, Delay, RetriggerableDelay, ComponentBoundEvent, AddDelegate, RemoveDelegate, ClearDelegate, CallDelegate"))
 			.Optional(TEXT("graph_name"),        TEXT("string"),  TEXT("Graph name (defaults to EventGraph)"))
-			.Optional(TEXT("position"),          TEXT("array"),   TEXT("Node position as [x, y] (default: [0, 0])"), {TEXT("pos")})
+			.Optional(TEXT("position"),          TEXT("array"),   TEXT("Node position as [x, y]. If omitted, the node is placed in clear space relative to the graph's existing nodes (first node in an empty graph goes to [0, 0]); the response reports the chosen position and position_source: 'auto'. Pass a position to override."), {TEXT("pos")})
 			.Optional(TEXT("function_name"),     TEXT("string"),  TEXT("Function name for CallFunction nodes (e.g. PrintString)"))
 			.Optional(TEXT("target_class"),      TEXT("string"),  TEXT("Name of the class to search for the function being called (CallFunction) or the multicast delegate being bound (AddDelegate / RemoveDelegate / ClearDelegate / CallDelegate). Accepts a bare class name (e.g. 'KismetSystemLibrary', 'MyPawn'). For CallFunction it may also reference a Blueprint-defined function: pass a Blueprint asset path, a generated-class '_C' path/name, or a bare BP name (external member on the target BP's generated class), or this Blueprint itself for a self call. For delegate nodes, defaults to the BP's generated class (self-context) if omitted. For CallFunction, if omitted a function defined on this Blueprint binds as a self member; otherwise all loaded classes are searched."), {TEXT("function_class"), TEXT("member_class")})
 			.Optional(TEXT("variable_name"),     TEXT("string"),  TEXT("Variable name for VariableGet/VariableSet nodes"))
@@ -708,7 +709,7 @@ void FMonolithBlueprintNodeActions::RegisterActions(FMonolithToolRegistry& Regis
 			.RequiredAssetPath(TEXT("asset_path"),  TEXT("Blueprint asset path"))
 			.Required(TEXT("nodes"),       TEXT("array"),   TEXT("Array of node descriptors: { temp_id, node_type, function_name?, target_class?, variable_name?, position? }"))
 			.Optional(TEXT("graph_name"),  TEXT("string"),  TEXT("Graph name (defaults to EventGraph)"))
-			.Optional(TEXT("auto_layout"), TEXT("boolean"), TEXT("Auto-position nodes in a 5-column grid (200px horizontal, 100px vertical spacing). Ignored if position is set per node. Default: false."))
+			.Optional(TEXT("auto_layout"), TEXT("boolean"), TEXT("Auto-position nodes in a 5-column grid (200px horizontal, 100px vertical spacing) anchored at the origin. Ignored if position is set per node. Default: false — entries with no position are then placed individually in clear space, which is usually what you want; the response reports each chosen position."))
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("connect_pins_bulk"),
@@ -906,14 +907,18 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddNode(const TShared
 			TEXT("Graph not found: %s"), GraphName.IsEmpty() ? TEXT("EventGraph") : *GraphName));
 	}
 
-	// Parse position
+	// Parse position. An explicit position is authoritative; without one the node
+	// is placed once it exists and its pins are known (issue #132) -- every
+	// branch below writes PosX/PosY, so the fallback cannot be applied here.
 	int32 PosX = 0;
 	int32 PosY = 0;
+	bool bExplicitPosition = false;
 	const TArray<TSharedPtr<FJsonValue>>* PosArray = nullptr;
 	if (Params->TryGetArrayField(TEXT("position"), PosArray) && PosArray && PosArray->Num() >= 2)
 	{
 		PosX = (int32)(*PosArray)[0]->AsNumber();
 		PosY = (int32)(*PosArray)[1]->AsNumber();
+		bExplicitPosition = true;
 	}
 
 	UEdGraphNode* NewNode = nullptr;
@@ -1584,11 +1589,23 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddNode(const TShared
 	// converge here, so a single CreateNewGuid covers them all.
 	NewNode->CreateNewGuid();
 
+	// Issue #132: a caller who omitted 'position' used to get [0,0], so every
+	// unplaced node stacked on the origin in one unreadable pile. Place it in
+	// clear space relative to what is already in the graph instead. This runs
+	// HERE, at the same convergence point, because the placement needs the node's
+	// pin count (its estimated height) and every branch has allocated pins by now.
+	if (!bExplicitPosition)
+	{
+		MonolithBlueprintNodeGeometry::PlaceNodeInFreeSlot(Graph, NewNode);
+	}
+
 	FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
 
 	TSharedPtr<FJsonObject> Root = MonolithBlueprintInternal::SerializeNode(NewNode, bGenericFallback);
 	Root->SetStringField(TEXT("asset_path"), AssetPath);
 	Root->SetStringField(TEXT("graph"), Graph->GetName());
+	// So a caller can tell an honoured position from one this action chose.
+	Root->SetStringField(TEXT("position_source"), bExplicitPosition ? TEXT("explicit") : TEXT("auto"));
 	if (bGenericFallback)
 	{
 		Root->SetStringField(TEXT("warning"),
@@ -3079,9 +3096,19 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddNodesBulk(const TS
 			Out->SetStringField(TEXT("class"),   NodeClass);
 			Out->SetStringField(TEXT("title"),   NodeTitle);
 
-			// Include position if available (from auto_layout or user-specified)
+			// Include position if available (from auto_layout or user-specified).
+			// Falling back to the created node's own "pos" covers the entries that
+			// carried no position: add_node placed those itself (issue #132), and
+			// reporting nothing would read as "it went to the origin".
 			const TArray<TSharedPtr<FJsonValue>>* PosArr = nullptr;
 			if (SubParams->TryGetArrayField(TEXT("position"), PosArr) && PosArr && PosArr->Num() >= 2)
+			{
+				TArray<TSharedPtr<FJsonValue>> PosOut;
+				PosOut.Add((*PosArr)[0]);
+				PosOut.Add((*PosArr)[1]);
+				Out->SetArrayField(TEXT("position"), PosOut);
+			}
+			else if (Result.Result->TryGetArrayField(TEXT("pos"), PosArr) && PosArr && PosArr->Num() >= 2)
 			{
 				TArray<TSharedPtr<FJsonValue>> PosOut;
 				PosOut.Add((*PosArr)[0]);

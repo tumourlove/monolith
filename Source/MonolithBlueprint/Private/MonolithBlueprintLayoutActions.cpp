@@ -14,6 +14,7 @@
 #include "K2Node_FunctionEntry.h"
 #include "Modules/ModuleManager.h"
 #include "IMonolithGraphFormatter.h"
+#include "MonolithBlueprintNodeGeometry.h"
 
 // ============================================================================
 //  Registration
@@ -31,7 +32,7 @@ void FMonolithBlueprintLayoutActions::RegisterActions(FMonolithToolRegistry& Reg
 			.Optional(TEXT("graph_name"), TEXT("string"), TEXT("Graph name (default: EventGraph)"))
 			.Optional(TEXT("horizontal_spacing"), TEXT("integer"), TEXT("Horizontal spacing between layers in pixels"), TEXT("350"))
 			.Optional(TEXT("vertical_spacing"), TEXT("integer"), TEXT("Vertical spacing between nodes in pixels"), TEXT("80"))
-			.Optional(TEXT("layout_mode"), TEXT("string"), TEXT("Layout mode: 'all' (default), 'new_only' (only nodes at 0,0 or overlapping), 'selected' (only node_ids)"), TEXT("all"))
+			.Optional(TEXT("layout_mode"), TEXT("string"), TEXT("Layout mode: 'all' (default, lays out every node), 'new_only' (moves only nodes at 0,0 or piled on top of another node, leaving hand-placed nodes alone — note that add_node's cascading default placement lands nodes in clear space, so those are NOT candidates; use 'all' to fold new nodes into the flow), 'selected' (only node_ids)"), TEXT("all"))
 			.Optional(TEXT("node_ids"), TEXT("array"), TEXT("Array of node IDs to layout (for 'selected' mode)"))
 			.Optional(TEXT("formatter"), TEXT("string"), TEXT("Formatter: 'auto' (default, prefers Blueprint Assist if available), 'blueprint_assist' (BA only, fails if unavailable), or 'monolith' (built-in Sugiyama)"), TEXT("auto"))
 			.Build());
@@ -170,32 +171,23 @@ namespace
 		return ELayoutNodeKind::ExecChain;
 	}
 
-	int32 CountVisiblePins(UEdGraphNode* Node, EEdGraphPinDirection Dir)
-	{
-		int32 Count = 0;
-		for (const UEdGraphPin* Pin : Node->Pins)
-		{
-			if (Pin && !Pin->bHidden && Pin->Direction == Dir) Count++;
-		}
-		return Count;
-	}
-
+	// The estimate itself lives in MonolithBlueprintNodeGeometry so that
+	// add_node's default placement and this file's overlap test cannot disagree
+	// about what a node occupies (issue #132).
 	void EstimateNodeSize(FLayoutNode& LN)
 	{
-		UEdGraphNode* Node = LN.GraphNode;
-		int32 InputCount = CountVisiblePins(Node, EGPD_Input);
-		int32 OutputCount = CountVisiblePins(Node, EGPD_Output);
-		int32 MaxPins = FMath::Max(InputCount, OutputCount);
+		MonolithBlueprintNodeGeometry::EstimateNodeSize(LN.GraphNode, LN.EstWidth, LN.EstHeight);
+	}
 
-		LN.EstHeight = 50.f + MaxPins * 24.f;
-		LN.EstWidth = (Node->NodeWidth > 0) ? (float)Node->NodeWidth : 300.f;
-
-		// Comments have explicit size
-		if (UEdGraphNode_Comment* Comment = Cast<UEdGraphNode_Comment>(Node))
-		{
-			LN.EstWidth = (float)Comment->NodeWidth;
-			LN.EstHeight = (float)Comment->NodeHeight;
-		}
+	/** The node's footprint at the position it held when layout started. */
+	MonolithBlueprintNodeGeometry::FNodeRect OriginalRect(const FLayoutNode& LN)
+	{
+		MonolithBlueprintNodeGeometry::FNodeRect Rect;
+		Rect.X = (float)LN.OrigX;
+		Rect.Y = (float)LN.OrigY;
+		Rect.Width = LN.EstWidth;
+		Rect.Height = LN.EstHeight;
+		return Rect;
 	}
 
 	// Count crossings between two adjacent layers
@@ -410,11 +402,12 @@ FMonolithActionResult FMonolithBlueprintLayoutActions::HandleAutoLayout(const TS
 		LN.Kind = Kind;
 		EstimateNodeSize(LN);
 
-		// Determine pinned status based on layout mode
+		// Determine pinned status based on layout mode.
+		// "new_only" needs the whole node set before it can decide (see the
+		// overlap pass below), so it only seeds the at-origin half here.
 		FString NodeName = Node->GetName();
 		if (LayoutMode == TEXT("new_only"))
 		{
-			// Pin nodes that are NOT at (0,0) and NOT heavily overlapping
 			bool bAtOrigin = (Node->NodePosX == 0 && Node->NodePosY == 0);
 			LN.bPinned = !bAtOrigin;
 		}
@@ -437,6 +430,47 @@ FMonolithActionResult FMonolithBlueprintLayoutActions::HandleAutoLayout(const TS
 		R->SetStringField(TEXT("note"), TEXT("Graph has no layoutable nodes."));
 		R->SetStringField(TEXT("formatter_used"), TEXT("monolith"));
 		return FMonolithActionResult::Success(R);
+	}
+
+	// ------------------------------------------------------------------------
+	//  new_only: unpin the piles as well as the origin (issue #132)
+	//
+	//  "At (0,0)" alone means "unpinned only while nobody has ever given this
+	//  node a position", which made new_only depend on add_node defaulting every
+	//  unplaced node onto the origin. That default is what produced the
+	//  unreadable piles in the first place, so the two had to move together: once
+	//  add_node cascades, a purely at-origin test pins every new node and
+	//  new_only reports success while moving nothing.
+	//
+	//  A node is treated as new if it is at the origin OR piled on another node.
+	//  A pile is what needs relaying wherever it sits, and a node the user placed
+	//  by hand in clear space is left exactly where they put it. Both members of
+	//  an overlapping pair are freed -- there is no way to tell which of the two
+	//  is the newcomer, and moving only one of them can leave the other stranded.
+	// ------------------------------------------------------------------------
+	if (LayoutMode == TEXT("new_only"))
+	{
+		TArray<MonolithBlueprintNodeGeometry::FNodeRect> Rects;
+		Rects.Reserve(LayoutNodes.Num());
+		for (const FLayoutNode& LN : LayoutNodes)
+		{
+			Rects.Add(OriginalRect(LN));
+		}
+
+		for (int32 A = 0; A < LayoutNodes.Num(); ++A)
+		{
+			for (int32 B = A + 1; B < LayoutNodes.Num(); ++B)
+			{
+				// Nothing left to learn about a pair that is already free.
+				if (!LayoutNodes[A].bPinned && !LayoutNodes[B].bPinned) continue;
+
+				if (MonolithBlueprintNodeGeometry::RectsFormPile(Rects[A], Rects[B]))
+				{
+					LayoutNodes[A].bPinned = false;
+					LayoutNodes[B].bPinned = false;
+				}
+			}
+		}
 	}
 
 	// Build edges from pin connections
@@ -900,10 +934,15 @@ FMonolithActionResult FMonolithBlueprintLayoutActions::HandleAutoLayout(const TS
 	// ========================================================================
 
 	int32 NodesRepositioned = 0;
+	int32 NodesPinned = 0;
 
 	for (FLayoutNode& LN : LayoutNodes)
 	{
-		if (LN.bPinned) continue;
+		if (LN.bPinned)
+		{
+			NodesPinned++;
+			continue;
+		}
 
 		LN.GraphNode->NodePosX = LN.FinalX;
 		LN.GraphNode->NodePosY = LN.FinalY;
@@ -962,6 +1001,10 @@ FMonolithActionResult FMonolithBlueprintLayoutActions::HandleAutoLayout(const TS
 	ResultJson->SetStringField(TEXT("asset_path"), AssetPath);
 	ResultJson->SetStringField(TEXT("graph_name"), GraphName);
 	ResultJson->SetNumberField(TEXT("nodes_repositioned"), NodesRepositioned);
+	// Explicit, because "0 repositioned" and "everything was already where the
+	// caller put it" read identically otherwise -- the failure new_only used to
+	// hide behind.
+	ResultJson->SetNumberField(TEXT("nodes_pinned"), NodesPinned);
 	ResultJson->SetNumberField(TEXT("total_nodes"), LayoutNodes.Num());
 	ResultJson->SetNumberField(TEXT("total_edges"), LayoutEdges.Num());
 	ResultJson->SetNumberField(TEXT("layers"), MaxLayer + 1);

@@ -10,6 +10,14 @@ public:
 	static FMonolithActionResult HandleCreateUserDefinedStruct(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleCreateUserDefinedEnum(const TSharedPtr<FJsonObject>& Params);
 
+	// Field-level editing of an EXISTING User Defined Struct. create_user_defined_struct
+	// authors a struct once; these make one readable and editable afterwards.
+	static FMonolithActionResult HandleGetStructFields(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleAddStructField(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleRemoveStructField(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleRenameStructField(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSetStructFieldType(const TSharedPtr<FJsonObject>& Params);
+
 	// DataTable actions (Phase 3C)
 	static FMonolithActionResult HandleCreateDataTable(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleAddDataTableRow(const TSharedPtr<FJsonObject>& Params);

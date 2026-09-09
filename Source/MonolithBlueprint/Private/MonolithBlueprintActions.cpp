@@ -576,7 +576,9 @@ FMonolithActionResult FMonolithBlueprintActions::HandleGetVariables(const TShare
 				if (WidgetTreeObj)
 				{
 					TArray<UObject*> TreeChildren;
-					GetObjectsWithOuter(WidgetTreeObj, TreeChildren, /*bIncludeNestedObjects=*/true);
+					// Nested objects are included by default on both UE 5.7 and 5.8;
+					// the explicit boolean overload is deprecated on 5.8.
+					GetObjectsWithOuter(WidgetTreeObj, TreeChildren);
 					for (UObject* Child : TreeChildren)
 					{
 						if (!Child || !Child->IsA(WidgetBase))
