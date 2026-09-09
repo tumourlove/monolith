@@ -1,6 +1,8 @@
 #pragma once
 
 #include "MonolithIndexer.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 
 /**
  * Indexes Gameplay Ability System assets: GameplayAbilities, GameplayEffects,

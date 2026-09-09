@@ -1,4 +1,6 @@
 #include "MonolithGASScaffoldActions.h"
+#include "Misc/App.h"
+#include "UObject/UObjectIterator.h"
 #include "MonolithParamSchema.h"
 #include "MonolithGASInternal.h"
 #include "Kismet2/BlueprintEditorUtils.h"

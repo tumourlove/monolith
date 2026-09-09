@@ -4,6 +4,7 @@
 // 5.H.3 hot_reload_styles  [RUNTIME, EXPERIMENTAL]
 // 5.H.4 dump_action_router_state [RUNTIME, EXPERIMENTAL]
 #include "MonolithCommonUIHelpers.h"
+#include "AssetRegistry/AssetData.h"
 
 #if WITH_COMMONUI
 

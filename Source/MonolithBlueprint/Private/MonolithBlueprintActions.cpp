@@ -1,5 +1,7 @@
 #include "MonolithBlueprintActions.h"
 #include "MonolithBlueprintComponentResolver.h"
+#include "Animation/AnimInstance.h"
+#include "Engine/Blueprint.h"
 #include "MonolithBlueprintInternal.h"
 #include "MonolithJsonUtils.h"
 #include "MonolithParamSchema.h"

@@ -2,6 +2,7 @@
 // FMonolithReflectionWalker implementation. Phase 0 framework primitive.
 
 #include "Reflection/MonolithReflectionWalker.h"
+#include "UObject/TextProperty.h"
 #include "MonolithJsonUtils.h"
 #include "UObject/UnrealType.h"
 #include "UObject/EnumProperty.h"

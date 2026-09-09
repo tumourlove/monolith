@@ -1,4 +1,7 @@
 #include "MonolithMeshDebugViewActions.h"
+#include "MaterialDomain.h"
+#include "SceneTypes.h"
+#include "Materials/Material.h"
 #include "MonolithMeshSpatialRegistry.h"
 #include "MonolithMeshUtils.h"
 #include "MonolithToolRegistry.h"

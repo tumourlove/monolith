@@ -1,4 +1,5 @@
 #include "MonolithMeshFurnishingActions.h"
+#include "Math/RandomStream.h"
 #include "MonolithMeshSpatialRegistry.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithParamSchema.h"

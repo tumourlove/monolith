@@ -1,4 +1,6 @@
 #include "Indexers/DataAssetIndexer.h"
+#include "Engine/DataAsset.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "Reflection/MonolithReflectionReader.h"
 #include "UObject/UnrealType.h"
 #include "Serialization/JsonWriter.h"

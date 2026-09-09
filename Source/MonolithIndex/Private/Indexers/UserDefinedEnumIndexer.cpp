@@ -1,4 +1,5 @@
 #include "Indexers/UserDefinedEnumIndexer.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "Engine/UserDefinedEnum.h"
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"

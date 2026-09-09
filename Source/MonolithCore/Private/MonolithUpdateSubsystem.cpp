@@ -1,4 +1,7 @@
 #include "MonolithUpdateSubsystem.h"
+#include "Runtime/Launch/Resources/Version.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Widgets/Layout/SSeparator.h"
 #include "MonolithCoreModule.h"
 #include "MonolithHttpServer.h"
 #include "MonolithSettings.h"

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "CollisionQueryParams.h"
 #include "MonolithToolRegistry.h"
 
 class ADecalActor;

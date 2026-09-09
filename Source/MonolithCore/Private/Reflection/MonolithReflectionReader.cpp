@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "Reflection/MonolithReflectionReader.h"
+#include "UObject/TextProperty.h"
 #include "UObject/UnrealType.h"
 #include "UObject/Class.h"
 #include "StructUtils/InstancedStruct.h"

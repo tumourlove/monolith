@@ -1,4 +1,5 @@
 #include "MonolithJsonUtils.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonReader.h"

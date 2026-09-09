@@ -1,6 +1,7 @@
 #include "MonolithMeshHandlePool.h"
 
 #if !WITH_GEOMETRYSCRIPT
+#include "Dom/JsonObject.h"
 // Stub implementations when GeometryScript is not available
 void UMonolithMeshHandlePool::Initialize() {}
 void UMonolithMeshHandlePool::Teardown() {}

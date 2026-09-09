@@ -1,4 +1,5 @@
 #include "Indexers/UserDefinedStructIndexer.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "StructUtils/UserDefinedStruct.h"
 #include "UObject/UnrealType.h"
 #include "UObject/EnumProperty.h"

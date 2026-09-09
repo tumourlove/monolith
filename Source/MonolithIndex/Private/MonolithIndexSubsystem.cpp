@@ -1,4 +1,5 @@
 #include "MonolithIndexSubsystem.h"
+#include "Engine/TimerHandle.h"
 #include "MonolithIndexDatabase.h"
 #include "MonolithSettings.h"
 #include "MonolithMemoryHelper.h"

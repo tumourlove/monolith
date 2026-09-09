@@ -1,4 +1,5 @@
 #include "MonolithGASInputActions.h"
+#include "Misc/App.h"
 #include "MonolithParamSchema.h"
 #include "MonolithGASInternal.h"
 #include "Kismet2/BlueprintEditorUtils.h"

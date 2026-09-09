@@ -1,4 +1,5 @@
 #include "MonolithMeshCatalog.h"
+#include "Misc/Paths.h"
 #include "MonolithIndexDatabase.h"
 #include "SQLiteDatabase.h"
 #include "Dom/JsonValue.h"

@@ -1,4 +1,5 @@
 #include "MonolithMeshSceneActions.h"
+#include "Materials/MaterialInterface.h"
 #include "MonolithMeshUtils.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithParamSchema.h"

@@ -1,4 +1,5 @@
 #include "MonolithMeshInspectionActions.h"
+#include "Animation/Skeleton.h"
 #include "MonolithMeshUtils.h"
 #include "MonolithMeshCatalog.h"
 #include "MonolithToolRegistry.h"

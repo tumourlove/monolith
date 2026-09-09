@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Dom/JsonValue.h"
 
 class FMonolithToolRegistry;
 struct FMonolithActionResult;

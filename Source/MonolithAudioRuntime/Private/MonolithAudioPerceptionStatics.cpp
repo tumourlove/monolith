@@ -1,4 +1,5 @@
 #include "MonolithAudioPerceptionStatics.h"
+#include "Engine/Engine.h"
 #include "MonolithAudioRuntimeModule.h"
 #include "MonolithSoundPerceptionUserData.h"
 

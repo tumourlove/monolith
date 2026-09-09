@@ -1,4 +1,8 @@
 #include "MonolithHttpServer.h"
+#include "Serialization/JsonWriter.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "MonolithCoreModule.h"
 #include "MonolithJsonUtils.h"
 #include "MonolithToolRegistry.h"

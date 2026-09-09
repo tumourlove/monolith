@@ -1,4 +1,5 @@
 #include "MonolithLogicDriverModule.h"
+#include "Modules/ModuleManager.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithSettings.h"
 #include "MonolithLogicDriverAssetActions.h"

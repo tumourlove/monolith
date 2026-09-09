@@ -1,4 +1,5 @@
 #include "MonolithGASInternal.h"
+#include "AssetRegistry/AssetData.h"
 #include "MonolithAssetUtils.h"
 #include "MonolithPackagePathValidator.h"
 #include "Engine/Blueprint.h"

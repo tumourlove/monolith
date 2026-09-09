@@ -1,4 +1,5 @@
 #include "MonolithAssetUtils.h"
+#include "Misc/Paths.h"
 #include "MonolithJsonUtils.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"

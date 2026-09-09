@@ -1,4 +1,5 @@
 #include "Indexers/InputActionIndexer.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "InputAction.h"
 #include "InputTriggers.h"
 #include "InputModifiers.h"

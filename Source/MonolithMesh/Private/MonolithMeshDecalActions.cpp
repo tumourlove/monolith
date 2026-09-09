@@ -1,4 +1,6 @@
 #include "MonolithMeshDecalActions.h"
+#include "MaterialDomain.h"
+#include "SceneTypes.h"
 #include "MonolithMeshSceneActions.h"
 #include "MonolithMeshBlockoutActions.h"
 #include "MonolithMeshUtils.h"

@@ -1,4 +1,5 @@
 #include "MonolithMeshProceduralCache.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 
 #include "MonolithJsonUtils.h"
 #include "Dom/JsonObject.h"

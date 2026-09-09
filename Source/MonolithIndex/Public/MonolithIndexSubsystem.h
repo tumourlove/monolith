@@ -1,6 +1,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "HAL/RunnableThread.h"
+#include "AssetRegistry/AssetData.h"
+#include "HAL/Runnable.h"
+#include "Dom/JsonObject.h"
+#include "Engine/TimerHandle.h"
 #include "EditorSubsystem.h"
 #include "Misc/AsyncTaskNotification.h"
 #include "MonolithIndexDatabase.h"

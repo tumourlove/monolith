@@ -21,6 +21,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "CoreMinimal.h"
+#include "AssetRegistry/AssetData.h"
 #include "Misc/AutomationTest.h"
 
 #include "Spec/UISpec.h"

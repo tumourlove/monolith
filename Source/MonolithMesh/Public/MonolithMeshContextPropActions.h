@@ -1,6 +1,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GameFramework/Actor.h"
+#include "Math/RandomStream.h"
 #include "MonolithToolRegistry.h"
 
 /**

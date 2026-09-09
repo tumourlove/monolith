@@ -8,6 +8,7 @@
 // Modify and an open tab may need a reselect to refresh. Game-thread only.
 
 #include "MonolithBlueprintStringTableActions.h"
+#include "Runtime/Launch/Resources/Version.h"
 #include "MonolithAssetUtils.h"
 #include "MonolithParamSchema.h"
 #include "Internationalization/StringTable.h"

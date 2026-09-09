@@ -1,4 +1,5 @@
 #include "MonolithAINavigationActions.h"
+#include "UObject/UObjectIterator.h"
 #include "MonolithParamSchema.h"
 #include "MonolithAssetUtils.h"
 

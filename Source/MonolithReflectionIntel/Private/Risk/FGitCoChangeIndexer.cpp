@@ -25,6 +25,7 @@
 //   6. BEGIN TRANSACTION / COMMIT for batch inserts.
 
 #include "Risk/FGitCoChangeIndexer.h"
+#include "HAL/PlatformTime.h"
 #include "Risk/RiskSchema.h"
 #include "MonolithReflectionIntelModule.h"
 #include "MonolithRIMetaTable.h"
