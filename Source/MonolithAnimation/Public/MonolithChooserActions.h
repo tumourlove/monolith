@@ -7,8 +7,12 @@
  * Chooser table authoring actions for Monolith — new `chooser` namespace,
  * registered from within the MonolithAnimation module (no new module).
  *
- * 6 actions: inspect_chooser, duplicate_chooser_tree, set_context_object_class,
- * set_result_asset_reference, set_evaluate_chooser_result_reference, validate_chooser.
+ * 6 deep-inspection and mutation actions: inspect_chooser, duplicate_chooser_tree,
+ * set_context_object_class, set_result_asset_reference,
+ * set_evaluate_chooser_result_reference, validate_chooser. Note that validate_chooser
+ * runs a COMPILE pass; the strictly read-only structural preflight is the separate
+ * validate_chooser_table owned by FMonolithChooserReadActions, which also owns the
+ * bounded reflection-only discovery / readback surface.
  *
  * Operates on UChooserTable assets (Chooser plugin). All handlers are gated behind
  * WITH_CHOOSER; when the Chooser plugin is absent the off-gate stub returns a clean

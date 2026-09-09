@@ -8,6 +8,7 @@
 #include "MonolithAbpWriteActions.h"
 #include "MonolithAnimLayoutActions.h"
 #include "MonolithAnimationBulkFillAdapter.h"
+#include "MonolithChooserReadActions.h"
 #include "MonolithChooserActions.h"
 #include "MonolithChooserAuthoringActions.h"
 #include "MonolithAbpGraphSurgeryActions.h"
@@ -27,6 +28,7 @@ void FMonolithAnimationModule::StartupModule()
 	FMonolithControlRigWriteActions::RegisterActions(FMonolithToolRegistry::Get());
 	FMonolithAbpWriteActions::RegisterActions(FMonolithToolRegistry::Get());
 	FMonolithAnimLayoutActions::RegisterActions(FMonolithToolRegistry::Get());
+	FMonolithChooserReadActions::RegisterActions(FMonolithToolRegistry::Get());
 	FMonolithChooserActions::RegisterActions(FMonolithToolRegistry::Get());
 	FMonolithChooserAuthoringActions::RegisterActions(FMonolithToolRegistry::Get());
 	FMonolithAbpGraphSurgeryActions::RegisterActions(FMonolithToolRegistry::Get());

@@ -63,6 +63,7 @@ public class MonolithAnimation : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"MonolithCore",
+			"AssetRegistry", // IAssetRegistry / FAssetRegistryModule — used directly by the chooser read actions.
 			"UnrealEd",
 			"Slate",        // STableRow/SCompoundWidget instantiation (FRetargetChainElement rows).
 			"SlateCore",    // FSlateAttributeDescriptor / SWidget::PrivateRegisterAttributes — was
