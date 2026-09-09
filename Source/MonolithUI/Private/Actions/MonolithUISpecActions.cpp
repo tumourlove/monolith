@@ -102,6 +102,21 @@ namespace MonolithUI::SpecActionsInternal
         FString S;
         if (Obj.IsValid() && Obj->TryGetStringField(Field, S) && !S.IsEmpty())
         {
+            S.TrimStartAndEndInline();
+
+            // A "#RRGGBB" literal is an sRGB colour and must be degamma'd on the
+            // way into an FLinearColor: these values become Slate tints, and Slate
+            // re-encodes a tint with ToFColor(bSRGBVertexColor), so storing the raw
+            // byte/255 value leaves it encoded twice and "#FF8800" reaches the
+            // screen as #FFC100. TryParseColor is the deliberate NO-degamma variant
+            // and is reserved for MD_UI material parameters, not widget properties.
+            // This mirrors UIReflectionHelper's colour path -- keep the two in step.
+            if (S.StartsWith(TEXT("#")))
+            {
+                return MonolithUI::ParseColor(S);
+            }
+
+            // "r,g,b[,a]" text is linear already -- pass it through untouched.
             FLinearColor C;
             if (MonolithUI::TryParseColor(S, C))
             {

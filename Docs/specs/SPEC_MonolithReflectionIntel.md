@@ -84,7 +84,7 @@ The indexer emits at most one row per markdown header (or one per file in the fr
 |------|---------|------------|----------------|
 | **YAML frontmatter** | Leading `---` block with `decision: true` OR any `status:` key | `0.90` | from `status:` value (lowercased), else `accepted` |
 | **ADR-style header** | Line matches `(?i)^#+\s*(?:ADR[-\s]?\d+|Architectural\s+Decision)\b` | `0.85` | `open` |
-| **Header + rationale marker** | Markdown header (H2–H6 only — H1 skipped unless ADR-style) followed within 8 lines by a paragraph containing `because` / `rationale` / `evidence` / `decision:` | `0.65` | `open` |
+| **Header + rationale marker** | Markdown header (H2–H6 only — H1 skipped unless ADR-style) followed within 8 lines **of the same section** (the scan stops at the next header) by a rationale marker: bare `because`, or `rationale` / `evidence` / `decision` in colon-label form (`Rationale:`). A marker hugged by quotes or backticks is treated as mentioned, not used. | `0.65` | `open` |
 
 Files matching neither tier contribute zero rows. Headers without rationale markers and without ADR shape are skipped — the indexer is conservative by design.
 
