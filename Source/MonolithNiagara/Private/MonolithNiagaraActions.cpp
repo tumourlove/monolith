@@ -440,6 +440,250 @@ namespace MonolithNiagaraHelpers
 		}
 		return FullName;
 	}
+
+	// FNiagaraStackGraphUtilities::IsRapidIterationType and ::CreateRapidIterationParameter are
+	// declared in NiagaraStackGraphUtilities.h WITHOUT NIAGARAEDITOR_API, so they cannot be linked
+	// from here. Both are reproduced from NiagaraStackGraphUtilities.cpp (UE 5.7 L2783-2806;
+	// byte-identical in UE 5.8) on top of the exported NIAGARA_API entry point
+	// FNiagaraUtilities::ConvertVariableToRapidIterationConstantName (NiagaraCommon.h).
+	bool IsRapidIterationType(const FNiagaraTypeDefinition& InputType)
+	{
+		if (!InputType.IsValid()) return false;
+		if (InputType.IsStatic()) return true;
+		return InputType != FNiagaraTypeDefinition::GetBoolDef()
+			&& !InputType.IsEnum()
+			&& InputType != FNiagaraTypeDefinition::GetParameterMapDef()
+			&& !InputType.IsUObject();
+	}
+
+	FNiagaraVariable CreateRapidIterationParameter(const FString& UniqueEmitterName, ENiagaraScriptUsage ScriptUsage,
+		const FName& AliasedInputName, const FNiagaraTypeDefinition& InputType)
+	{
+		const FNiagaraVariable InputVariable(InputType, AliasedInputName);
+		// System script names already have the emitter baked in, so they take no emitter alias.
+		const bool bSystemScript = ScriptUsage == ENiagaraScriptUsage::SystemSpawnScript
+			|| ScriptUsage == ENiagaraScriptUsage::SystemUpdateScript;
+		return FNiagaraUtilities::ConvertVariableToRapidIterationConstantName(
+			InputVariable, bSystemScript ? nullptr : *UniqueEmitterName, ScriptUsage);
+	}
+
+	// The script whose RapidIterationParameters store owns a module input's value. Mirrors
+	// UNiagaraStackFunctionInput::Initialize, which walks the affected scripts and keeps the one
+	// whose usage is equivalent to the module's output node usage (NiagaraStackFunctionInput.cpp
+	// L157-171) — FVersionedNiagaraEmitterData::GetScript does that same IsEquivalentUsage match.
+	UNiagaraScript* FindRapidIterationScript(UNiagaraSystem* System, int32 EmitterIdx,
+		ENiagaraScriptUsage Usage, const FGuid& UsageId)
+	{
+		if (!System) return nullptr;
+		if (EmitterIdx != INDEX_NONE)
+		{
+			FVersionedNiagaraEmitterData* ED = System->GetEmitterHandles()[EmitterIdx].GetEmitterData();
+			return ED ? ED->GetScript(Usage, UsageId) : nullptr;
+		}
+		return Usage == ENiagaraScriptUsage::SystemUpdateScript
+			? System->GetSystemUpdateScript()
+			: System->GetSystemSpawnScript();
+	}
+
+	FString GetUniqueEmitterNameForIndex(UNiagaraSystem* System, int32 EmitterIdx)
+	{
+		if (!System || EmitterIdx == INDEX_NONE) return FString();
+		FVersionedNiagaraEmitter VE = System->GetEmitterHandles()[EmitterIdx].GetInstance();
+		return VE.Emitter ? VE.Emitter->GetUniqueEmitterName() : FString();
+	}
+
+	// Reads a module input's value out of the owning script's rapid-iteration store. The Niagara
+	// stack editor writes local (non-linked) input values THERE, not to a graph override pin, so an
+	// override-pin-only read reports every hand-tuned value as "(default)". Returns false when the
+	// input has no rapid-iteration entry. OutValue comes from the engine's own pin-literal writer,
+	// so it is byte-identical to an override pin's DefaultValue for the same type and round-trips
+	// back through set_module_input_value.
+	bool TryGetRapidIterationInputValue(UNiagaraSystem* System, int32 EmitterIdx, ENiagaraScriptUsage Usage,
+		const FGuid& UsageId, const FNiagaraParameterHandle& AliasedHandle,
+		const FNiagaraTypeDefinition& InputType, FString& OutValue)
+	{
+		OutValue.Reset();
+		// Guard the store lookup: for a data interface / UObject parameter IndexOf() returns an index
+		// into the DI table, which GetParameterData would then read as a byte offset into the value
+		// buffer. IsRapidIterationType excludes exactly those types, as it does in the engine.
+		if (!IsRapidIterationType(InputType)) return false;
+
+		UNiagaraScript* OwningScript = FindRapidIterationScript(System, EmitterIdx, Usage, UsageId);
+		if (!OwningScript) return false;
+
+		const FNiagaraVariable RIVar = CreateRapidIterationParameter(
+			GetUniqueEmitterNameForIndex(System, EmitterIdx), Usage,
+			AliasedHandle.GetParameterHandleString(), InputType);
+
+		// UE 5.7/5.8: RapidIterationParameters is a public UPROPERTY, no getter.
+		const uint8* Data = OwningScript->RapidIterationParameters.GetParameterData(RIVar);
+		if (!Data) return false;
+
+		FNiagaraVariable ValueVar(InputType, RIVar.GetName());
+		ValueVar.SetData(Data);
+
+		const UEdGraphSchema_Niagara* Schema = GetDefault<UEdGraphSchema_Niagara>();
+		return Schema != nullptr && Schema->TryGetPinDefaultValueFromNiagaraVariable(ValueVar, OutValue);
+	}
+
+	// The module's declared default for an input, from the called script graph's UNiagaraScriptVariable
+	// — the same source UNiagaraNodeParameterMapGet regenerates its default pin from
+	// (NiagaraNodeParameterMapGet.cpp L128-145), so the two literals compare exactly.
+	//
+	// This is load-bearing for the rapid-iteration read: UNiagaraScriptSource::InitializeNewParameters
+	// SEEDS the store with every module input's default at compile time, so the mere presence of a
+	// rapid-iteration entry does NOT mean anyone set the value.
+	bool TryGetModuleInputDefaultLiteral(UNiagaraNodeFunctionCall& ModuleNode, const FName& FullInputName,
+		const FNiagaraTypeDefinition& InputType, FString& OutLiteral)
+	{
+		OutLiteral.Reset();
+		UNiagaraGraph* CalledGraph = ModuleNode.GetCalledGraph();
+		if (!CalledGraph) return false;
+
+		// UNiagaraGraph::GetVariable / ::GetDefaultMode are not NIAGARAEDITOR_API-exported; the
+		// GetScriptVariable(FName) overload is, and reaches the same UNiagaraScriptVariable.
+		const UNiagaraScriptVariable* ScriptVar = CalledGraph->GetScriptVariable(FullInputName);
+		if (!ScriptVar || ScriptVar->DefaultMode != ENiagaraDefaultMode::Value) return false;
+		if (ScriptVar->Variable.GetType() != InputType || !ScriptVar->Variable.IsDataAllocated()) return false;
+
+		const UEdGraphSchema_Niagara* Schema = GetDefault<UEdGraphSchema_Niagara>();
+		return Schema != nullptr && Schema->TryGetPinDefaultValueFromNiagaraVariable(ScriptVar->Variable, OutLiteral);
+	}
+
+	// True when the input carries a rapid-iteration value that DIFFERS from the module's default,
+	// i.e. a value somebody actually set. OutValue is the engine-formatted pin literal either way.
+	bool TryGetRapidIterationOverride(UNiagaraSystem* System, int32 EmitterIdx, ENiagaraScriptUsage Usage,
+		const FGuid& UsageId, UNiagaraNodeFunctionCall& ModuleNode, const FName& FullInputName,
+		const FNiagaraParameterHandle& AliasedHandle, const FNiagaraTypeDefinition& InputType, FString& OutValue)
+	{
+		if (!TryGetRapidIterationInputValue(System, EmitterIdx, Usage, UsageId, AliasedHandle, InputType, OutValue))
+		{
+			return false;
+		}
+
+		// Default unobtainable -> report the value rather than claim it is untouched. Under-reporting
+		// a set value is the failure that overwrites a human's work; over-reporting only costs a
+		// redundant write.
+		FString DefaultLiteral;
+		if (!TryGetModuleInputDefaultLiteral(ModuleNode, FullInputName, InputType, DefaultLiteral))
+		{
+			return true;
+		}
+		return !DefaultLiteral.Equals(OutValue, ESearchCase::CaseSensitive);
+	}
+
+	// Reads one component out of a JSON value object, accepting the spelling used by the neighbouring
+	// vector-ish types so {"x":..} and {"r":..} both resolve regardless of the target type.
+	double GetJsonComponent(const TSharedPtr<FJsonObject>& O, const TCHAR* Key, const TCHAR* AltKey, double Fallback)
+	{
+		if (O->HasField(Key)) return O->GetNumberField(Key);
+		if (AltKey != nullptr && O->HasField(AltKey)) return O->GetNumberField(AltKey);
+		return Fallback;
+	}
+
+	// JSON object -> Niagara pin literal. The engine parses a pin's DefaultValue through the
+	// INiagaraEditorTypeUtilities registered for the pin's type, and the syntax is NOT uniform:
+	//   Color      FLinearColor::ToString() -> "(R=%f,G=%f,B=%f,A=%f)"  (FParse::Value on R=/G=/B=/A=)
+	//   Vec2       FVector2f::ToString()    -> "X=%f Y=%f"              (FParse::Value on X=/Y=)
+	//   Vec3/4/Quat  bare component list    -> "%f,%f,%f[,%f]"          (FDefaultValueHelper::ParseVector)
+	// Emitting the wrong syntax fails SILENTLY: SetValueFromPinDefaultString takes the
+	// `|| !Variable.IsDataAllocated()` branch, stores its zero-initialised local and still reports
+	// success. For a color that local is FLinearColor::Black with A left at 1, which is exactly the
+	// "alpha applied, RGB stayed default" symptom of issue #122.
+	bool JsonObjectToPinLiteral(const TSharedPtr<FJsonObject>& O, const FNiagaraTypeDefinition& InputType,
+		FString& OutLiteral)
+	{
+		if (!O.IsValid()) return false;
+
+		if (InputType == FNiagaraTypeDefinition::GetColorDef())
+		{
+			OutLiteral = FString::Printf(TEXT("(R=%f,G=%f,B=%f,A=%f)"),
+				GetJsonComponent(O, TEXT("r"), TEXT("x"), 0.0),
+				GetJsonComponent(O, TEXT("g"), TEXT("y"), 0.0),
+				GetJsonComponent(O, TEXT("b"), TEXT("z"), 0.0),
+				GetJsonComponent(O, TEXT("a"), TEXT("w"), 1.0));
+			return true;
+		}
+		if (InputType == FNiagaraTypeDefinition::GetVec2Def())
+		{
+			OutLiteral = FString::Printf(TEXT("X=%f Y=%f"),
+				GetJsonComponent(O, TEXT("x"), TEXT("r"), 0.0),
+				GetJsonComponent(O, TEXT("y"), TEXT("g"), 0.0));
+			return true;
+		}
+		if (InputType == FNiagaraTypeDefinition::GetVec3Def() || InputType == FNiagaraTypeDefinition::GetPositionDef())
+		{
+			OutLiteral = FString::Printf(TEXT("%f,%f,%f"),
+				GetJsonComponent(O, TEXT("x"), TEXT("r"), 0.0),
+				GetJsonComponent(O, TEXT("y"), TEXT("g"), 0.0),
+				GetJsonComponent(O, TEXT("z"), TEXT("b"), 0.0));
+			return true;
+		}
+		if (InputType == FNiagaraTypeDefinition::GetVec4Def() || InputType == FNiagaraTypeDefinition::GetQuatDef())
+		{
+			OutLiteral = FString::Printf(TEXT("%f,%f,%f,%f"),
+				GetJsonComponent(O, TEXT("x"), TEXT("qx"), 0.0),
+				GetJsonComponent(O, TEXT("y"), TEXT("qy"), 0.0),
+				GetJsonComponent(O, TEXT("z"), TEXT("qz"), 0.0),
+				GetJsonComponent(O, TEXT("w"), TEXT("qw"), 0.0));
+			return true;
+		}
+
+		// Type not resolved (e.g. the CustomHlsl pin fallback) — dispatch on the object's shape.
+		if (O->HasField(TEXT("x")) && O->HasField(TEXT("y")))
+		{
+			const double X = O->GetNumberField(TEXT("x")), Y = O->GetNumberField(TEXT("y"));
+			if (O->HasField(TEXT("w")))
+			{
+				OutLiteral = FString::Printf(TEXT("%f,%f,%f,%f"), X, Y,
+					O->HasField(TEXT("z")) ? O->GetNumberField(TEXT("z")) : 0.0, O->GetNumberField(TEXT("w")));
+			}
+			else if (O->HasField(TEXT("z")))
+			{
+				OutLiteral = FString::Printf(TEXT("%f,%f,%f"), X, Y, O->GetNumberField(TEXT("z")));
+			}
+			else
+			{
+				OutLiteral = FString::Printf(TEXT("X=%f Y=%f"), X, Y);
+			}
+			return true;
+		}
+		if (O->HasField(TEXT("r")) && O->HasField(TEXT("g")))
+		{
+			OutLiteral = FString::Printf(TEXT("(R=%f,G=%f,B=%f,A=%f)"),
+				O->GetNumberField(TEXT("r")), O->GetNumberField(TEXT("g")),
+				O->HasField(TEXT("b")) ? O->GetNumberField(TEXT("b")) : 0.0,
+				O->HasField(TEXT("a")) ? O->GetNumberField(TEXT("a")) : 1.0);
+			return true;
+		}
+		if (O->HasField(TEXT("qx")) && O->HasField(TEXT("qy")) && O->HasField(TEXT("qz")) && O->HasField(TEXT("qw")))
+		{
+			OutLiteral = FString::Printf(TEXT("%f,%f,%f,%f"),
+				O->GetNumberField(TEXT("qx")), O->GetNumberField(TEXT("qy")),
+				O->GetNumberField(TEXT("qz")), O->GetNumberField(TEXT("qw")));
+			return true;
+		}
+		if (O->HasField(TEXT("m00")))
+		{
+			// Matrix: m00..m33 in row-major order. NOTE: FNiagaraEditorMatrixTypeUtilities does not
+			// override CanHandlePinDefaults, so the engine ignores matrix pin defaults entirely —
+			// this literal is emitted for completeness only.
+			static const TCHAR* MatrixKeys[] = {
+				TEXT("m00"), TEXT("m01"), TEXT("m02"), TEXT("m03"),
+				TEXT("m10"), TEXT("m11"), TEXT("m12"), TEXT("m13"),
+				TEXT("m20"), TEXT("m21"), TEXT("m22"), TEXT("m23"),
+				TEXT("m30"), TEXT("m31"), TEXT("m32"), TEXT("m33") };
+			TArray<FString> Components;
+			for (const TCHAR* Key : MatrixKeys)
+			{
+				Components.Add(FString::Printf(TEXT("%f"), GetJsonComponent(O, Key, nullptr, 0.0)));
+			}
+			OutLiteral = FString::Join(Components, TEXT(","));
+			return true;
+		}
+		return false;
+	}
+
 	// Serialize an FRichCurve to a JSON array of key objects
 	TArray<TSharedPtr<FJsonValue>> SerializeCurveKeys(const FRichCurve& Curve)
 	{
@@ -4119,7 +4363,8 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetModuleInputs(const TShar
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Emitter '%s' not found. Use list_emitters to get valid emitter names or GUIDs."), *EmitterHandleId));
 
 	ENiagaraScriptUsage FoundUsage = ENiagaraScriptUsage::ParticleUpdateScript;
-	UNiagaraNodeFunctionCall* ModuleNode = FindModuleNode(System, EmitterHandleId, ModuleNodeGuid, &FoundUsage);
+	FGuid FoundUsageId;
+	UNiagaraNodeFunctionCall* ModuleNode = FindModuleNode(System, EmitterHandleId, ModuleNodeGuid, &FoundUsage, &FoundUsageId);
 	if (!ModuleNode) return FMonolithActionResult::Error(TEXT("Module node not found"));
 
 	// Use the engine's full input enumeration (includes data inputs from the script, not just pins on the node)
@@ -4210,7 +4455,22 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetModuleInputs(const TShar
 		}
 		else
 		{
-			IO->SetBoolField(TEXT("has_override"), false);
+			// No override pin still leaves the rapid-iteration store, where the stack editor writes
+			// local input values. Report those as set values so this agrees with
+			// get_module_input_value instead of implying the input is untouched.
+			FString RIValue;
+			if (MonolithNiagaraHelpers::TryGetRapidIterationOverride(
+				System, EmitterIdx, FoundUsage, FoundUsageId, *ModuleNode, Input.GetName(), AH,
+				Input.GetType(), RIValue))
+			{
+				IO->SetStringField(TEXT("override_value"), RIValue);
+				IO->SetBoolField(TEXT("has_override"), true);
+				IO->SetStringField(TEXT("source"), TEXT("rapid_iteration"));
+			}
+			else
+			{
+				IO->SetBoolField(TEXT("has_override"), false);
+			}
 		}
 		Arr.Add(MakeShared<FJsonValueObject>(IO));
 	}
@@ -4945,58 +5205,32 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputValue(const T
 		TargetPin = &OverridePin;
 	}
 
-	FString ValStr;
-	if (JV->Type == EJson::Number) ValStr = FString::SanitizeFloat(JV->AsNumber());
-	else if (JV->Type == EJson::Boolean) ValStr = JV->AsBool() ? TEXT("true") : TEXT("false");
-	else if (JV->Type == EJson::String) ValStr = JV->AsString();
-	else if (JV->Type == EJson::Object)
+	// A structured value arrives either as EJson::Object or — when the MCP layer serialises a nested
+	// param — as a string holding the serialized object. Normalise both, else the raw JSON text lands
+	// on the pin verbatim and the engine silently parses it as a zeroed default.
+	TSharedPtr<FJsonObject> ValueObj;
+	if (JV->Type == EJson::Object)
 	{
-		TSharedPtr<FJsonObject> O = JV->AsObject();
-		if (O->HasField(TEXT("x")) && O->HasField(TEXT("y")))
-		{
-			// Vector types: vec2, vec3, vec4
-			double X = O->GetNumberField(TEXT("x")), Y = O->GetNumberField(TEXT("y"));
-			double Z = O->HasField(TEXT("z")) ? O->GetNumberField(TEXT("z")) : 0.0;
-			double W = O->HasField(TEXT("w")) ? O->GetNumberField(TEXT("w")) : 0.0;
-			if (O->HasField(TEXT("w"))) ValStr = FString::Printf(TEXT("%f,%f,%f,%f"), X, Y, Z, W);
-			else if (O->HasField(TEXT("z"))) ValStr = FString::Printf(TEXT("%f,%f,%f"), X, Y, Z);
-			else ValStr = FString::Printf(TEXT("%f,%f"), X, Y);
-		}
-		else if (O->HasField(TEXT("r")) && O->HasField(TEXT("g")))
-		{
-			// Color type: LinearColor
-			double R2 = O->GetNumberField(TEXT("r")), G = O->GetNumberField(TEXT("g"));
-			double B = O->GetNumberField(TEXT("b")), A = O->HasField(TEXT("a")) ? O->GetNumberField(TEXT("a")) : 1.0;
-			ValStr = FString::Printf(TEXT("%f,%f,%f,%f"), R2, G, B, A);
-		}
-		else if (O->HasField(TEXT("qx")) && O->HasField(TEXT("qy")) && O->HasField(TEXT("qz")) && O->HasField(TEXT("qw")))
-		{
-			// Quaternion type: quat
-			double QX = O->GetNumberField(TEXT("qx")), QY = O->GetNumberField(TEXT("qy"));
-			double QZ = O->GetNumberField(TEXT("qz")), QW = O->GetNumberField(TEXT("qw"));
-			ValStr = FString::Printf(TEXT("%f,%f,%f,%f"), QX, QY, QZ, QW);
-		}
-		else if (O->HasField(TEXT("m00")))
-		{
-			// Matrix type: 4x4 matrix (16 values)
-			// Format: m00,m01,m02,m03,m10,m11,m12,m13,m20,m21,m22,m23,m30,m31,m32,m33
-			double M00 = O->GetNumberField(TEXT("m00")), M01 = O->GetNumberField(TEXT("m01"));
-			double M02 = O->GetNumberField(TEXT("m02")), M03 = O->GetNumberField(TEXT("m03"));
-			double M10 = O->GetNumberField(TEXT("m10")), M11 = O->GetNumberField(TEXT("m11"));
-			double M12 = O->GetNumberField(TEXT("m12")), M13 = O->GetNumberField(TEXT("m13"));
-			double M20 = O->GetNumberField(TEXT("m20")), M21 = O->GetNumberField(TEXT("m21"));
-			double M22 = O->GetNumberField(TEXT("m22")), M23 = O->GetNumberField(TEXT("m23"));
-			double M30 = O->GetNumberField(TEXT("m30")), M31 = O->GetNumberField(TEXT("m31"));
-			double M32 = O->GetNumberField(TEXT("m32")), M33 = O->GetNumberField(TEXT("m33"));
-			ValStr = FString::Printf(TEXT("%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f"),
-				M00, M01, M02, M03, M10, M11, M12, M13, M20, M21, M22, M23, M30, M31, M32, M33);
-		}
-		else
+		ValueObj = JV->AsObject();
+	}
+	else if (JV->Type == EJson::String && JV->AsString().TrimStartAndEnd().StartsWith(TEXT("{")))
+	{
+		ValueObj = AsObjectOrParseString(JV);
+	}
+
+	FString ValStr;
+	if (ValueObj.IsValid() && ValueObj->Values.Num() > 0)
+	{
+		// The pin literal syntax is per-type, not one comma-separated form — see JsonObjectToPinLiteral.
+		if (!MonolithNiagaraHelpers::JsonObjectToPinLiteral(ValueObj, InputType, ValStr))
 		{
 			TSharedRef<TJsonWriter<>> W = TJsonWriterFactory<>::Create(&ValStr);
-			FJsonSerializer::Serialize(O.ToSharedRef(), W);
+			FJsonSerializer::Serialize(ValueObj.ToSharedRef(), W);
 		}
 	}
+	else if (JV->Type == EJson::Number) ValStr = FString::SanitizeFloat(JV->AsNumber());
+	else if (JV->Type == EJson::Boolean) ValStr = JV->AsBool() ? TEXT("true") : TEXT("false");
+	else if (JV->Type == EJson::String) ValStr = JV->AsString();
 	else ValStr = JsonValueToString(JV);
 
 	TargetPin->DefaultValue = ValStr;
@@ -8511,7 +8745,8 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetModuleInputValue(const T
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
 	ENiagaraScriptUsage FoundUsage;
-	UNiagaraNodeFunctionCall* MN = FindModuleNode(System, EmitterHandleId, ModuleNodeGuid, &FoundUsage);
+	FGuid FoundUsageId;
+	UNiagaraNodeFunctionCall* MN = FindModuleNode(System, EmitterHandleId, ModuleNodeGuid, &FoundUsage, &FoundUsageId);
 	if (!MN) return FMonolithActionResult::Error(TEXT("Module node not found"));
 
 	// Get all inputs via engine API
@@ -8582,6 +8817,22 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetModuleInputValue(const T
 
 	if (!OP)
 	{
+		// No override pin does NOT mean "default". The stack editor stores a local (non-linked) input
+		// value in the owning script's rapid-iteration store and never touches the graph, so consult
+		// that before reporting a default — otherwise every hand-tuned value reads back as
+		// is_default:true and a read-before-write agent silently overwrites it.
+		FString RIValue;
+		if (MonolithNiagaraHelpers::TryGetRapidIterationOverride(
+			System, EmitterIdx, FoundUsage, FoundUsageId, *MN, MatchedFullName, AH, InputType, RIValue))
+		{
+			R->SetStringField(TEXT("value"), RIValue);
+			R->SetBoolField(TEXT("is_default"), false);
+			R->SetBoolField(TEXT("is_linked"), false);
+			R->SetBoolField(TEXT("is_dynamic_input"), false);
+			R->SetStringField(TEXT("source"), TEXT("rapid_iteration"));
+			return NA_SuccessObj(R);
+		}
+
 		R->SetStringField(TEXT("value"), TEXT("(default)"));
 		R->SetBoolField(TEXT("is_default"), true);
 		R->SetBoolField(TEXT("is_linked"), false);
