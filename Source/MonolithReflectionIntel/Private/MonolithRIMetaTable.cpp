@@ -28,7 +28,11 @@ namespace MonolithRIMeta
 		// met and every scored file landed with one signal zeroed. Rows written
 		// by version 1 are unusable against the version-2 join.
 		if (Subsystem.Equals(TEXT("risk"),       ESearchCase::CaseSensitive)) { return 2; }
-		if (Subsystem.Equals(TEXT("decision"),   ESearchCase::CaseSensitive)) { return 1; }
+		// decision 1 -> 2: the rationale-marker heuristic tightened. Version 1
+		// accepted a bare "rationale"/"evidence" noun anywhere in an 8-line
+		// window that ran past the next header, so ordinary prose sections were
+		// indexed as decisions. Version-1 rows are those false positives.
+		if (Subsystem.Equals(TEXT("decision"),   ESearchCase::CaseSensitive)) { return 2; }
 		return 0;
 	}
 

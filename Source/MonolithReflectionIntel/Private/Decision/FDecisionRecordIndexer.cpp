@@ -5,8 +5,13 @@
 // straight from MONOLITH_GUIDE.md Phase 1 § Heuristic Rules:
 //   - "## ADR-NNN" / "## Architectural Decision" headers     → high confidence
 //   - YAML frontmatter `decision: true` (or `status: ...`)   → high confidence
-//   - markdown header followed within N lines by a paragraph
-//     containing "because"/"rationale"/"evidence"            → medium confidence
+//   - markdown header followed within N lines, and before the next header,
+//     by a paragraph carrying a rationale marker              → medium confidence
+//
+// The rationale-marker rule is the loose one, so it is the one that decides how
+// much ordinary prose gets misfiled as a decision. See LineHasRationaleMarker
+// below for the exact marker shapes it accepts and why bare "rationale" /
+// "evidence" nouns are not among them.
 //
 // API verifications (per Iron Law 1):
 //   - FSQLitePreparedStatement Create/Execute/Bind pattern: VERIFIED at
@@ -83,18 +88,116 @@ namespace
 		return Out;
 	}
 
-	/** Look ahead from HeaderLineIdx for rationale markers within WindowLines. */
+	/** True if Ch can be part of a word — used for whole-word marker matching. */
+	bool IsWordChar(TCHAR Ch)
+	{
+		return FChar::IsAlnum(Ch) || Ch == TEXT('_');
+	}
+
+	/** Quote / code-span delimiters, straight and typographic. */
+	bool IsQuoteChar(TCHAR Ch)
+	{
+		return Ch == TEXT('"') || Ch == TEXT('\'') || Ch == TEXT('`')
+			|| Ch == static_cast<TCHAR>(0x2018)   // left single quote
+			|| Ch == static_cast<TCHAR>(0x2019)   // right single quote
+			|| Ch == static_cast<TCHAR>(0x201C)   // left double quote
+			|| Ch == static_cast<TCHAR>(0x201D);  // right double quote
+	}
+
+	/**
+	 * True if Line carries a rationale marker. Two marker shapes, deliberately
+	 * different:
+	 *
+	 *   - "because" is a CONNECTIVE. It counts wherever it appears as a whole
+	 *     word, because that is how rationale is actually written in prose
+	 *     ("we chose X over Y because ...").
+	 *   - "rationale" / "evidence" / "decision" count only in LABEL form
+	 *     ("Rationale:", "Evidence:", "Decision:"). This is the same colon
+	 *     discipline the marker list already applied to "decision:", now applied
+	 *     consistently. As bare nouns these words are unremarkable prose ("no
+	 *     rationale paragraphs", "the evidence is thin", "a design decision we
+	 *     revisited") and they classify nothing while matching a great deal.
+	 *
+	 * In both shapes a marker immediately hugged by a quote or a backtick is
+	 * being MENTIONED rather than used — documentation that describes this very
+	 * heuristic quotes its own marker words — so it does not count.
+	 */
+	bool LineHasRationaleMarker(const FString& Line)
+	{
+		struct FRationaleMarker
+		{
+			const TCHAR* Word;
+			bool bRequiresColon;
+		};
+		static const FRationaleMarker Markers[] =
+		{
+			{ TEXT("because"),   false },
+			{ TEXT("rationale"), true  },
+			{ TEXT("evidence"),  true  },
+			{ TEXT("decision"),  true  },
+		};
+
+		const int32 LineLen = Line.Len();
+		for (const FRationaleMarker& Marker : Markers)
+		{
+			const int32 WordLen = FCString::Strlen(Marker.Word);
+			int32 At = Line.Find(Marker.Word, ESearchCase::IgnoreCase, ESearchDir::FromStart, 0);
+			while (At != INDEX_NONE)
+			{
+				const int32 WordEnd = At + WordLen;
+
+				// Treat the line edges as separators, not as word characters.
+				const TCHAR Before = (At > 0)           ? Line[At - 1]  : TEXT('\n');
+				const TCHAR After  = (WordEnd < LineLen) ? Line[WordEnd] : TEXT('\n');
+
+				const bool bWholeWord = !IsWordChar(Before) && !IsWordChar(After);
+				const bool bMentioned = IsQuoteChar(Before) || IsQuoteChar(After);
+				const bool bLabelled  = !Marker.bRequiresColon || After == TEXT(':');
+
+				if (bWholeWord && !bMentioned && bLabelled)
+				{
+					return true;
+				}
+
+				// WordLen >= 1, so WordEnd > At: the scan always advances.
+				// FString::Find clamps StartPosition to Len()-1, so stop at the
+				// end rather than re-scanning the final character forever.
+				if (WordEnd >= LineLen)
+				{
+					break;
+				}
+				At = Line.Find(Marker.Word, ESearchCase::IgnoreCase, ESearchDir::FromStart, WordEnd);
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Look ahead from HeaderLineIdx for rationale markers within WindowLines.
+	 *
+	 * With bStopAtNextHeader the scan also stops at the next markdown header:
+	 * rationale that lives under a LATER header is that section's rationale, not
+	 * this one's. Unbounded, a rationale-free section is credited with its
+	 * neighbour's rationale purely because the neighbour starts inside the
+	 * window, which promotes the heading directly above every decision.
+	 */
 	bool FindRationaleWithin(const TArray<FString>& Lines, int32 HeaderLineIdx,
-		int32 WindowLines, FString& OutRationale)
+		int32 WindowLines, bool bStopAtNextHeader, FString& OutRationale)
 	{
 		const int32 End = FMath::Min(Lines.Num(), HeaderLineIdx + 1 + WindowLines);
 		for (int32 i = HeaderLineIdx + 1; i < End; ++i)
 		{
-			const FString Lower = Lines[i].ToLower();
-			if (Lower.Contains(TEXT("because")) ||
-				Lower.Contains(TEXT("rationale")) ||
-				Lower.Contains(TEXT("evidence")) ||
-				Lower.Contains(TEXT("decision:")))
+			if (bStopAtNextHeader)
+			{
+				FString NextHeaderText;
+				int32 NextHeaderLevel = 0;
+				if (IsMarkdownHeader(Lines[i], NextHeaderText, NextHeaderLevel))
+				{
+					break;
+				}
+			}
+
+			if (LineHasRationaleMarker(Lines[i]))
 			{
 				OutRationale = Lines[i].TrimStartAndEnd();
 				return true;
@@ -355,8 +458,10 @@ bool FDecisionRecordIndexer::ExtractRecordsFromFile(const FString& AbsPath,
 		Row.SourceMtimeUnix = MtimeUnix;
 		Row.DecisionId = MakeDecisionId(RelPath, TEXT("frontmatter"));
 
-		// Look for inline rationale anywhere in the first 30 lines.
-		FindRationaleWithin(Lines, 0, 30, Row.Rationale);
+		// Look for inline rationale anywhere in the first 30 lines. The record
+		// is already established by the frontmatter, so this is a best-effort
+		// body sweep and deliberately reads across headers.
+		FindRationaleWithin(Lines, 0, 30, /*bStopAtNextHeader=*/false, Row.Rationale);
 
 		// Frontmatter `supersedes:` accepts a single id or a comma-separated list.
 		if (Frontmatter.Contains(TEXT("supersedes")))
@@ -388,7 +493,8 @@ bool FDecisionRecordIndexer::ExtractRecordsFromFile(const FString& AbsPath,
 		if (Level == 1 && !bIsAdrHeader) { continue; }
 
 		FString Rationale;
-		const bool bFoundRationale = FindRationaleWithin(Lines, i, /*WindowLines=*/8, Rationale);
+		const bool bFoundRationale = FindRationaleWithin(
+			Lines, i, /*WindowLines=*/8, /*bStopAtNextHeader=*/true, Rationale);
 
 		// Heuristic gate: emit a row only if ADR-header OR rationale-followed.
 		if (!bIsAdrHeader && !bFoundRationale) { continue; }
