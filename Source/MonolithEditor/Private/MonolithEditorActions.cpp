@@ -527,9 +527,11 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("start_pie"),
-		TEXT("Start a Play-In-Editor session (equivalent to pressing Cmd+P in the editor)."),
+		TEXT("Start an in-viewport Play-In-Editor session (equivalent to pressing Cmd+P in the editor). Pre-flights loaded Blueprints for unresolved compile errors so the action never leaves the editor stuck behind the engine's blocking confirmation modal: on_compile_errors=\"refuse\" (default) returns the offending {name,path} list without starting PIE, \"suppress\" starts anyway with that modal silenced. Success returns {started, mode, compile_error_policy, errored_blueprint_count, errored_blueprints}."),
 		FMonolithActionHandler::CreateStatic(&HandleStartPIE),
-		MakeShared<FJsonObject>());
+		FParamSchemaBuilder()
+			.Optional(TEXT("on_compile_errors"), TEXT("string"), TEXT("Policy when loaded Blueprints have unresolved compile errors: \"refuse\" (default, safe) returns an error + the offending {name,path} list and does NOT start PIE; \"suppress\" starts PIE anyway and silences the engine's blocking compile-error modal (which would otherwise freeze the editor + MCP server). Any other value is rejected as invalid params."), TEXT("refuse"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("stop_pie"),
 		TEXT("Stop the active Play-In-Editor session."),
@@ -610,6 +612,7 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.Optional(TEXT("marker"), TEXT("string"), TEXT("Log marker token. Default MONOLITH_CLIP."), TEXT("MONOLITH_CLIP"))
 			.Optional(TEXT("duration"), TEXT("number"), TEXT("Seconds the editor loop advances PIE before the session auto-completes (clamped 0-120). Default 5."), TEXT("5"))
 			.Optional(TEXT("capture_interval"), TEXT("number"), TEXT("Seconds between captured frames (clamped 0.05-5). Default 0.25."), TEXT("0.25"))
+			.Optional(TEXT("include_ui"), TEXT("bool"), TEXT("Capture the composited backbuffer (game + UMG/Slate UI) via the engine screenshot path — the `shot showui` mechanism — instead of the scene-only viewport read. Required for any UI iteration: the default ReadPixels path never sees UMG, so a UI capture comes back as an empty scene. CAVEATS: (1) the file is written at END OF FRAME (async), so the per-frame uniformity/validity check does NOT apply — these frames are reported as requested-valid and the clip directory is the ground truth; (2) with PIE docked in the editor the backbuffer is the WHOLE EDITOR WINDOW — use new-window PIE for a clean game+UI clip. Default false (no behaviour change)."), TEXT("false"))
 			.Optional(TEXT("sample_vars"), TEXT("array"), TEXT("AnimInstance variable names sampled each frame. Default [GroundSpeed, bShouldMove, DesiredYawDelta]."))
 			.Optional(TEXT("pawn_class"), TEXT("string"), TEXT("Substring of the target pawn's class name to sample. Omit to use the first player controller's pawn."))
 			.Optional(TEXT("console_script"), TEXT("array"), TEXT("Console commands run on the PIE world at start (drive the movement)."))
@@ -670,7 +673,9 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.OptionalAssetPath(TEXT("animation_path"), TEXT("skeletal_mesh only: UAnimSequence to pose with at seek_time"))
 			.Optional(TEXT("scale"), TEXT("number"), TEXT("widget only: DPI multiplier (>=0.01)"), TEXT("1.0"))
 			.Optional(TEXT("camera"), TEXT("object"), TEXT("{location:[x,y,z], rotation:[p,y,r], fov:60}"))
-			.Optional(TEXT("resolution"), TEXT("array"), TEXT("[width, height]"), TEXT("[512,512]"))
+			.Optional(TEXT("resolution"), TEXT("array"), TEXT("[width, height] in pixels. Default [512,512]. Each side must be 1-8192. Individual width / height params override the matching element."), TEXT("[512,512]"))
+			.Optional(TEXT("width"), TEXT("number"), TEXT("Capture width in pixels (1-8192). Default 512. Overrides resolution[0] when both are given — use this to match a widget's design frame (e.g. width=1200, height=760); a square capture yields false layout conclusions."), TEXT("512"))
+			.Optional(TEXT("height"), TEXT("number"), TEXT("Capture height in pixels (1-8192). Default 512. Overrides resolution[1] when both are given."), TEXT("512"))
 			.OptionalDiskPath(TEXT("output_path"), TEXT("Output PNG path (absolute or relative to project)"))
 			.Build());
 
@@ -2006,6 +2011,25 @@ bool FMonolithEditorActions::StopPieInternal()
 
 FMonolithActionResult FMonolithEditorActions::HandleStartPIE(const TSharedPtr<FJsonObject>& Params)
 {
+	// Compile-error policy (same vocabulary as run_pie_smoke / sample_pie_timeseries).
+	// Validated FIRST, ahead of the editor-state checks: an unrecognised policy is a bad
+	// call regardless of whether PIE happens to be running. Unlike those two actions,
+	// start_pie is the bare "press play" primitive, so a typo'd "ignore"/"prompt" is a hard
+	// invalid-params error rather than a silent fall-through to the strictest mode.
+	FString CompileMode = TEXT("refuse");
+	if (Params.IsValid())
+	{
+		Params->TryGetStringField(TEXT("on_compile_errors"), CompileMode);
+	}
+	const bool bRefuseModals = CompileMode.Equals(TEXT("refuse"), ESearchCase::IgnoreCase);
+	const bool bSuppressModals = CompileMode.Equals(TEXT("suppress"), ESearchCase::IgnoreCase);
+	if (!bRefuseModals && !bSuppressModals)
+	{
+		return FMonolithActionResult::Error(
+			FString::Printf(TEXT("Invalid on_compile_errors policy '%s'. Expected \"refuse\" or \"suppress\"."), *CompileMode),
+			-32602);
+	}
+
 	if (!GUnrealEd) return FMonolithActionResult::Error(TEXT("GUnrealEd not available"));
 
 	// Reject if a PIE session is already running so we don't queue duplicates.
@@ -2017,8 +2041,28 @@ FMonolithActionResult FMonolithEditorActions::HandleStartPIE(const TSharedPtr<FJ
 		return FMonolithActionResult::Success(AlreadyRunning);
 	}
 
+	// PIE pre-flight: in refuse mode never PIE a broken world — the engine's
+	// ShowBlueprintErrorDialog runs a nested game-thread loop that starves the
+	// in-process MCP server until a human clicks.
+	TArray<FErroredBlueprintEntry> Errored;
+	ScanErroredBlueprints(Errored);
+	if (Errored.Num() > 0 && bRefuseModals)
+	{
+		TSharedPtr<FJsonObject> ErrObj = MakeShared<FJsonObject>();
+		ErrObj->SetNumberField(TEXT("errored_blueprint_count"), Errored.Num());
+		ErrObj->SetArrayField(TEXT("errored_blueprints"), ErroredBlueprintsToJson(Errored));
+		return FMonolithActionResult::Error(
+			FString::Printf(TEXT("start_pie refused: %d Blueprint(s) have unresolved compile errors. ")
+				TEXT("Starting PIE would raise a blocking modal that freezes the editor + MCP server. ")
+				TEXT("Fix the Blueprints, or pass on_compile_errors=\"suppress\" to PIE anyway."),
+				Errored.Num()))
+			.WithErrorData(ErrObj);
+	}
+
+	// bSuppressModals wraps the request in StartPieInternal's scoped unattended guard so
+	// the compile-error prompt resolves to its default instead of blocking.
 	FString StartError;
-	if (!StartPieInternal(StartError))
+	if (!StartPieInternal(StartError, bSuppressModals))
 	{
 		return FMonolithActionResult::Error(StartError);
 	}
@@ -2026,6 +2070,9 @@ FMonolithActionResult FMonolithEditorActions::HandleStartPIE(const TSharedPtr<FJ
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetBoolField(TEXT("started"), true);
 	Root->SetStringField(TEXT("mode"), TEXT("in_viewport"));
+	Root->SetStringField(TEXT("compile_error_policy"), bSuppressModals ? TEXT("suppress") : TEXT("refuse"));
+	Root->SetNumberField(TEXT("errored_blueprint_count"), Errored.Num());
+	Root->SetArrayField(TEXT("errored_blueprints"), ErroredBlueprintsToJson(Errored));
 	return FMonolithActionResult::Success(Root);
 }
 
@@ -2381,6 +2428,15 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureScenePreview(
 		PreviewMesh = Params->GetStringField(TEXT("preview_mesh"));
 	}
 
+	// Capture size. `resolution` is the original [w,h] array form; `width` / `height` are
+	// the scalar spellings callers reach for first (issue #141 — they used to fall through
+	// as unknown params while the capture silently stayed 512x512, so a widget authored
+	// against e.g. a 1200x760 design frame was judged on a square render). Scalars are the
+	// more specific spelling, so they override the matching array element.
+	// Every asset_type branch below feeds ResX/ResY into its render target, so one parse
+	// covers niagara / material / static_mesh / skeletal_mesh / widget alike (the widget
+	// branch then multiplies by `scale` for the physical target and reports that back).
+	constexpr int32 MaxCaptureDimension = 8192; // typical max 2D texture dimension
 	int32 ResX = 512, ResY = 512;
 	if (Params->HasField(TEXT("resolution")))
 	{
@@ -2390,6 +2446,23 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureScenePreview(
 			ResX = (int32)ResArray[0]->AsNumber();
 			ResY = (int32)ResArray[1]->AsNumber();
 		}
+	}
+	double WidthD = 0.0, HeightD = 0.0;
+	if (Params->TryGetNumberField(TEXT("width"), WidthD))   { ResX = (int32)WidthD; }
+	if (Params->TryGetNumberField(TEXT("height"), HeightD)) { ResY = (int32)HeightD; }
+
+	if (ResX <= 0 || ResY <= 0)
+	{
+		return FMonolithActionResult::Error(
+			FString::Printf(TEXT("Invalid capture size %dx%d — width and height must be >= 1."), ResX, ResY),
+			-32602);
+	}
+	if (ResX > MaxCaptureDimension || ResY > MaxCaptureDimension)
+	{
+		return FMonolithActionResult::Error(
+			FString::Printf(TEXT("Capture size %dx%d exceeds the maximum of %d per side."),
+				ResX, ResY, MaxCaptureDimension),
+			-32602);
 	}
 
 	// Parse camera
@@ -2695,8 +2768,10 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureScenePreview(
 		Params->TryGetNumberField(TEXT("scale"), ScaleD);
 		const float Scale = FMath::Max(0.01f, (float)ScaleD);
 
-		const uint32 PhysicalW = FMath::Max(1u, (uint32)(ResX * Scale));
-		const uint32 PhysicalH = FMath::Max(1u, (uint32)(ResY * Scale));
+		// `scale` multiplies the validated logical size, so clamp the physical target to the
+		// same per-side ceiling — width/height are already range-checked, but scale is not.
+		const uint32 PhysicalW = FMath::Clamp((uint32)(ResX * Scale), 1u, (uint32)MaxCaptureDimension);
+		const uint32 PhysicalH = FMath::Clamp((uint32)(ResY * Scale), 1u, (uint32)MaxCaptureDimension);
 
 		const bool bUseGammaCorrection = true;
 		const bool bIsLinearSpace = !bUseGammaCorrection;
@@ -5524,6 +5599,17 @@ namespace MonolithEditorPieSmoke
 			Validity->SetNumberField(TEXT("invalid_frames"), S.InvalidFrames);
 			const bool bCapturedOk = (S.ValidFrames > 0) && (S.InvalidFrames == 0);
 			Validity->SetBoolField(TEXT("captured_ok"), bCapturedOk);
+			// include_ui frames are written asynchronously at end-of-frame by the engine
+			// screenshot path, so no pixel buffer reaches this accounting — the counts are
+			// frames REQUESTED, not frames verified. Say so rather than implying a check ran.
+			Validity->SetBoolField(TEXT("uniformity_checked"), !S.bIncludeUi);
+			if (S.bIncludeUi)
+			{
+				Validity->SetStringField(TEXT("note"),
+					TEXT("include_ui=true: frames are written end-of-frame by the engine screenshot ")
+					TEXT("path, so per-frame uniformity/validity was NOT verified — these counts are ")
+					TEXT("frames requested. Inspect the files in output_dir to confirm."));
+			}
 			if (S.InvalidFrames > 0 && S.ValidFrames == 0)
 			{
 				Validity->SetStringField(TEXT("hint"),
@@ -6264,6 +6350,8 @@ FMonolithActionResult FMonolithEditorActions::HandleCapturePieMovementClip(const
 	Session.bCaptureFrames = true;
 	Session.CaptureInterval = Interval;
 	Session.OutputDir = OutputDir;
+	Params->TryGetBoolField(TEXT("include_ui"), Session.bIncludeUi);
+	const bool bIncludeUi = Session.bIncludeUi; // Session is moved into the manager below
 
 	const FString SessionId = FPieSmokeSessionManager::Get().CreateSession(MoveTemp(Session));
 
@@ -6276,6 +6364,7 @@ FMonolithActionResult FMonolithEditorActions::HandleCapturePieMovementClip(const
 	Result->SetStringField(TEXT("resolved_output_dir"), OutputDir);   // explicit alias for callers
 	Result->SetNumberField(TEXT("duration"), Duration);
 	Result->SetNumberField(TEXT("capture_interval"), Interval);
+	Result->SetBoolField(TEXT("include_ui"), bIncludeUi);
 	return FMonolithActionResult::Success(Result);
 }
 

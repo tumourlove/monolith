@@ -26,6 +26,7 @@
 //                        loaded=false, plugin_name="" rather than erroring).
 
 #include "MonolithEditorMapActions.h"
+#include "MonolithEditorActions.h" // FMonolithEditorActions::HandleLoadLevel (open=true delegation)
 #include "MonolithParamSchema.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -33,6 +34,8 @@
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
 
+#include "Editor.h"          // GEditor (editor world context readback)
+#include "Engine/Engine.h"   // FWorldContext
 #include "Engine/World.h"
 #include "Factories/WorldFactory.h"
 
@@ -111,11 +114,13 @@ namespace
 void FMonolithEditorMapActions::RegisterActions(FMonolithToolRegistry& Registry)
 {
 	Registry.RegisterAction(TEXT("editor"), TEXT("create_empty_map"),
-		TEXT("Create a fully blank UWorld asset at the given /Game/... path. Saves immediately. Default template is 'blank' (zero actors)."),
+		TEXT("Create a fully blank UWorld asset at the given /Game/... path. Saves immediately. Default template is 'blank' (zero actors). CREATION ALONE DOES NOT CHANGE THE OPEN WORLD — the editor stays on whatever level was already loaded, so a following spawn/populate call edits THAT world, not the new one. The response always reports current_world (the editor world after the call) and opened; pass open=true (or call editor::load_level) to actually switch to the new map."),
 		FMonolithActionHandler::CreateStatic(&HandleCreateEmptyMap),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("path"), TEXT("Asset path under /Game/... where the new UWorld is saved (e.g. /Game/Tests/Monolith/Audio/Map_Test)"))
 			.Optional(TEXT("map_template"), TEXT("string"), TEXT("Template variant: 'blank' (default). Reserved: 'vr_basic', 'thirdperson_basic' — return error in v1; UE 5.7 templates are populated client-side, not via UWorldFactory."), TEXT("blank"))
+			.Optional(TEXT("open"), TEXT("bool"), TEXT("Open the new map in the editor after creating it, with the exact semantics of editor::load_level (same dirty-current-map refusal, PIE-teardown guard and stale-resident-world guard). Default false — creation never changes the open world. If the map is created but the open is refused, the call still SUCCEEDS with opened=false and open_error explaining why: the asset exists on disk either way, so retrying create_empty_map would just collide."), TEXT("false"))
+			.Optional(TEXT("dirty_policy"), TEXT("string"), TEXT("Forwarded to editor::load_level when open=true: 'refuse' (default) aborts the open if the CURRENT level has unsaved changes (LoadLevel runs unattended and would discard them with no prompt); 'discard' opens anyway and loses them. Ignored when open=false."), TEXT("refuse"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_module_status"),
@@ -202,12 +207,87 @@ FMonolithActionResult FMonolithEditorMapActions::HandleCreateEmptyMap(const TSha
 			TEXT("Created UWorld asset but failed to save to '%s'"), *PackageFilename));
 	}
 
+	// Creating and saving an asset does NOT change the editor's open world. Agents chain
+	// create -> populate and silently edit whatever level happened to be loaded, so the
+	// response has to state where the editor actually is (current_world) and whether the
+	// new map was opened (opened) on EVERY path — plus an opt-in to do the switch here.
+	bool bOpen = false;
+	Params->TryGetBoolField(TEXT("open"), bOpen);
+
+	bool bOpened = false;
+	FString OpenError;
+	if (bOpen)
+	{
+		// Delegate to editor::load_level rather than calling ULevelEditorSubsystem::LoadLevel
+		// directly. LoadLevel runs unattended (no save prompt), so a bare call silently
+		// discards unsaved changes to the current level, and it hard-asserts "World Memory
+		// Leaks" when a PIE world is still resident. HandleLoadLevel carries the dirty-map
+		// refusal, the PIE-teardown guard and the stale-resident-world guard — routing
+		// through it gives open=true identical semantics instead of a second unguarded path.
+		TSharedPtr<FJsonObject> LoadParams = MakeShared<FJsonObject>();
+		LoadParams->SetStringField(TEXT("path"), InPath);
+		FString DirtyPolicy;
+		if (Params->TryGetStringField(TEXT("dirty_policy"), DirtyPolicy) && !DirtyPolicy.IsEmpty())
+		{
+			LoadParams->SetStringField(TEXT("dirty_policy"), DirtyPolicy);
+		}
+
+		const FMonolithActionResult LoadResult = FMonolithEditorActions::HandleLoadLevel(LoadParams);
+		if (LoadResult.bSuccess && LoadResult.Result.IsValid())
+		{
+			LoadResult.Result->TryGetBoolField(TEXT("loaded"), bOpened);
+			if (!bOpened)
+			{
+				LoadResult.Result->TryGetStringField(TEXT("message"), OpenError);
+			}
+		}
+		else
+		{
+			OpenError = LoadResult.ErrorMessage;
+		}
+	}
+
+	// Read the editor world AFTER any open attempt so current_world is the truth the caller
+	// acts on. Reported as a package name (/Game/Maps/M_Foo) so it is directly comparable to
+	// the `path` param — UWorld::GetPathName() would append the ".M_Foo" object suffix and
+	// make every equality check a false negative.
+	const UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	const UPackage* EditorWorldPackage = EditorWorld ? EditorWorld->GetPackage() : nullptr;
+	const FString CurrentWorld = EditorWorldPackage ? EditorWorldPackage->GetName() : FString();
+
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetBoolField(TEXT("ok"), true);
 	Result->SetStringField(TEXT("path"), InPath);
 	Result->SetStringField(TEXT("map_template"), TEXT("blank"));
-	Result->SetStringField(TEXT("message"),
-		FString::Printf(TEXT("Created blank UWorld at %s and saved package."), *InPath));
+	Result->SetBoolField(TEXT("opened"), bOpened);
+	Result->SetStringField(TEXT("current_world"), CurrentWorld);
+
+	FString Message;
+	if (bOpened)
+	{
+		Message = FString::Printf(
+			TEXT("Created blank UWorld at %s, saved package, and opened it in the editor (current world: %s)."),
+			*InPath, *CurrentWorld);
+	}
+	else if (bOpen)
+	{
+		// The map exists on disk; only the open failed. Report success so the caller does
+		// not retry creation (which would collide) — open_error says what to fix.
+		Result->SetStringField(TEXT("open_error"), OpenError);
+		Message = FString::Printf(
+			TEXT("Created blank UWorld at %s and saved package, but open=true did NOT switch the editor. ")
+			TEXT("Current editor world is UNCHANGED (%s) — anything you spawn next lands THERE. Reason: %s"),
+			*InPath, *CurrentWorld, *OpenError);
+	}
+	else
+	{
+		Message = FString::Printf(
+			TEXT("Created blank UWorld at %s and saved package. Current editor world is UNCHANGED (%s) — ")
+			TEXT("anything you spawn next lands THERE, not in the new map. Pass open=true or call ")
+			TEXT("editor::load_level to open it."),
+			*InPath, *CurrentWorld);
+	}
+	Result->SetStringField(TEXT("message"), Message);
 	return FMonolithActionResult::Success(Result);
 }
 

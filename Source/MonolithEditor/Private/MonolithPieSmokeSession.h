@@ -298,6 +298,16 @@ struct FPieSmokeSession
 	int32 CaptureFrameIndex = 0;
 	bool bCaptureDeferred = false;    // set if viewport capture is unavailable in this build path
 
+	// include_ui: capture the composited backbuffer (game + UMG/Slate) through the engine
+	// screenshot path — the same mechanism as the `shot showui` console command — instead of
+	// the scene-only FViewport::ReadPixels. Slate composites the widget layers into the
+	// backbuffer, so this is the only path that sees UMG at all. The file is written at END
+	// OF FRAME (async), so no pixel buffer is available here: the per-frame uniformity /
+	// validity verdict does NOT apply to these frames and they are counted as requested-valid.
+	// NOTE: with PIE docked in the editor the backbuffer is the whole editor window; use
+	// new-window PIE for a clean game+UI clip.
+	bool bIncludeUi = false;
+
 	// #7 first-frame warm-up policy. The first DiscardFirstFrames captured frames are saved to
 	// disk (so the clip is complete) but are NOT counted toward ValidFrames / InvalidFrames —
 	// the very first ReadPixels after PIE start can return a uniform / un-warmed buffer that

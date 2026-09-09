@@ -1290,35 +1290,70 @@ void FPieSmokeSessionManager::AdvanceSession(FPieSmokeSession& Session)
 
 			const FString FramePath = Session.OutputDir /
 				FString::Printf(TEXT("frame_%03d.png"), Session.CaptureFrameIndex);
-			// #7 flush the render thread before the very first ReadPixels so a warm-up /
-			// uniform first frame is not produced in the first place.
-			const bool bFirstCapture = (Session.CaptureFrameIndex == 0);
-			const FCaptureResult Cap = CapturePieFrame(FramePath, bFirstCapture);
-			if (Cap.bSaved)
+
+			if (Session.bIncludeUi)
 			{
+				// include_ui: ride the engine screenshot path — the same mechanism the
+				// `shot showui` console command uses (UGameViewportClient::HandleScreenshotCommand)
+				// — so Slate composites the full backbuffer (game + UMG) before the PNG is
+				// written. FViewport::ReadPixels below only ever sees the scene render target,
+				// which is why the default path captures an empty scene for UI work.
+				//
+				// bAddFilenameSuffix=false keeps FramePath verbatim: RequestScreenshot only
+				// prefixes GameScreenshotSaveDirectory when the name has no path separator,
+				// and OutputDir is already an absolute on-disk dir (ResolveCaptureOutputDir).
+				// The extension is already .png so none is appended.
+				//
+				// The write happens at END OF FRAME, so there is no pixel buffer to inspect
+				// here — the #7 uniformity/validity verdict cannot apply. These frames are
+				// recorded as requested-valid and the clip directory is the ground truth.
+				//
+				// UE 5.8 adds a trailing bInRestrictToGameViewport param to this overload;
+				// deliberately left at its default so docked-PIE framing is identical on
+				// 5.7 and 5.8.
+				FScreenshotRequest::RequestScreenshot(FramePath, /*bInShowUI=*/true, /*bAddFilenameSuffix=*/false);
 				Sample.FramePath = FramePath;
-				// #7 per-frame validity verdict (uniform / all-black => unrendered).
-				Sample.bFrameUniform = Cap.bUniform;
-				Sample.bFrameValid = Cap.bValid;
-				// #7 first-frame warm-up: the first DiscardFirstFrames captured frames are saved
-				// (the clip stays complete) but excluded from valid/invalid accounting, so an
-				// un-warmed first frame can't false-fail the session's captured_ok rollup.
-				const bool bCountThisFrame = (Session.CaptureFrameIndex >= Session.DiscardFirstFrames);
-				if (bCountThisFrame)
+				Sample.bFrameUniform = false;
+				Sample.bFrameValid = true;
+				if (Session.CaptureFrameIndex >= Session.DiscardFirstFrames)
 				{
-					if (Cap.bValid) { ++Session.ValidFrames; } else { ++Session.InvalidFrames; }
+					++Session.ValidFrames;
 				}
 				Session.LastCaptureSeconds = SampleTime;
 				++Session.CaptureFrameIndex;
 			}
-			else if (Session.CaptureFrameIndex == 0 && SampleTime > Session.CaptureInterval * 2.0)
+			else
 			{
-				// Viewport never produced pixels — flag clip capture deferred but keep
-				// the session running so anim sampling + log counts still complete.
-				Session.bCaptureDeferred = true;
-				UE_LOG(LogMonolithPieSmoke, Warning,
-					TEXT("capture_pie_movement_clip: PIE viewport unavailable for session %s — capture deferred."),
-					*Session.Id);
+				// #7 flush the render thread before the very first ReadPixels so a warm-up /
+				// uniform first frame is not produced in the first place.
+				const bool bFirstCapture = (Session.CaptureFrameIndex == 0);
+				const FCaptureResult Cap = CapturePieFrame(FramePath, bFirstCapture);
+				if (Cap.bSaved)
+				{
+					Sample.FramePath = FramePath;
+					// #7 per-frame validity verdict (uniform / all-black => unrendered).
+					Sample.bFrameUniform = Cap.bUniform;
+					Sample.bFrameValid = Cap.bValid;
+					// #7 first-frame warm-up: the first DiscardFirstFrames captured frames are saved
+					// (the clip stays complete) but excluded from valid/invalid accounting, so an
+					// un-warmed first frame can't false-fail the session's captured_ok rollup.
+					const bool bCountThisFrame = (Session.CaptureFrameIndex >= Session.DiscardFirstFrames);
+					if (bCountThisFrame)
+					{
+						if (Cap.bValid) { ++Session.ValidFrames; } else { ++Session.InvalidFrames; }
+					}
+					Session.LastCaptureSeconds = SampleTime;
+					++Session.CaptureFrameIndex;
+				}
+				else if (Session.CaptureFrameIndex == 0 && SampleTime > Session.CaptureInterval * 2.0)
+				{
+					// Viewport never produced pixels — flag clip capture deferred but keep
+					// the session running so anim sampling + log counts still complete.
+					Session.bCaptureDeferred = true;
+					UE_LOG(LogMonolithPieSmoke, Warning,
+						TEXT("capture_pie_movement_clip: PIE viewport unavailable for session %s — capture deferred."),
+						*Session.Id);
+				}
 			}
 		}
 	}
