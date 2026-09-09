@@ -52,10 +52,12 @@ namespace MonolithUI::AnimationBuilderInternal
         WBP->WidgetVariableNameToGuidMap.Remove(Existing->GetFName());
 
         // Rename out so a same-name FindOrCreate doesn't trip over a stale UObject.
+        // REN_ForceNoResetLoaders is omitted: Rename stopped calling ResetLoaders
+        // before UE 5.7 (the flag is already a no-op there) and 5.8 deprecates it.
         Existing->Rename(
             nullptr,
             GetTransientPackage(),
-            REN_DoNotDirty | REN_DontCreateRedirectors | REN_ForceNoResetLoaders);
+            REN_DoNotDirty | REN_DontCreateRedirectors);
     }
 
     /**

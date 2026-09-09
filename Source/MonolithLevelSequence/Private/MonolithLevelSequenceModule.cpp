@@ -5,7 +5,7 @@
 #include "MonolithSettings.h"
 #include "MonolithIndexSubsystem.h"
 #include "Editor.h"
-#include "Misc/CoreDelegates.h"
+#include "MonolithCoreDelegatesCompat.h"
 
 #define LOCTEXT_NAMESPACE "FMonolithLevelSequenceModule"
 
@@ -25,7 +25,7 @@ void FMonolithLevelSequenceModule::StartupModule()
 
 	if (Settings->bIndexLevelSequences)
 	{
-		PostEngineInitHandle = FCoreDelegates::OnPostEngineInit.AddLambda([this]()
+		PostEngineInitHandle = MonolithCoreDelegatesCompat::GetOnPostEngineInit().AddLambda([this]()
 		{
 			if (GEditor)
 			{
@@ -43,7 +43,7 @@ void FMonolithLevelSequenceModule::ShutdownModule()
 {
 	if (PostEngineInitHandle.IsValid())
 	{
-		FCoreDelegates::OnPostEngineInit.Remove(PostEngineInitHandle);
+		MonolithCoreDelegatesCompat::GetOnPostEngineInit().Remove(PostEngineInitHandle);
 		PostEngineInitHandle.Reset();
 	}
 

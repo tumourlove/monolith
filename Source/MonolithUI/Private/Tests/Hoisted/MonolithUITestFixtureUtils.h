@@ -15,8 +15,10 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/PackageName.h"
+#include "Runtime/Launch/Resources/Version.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
+#include "UObject/UObjectHash.h"
 
 /**
  * MonolithUI test-fixture helpers.
@@ -54,17 +56,30 @@ namespace MonolithUI::TestUtils
         }
 
         TArray<UWidget*> Orphans;
-        ForEachObjectWithOuter(Tree, [&Orphans](UObject* Obj)
+        auto CollectOrphan = [&Orphans](UObject* Obj)
         {
             if (UWidget* W = Cast<UWidget>(Obj))
             {
                 Orphans.Add(W);
             }
-        }, /*bIncludeNestedObjects=*/ false);
+        };
 
+        // Direct children only -- nested objects are deliberately skipped. UE 5.8
+        // replaced the bIncludeNestedObjects boolean with EGetObjectsFlags, which
+        // UE 5.7 does not ship, so this call needs a version gate.
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8
+        ForEachObjectWithOuter(Tree, CollectOrphan, EGetObjectsFlags::None);
+#else
+        ForEachObjectWithOuter(Tree, CollectOrphan, /*bIncludeNestedObjects=*/ false);
+#endif
+
+        // REN_ForceNoResetLoaders is omitted: Rename stopped calling ResetLoaders
+        // before UE 5.7 (the flag is already a no-op there) and 5.8 deprecates it.
+        // REN_AllowPackageLinkerMismatch is deliberately NOT substituted -- it would
+        // suppress the linker detach these renames currently perform.
         for (UWidget* W : Orphans)
         {
-            W->Rename(nullptr, GetTransientPackage(), REN_DoNotDirty | REN_DontCreateRedirectors | REN_ForceNoResetLoaders);
+            W->Rename(nullptr, GetTransientPackage(), REN_DoNotDirty | REN_DontCreateRedirectors);
         }
 
         Tree->RootWidget = nullptr;

@@ -2,6 +2,7 @@
 #include "Modules/ModuleManager.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithSettings.h"
+#include "MonolithCoreDelegatesCompat.h"
 #include "MonolithAIBlackboardActions.h"
 #include "MonolithAIBehaviorTreeActions.h"
 #include "MonolithAIStateTreeActions.h"
@@ -56,7 +57,7 @@ void FMonolithAIModule::StartupModule()
 	// Register the AI deep indexer into MonolithIndex (deferred until editor subsystems are ready)
 	if (Settings->bIndexAI)
 	{
-		PostEngineInitHandle = FCoreDelegates::OnPostEngineInit.AddLambda([this]()
+		PostEngineInitHandle = MonolithCoreDelegatesCompat::GetOnPostEngineInit().AddLambda([this]()
 		{
 			if (GEditor)
 			{
@@ -83,7 +84,7 @@ void FMonolithAIModule::ShutdownModule()
 {
 	if (PostEngineInitHandle.IsValid())
 	{
-		FCoreDelegates::OnPostEngineInit.Remove(PostEngineInitHandle);
+		MonolithCoreDelegatesCompat::GetOnPostEngineInit().Remove(PostEngineInitHandle);
 		PostEngineInitHandle.Reset();
 	}
 

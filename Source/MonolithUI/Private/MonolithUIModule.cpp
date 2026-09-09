@@ -14,7 +14,7 @@
 #include "MonolithParamSchema.h"   // Phase G: dump_style_cache_stats schema
 #include "MonolithUICommon.h"
 #include "Editor.h"
-#include "Misc/CoreDelegates.h"
+#include "MonolithCoreDelegatesCompat.h"
 #include "Registry/MonolithUIRegistrySubsystem.h"
 
 // Hoisted action handlers (texture/font ingest, animation v2, eased segment,
@@ -151,7 +151,7 @@ void FMonolithUIModule::StartupModule()
     // CommonUI on a fresh install) load AFTER stock UMG. Without this re-scan,
     // those classes are missing from the registry until something forces a
     // RescanWidgetTypes call.
-    GMonolithUIPostEngineInitHandle = FCoreDelegates::OnPostEngineInit.AddLambda([]()
+    GMonolithUIPostEngineInitHandle = MonolithCoreDelegatesCompat::GetOnPostEngineInit().AddLambda([]()
     {
         if (UMonolithUIRegistrySubsystem* Sub = UMonolithUIRegistrySubsystem::Get())
         {
@@ -175,7 +175,7 @@ void FMonolithUIModule::ShutdownModule()
 {
     if (GMonolithUIPostEngineInitHandle.IsValid())
     {
-        FCoreDelegates::OnPostEngineInit.Remove(GMonolithUIPostEngineInitHandle);
+        MonolithCoreDelegatesCompat::GetOnPostEngineInit().Remove(GMonolithUIPostEngineInitHandle);
         GMonolithUIPostEngineInitHandle.Reset();
     }
 
