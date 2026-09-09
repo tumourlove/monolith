@@ -78,7 +78,10 @@ namespace
 	UObject* FindSubObjectByFilter(UObject* Asset, const FString& Filter, TArray<FString>& OutCandidates)
 	{
 		TArray<UObject*> Inners;
-		GetObjectsWithOuter(Asset, Inners, /*bIncludeNestedObjects=*/true);
+		// Nested objects are included by default (UE 5.7 bIncludeNestedObjects=true,
+		// UE 5.8 EGetObjectsFlags::IncludeNestedObjects). Passing the old boolean
+		// explicitly is deprecated on 5.8, so rely on the default on both engines.
+		GetObjectsWithOuter(Asset, Inners);
 
 		const FString FilterLower = Filter.ToLower();
 		UObject* Match = nullptr;

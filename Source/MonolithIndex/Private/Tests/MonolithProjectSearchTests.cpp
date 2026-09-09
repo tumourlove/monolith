@@ -29,6 +29,7 @@
 #include "HAL/PlatformFileManager.h"
 #include "GenericPlatform/GenericPlatformFile.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Actions/ProjectSearchAction.h"
 #include "MonolithIndexDatabase.h"
 
@@ -308,6 +309,215 @@ bool FMonolithProjectSearchValidationTest::RunTest(const FString& /*Parameters*/
 	TextLimit->SetStringField(TEXT("query"), AssetToken);
 	TextLimit->SetStringField(TEXT("limit"), TEXT("lots"));
 	ExpectInvalidParams(TEXT("non-numeric limit"), TextLimit);
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: asset_class filtering.
+//
+// The load-bearing property is that the filter is applied INSIDE the SQL, not to
+// the returned array. LIMIT is applied by the query, so a post-hoc filter would
+// return fewer rows than asked for -- often zero -- while matching assets sat
+// below the cut. FClassFixture is deliberately lopsided (10 noise assets of one
+// class, 3 of the wanted class) so a post-hoc implementation cannot pass by luck.
+// ---------------------------------------------------------------------------
+namespace MonolithProjectSearchTestDetail
+{
+	static const TCHAR* ClassFilterToken = TEXT("MonolithClassFilterFixtureToken");
+
+	/** Temp index database seeded with a lopsided mix of two asset classes. */
+	struct FClassFixture
+	{
+		FMonolithIndexDatabase Database;
+		FString DbPath;
+
+		static constexpr int32 NoiseCount = 10;
+		static constexpr int32 WantedCount = 3;
+
+		bool Open()
+		{
+			DbPath = FPaths::Combine(
+				FPaths::ProjectSavedDir(),
+				TEXT("MonolithTests"),
+				FString::Printf(TEXT("ClassFilter_%s.db"), *FGuid::NewGuid().ToString(EGuidFormats::Digits)));
+
+			if (!Database.Open(DbPath))
+			{
+				return false;
+			}
+
+			auto Seed = [this](const TCHAR* AssetClass, int32 Count, const TCHAR* Prefix) -> bool
+			{
+				for (int32 Index = 0; Index < Count; ++Index)
+				{
+					FIndexedAsset Asset;
+					Asset.PackagePath = FString::Printf(TEXT("/Game/Tests/Monolith/%s%d"), Prefix, Index);
+					Asset.AssetName = FString::Printf(TEXT("%s_%s%d"), ClassFilterToken, Prefix, Index);
+					Asset.AssetClass = AssetClass;
+					Asset.ModuleName = TEXT("Game");
+					Asset.Description = TEXT("class filter fixture");
+					if (Database.InsertAsset(Asset) <= 0)
+					{
+						return false;
+					}
+				}
+				return true;
+			};
+
+			return Seed(TEXT("Texture2D"), NoiseCount, TEXT("Noise"))
+				&& Seed(TEXT("UserDefinedEnum"), WantedCount, TEXT("Wanted"));
+		}
+
+		void Destroy()
+		{
+			Database.Close();
+			if (!DbPath.IsEmpty())
+			{
+				FPlatformFileManager::Get().GetPlatformFile().DeleteFile(*DbPath);
+			}
+		}
+	};
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FMonolithProjectSearchAssetClassFilterTest,
+	"Monolith.ProjectSearch.AssetClassFilter",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMonolithProjectSearchAssetClassFilterTest::RunTest(const FString& /*Parameters*/)
+{
+	using namespace MonolithProjectSearchTestDetail;
+
+	FClassFixture Fixture;
+	if (!TestTrue(TEXT("class fixture opens and seeds"), Fixture.Open()))
+	{
+		Fixture.Destroy();
+		return false;
+	}
+	ON_SCOPE_EXIT { Fixture.Destroy(); };
+
+	TArray<FSearchResult> Results;
+	FString Error;
+
+	// Baseline: unfiltered, every seeded asset matches.
+	const EMonolithProjectSearchStatus AllStatus =
+		Fixture.Database.FullTextSearch(ClassFilterToken, 100, Results, Error);
+	TestEqual(TEXT("unfiltered search succeeds"), AllStatus, EMonolithProjectSearchStatus::Succeeded);
+	TestEqual(TEXT("unfiltered search sees every seeded asset"),
+		Results.Num(), FClassFixture::NoiseCount + FClassFixture::WantedCount);
+
+	// Filtered: only the wanted class survives, and nothing else leaks through.
+	const EMonolithProjectSearchStatus FilteredStatus = Fixture.Database.FullTextSearch(
+		ClassFilterToken, 100, Results, Error, { TEXT("UserDefinedEnum") });
+	TestEqual(TEXT("filtered search succeeds"), FilteredStatus, EMonolithProjectSearchStatus::Succeeded);
+	TestEqual(TEXT("filtered search returns only the wanted class"),
+		Results.Num(), FClassFixture::WantedCount);
+	for (const FSearchResult& Row : Results)
+	{
+		TestEqual(TEXT("every filtered row is the wanted class"),
+			Row.AssetClass, FString(TEXT("UserDefinedEnum")));
+	}
+
+	// THE REGRESSION LOCK. limit == WantedCount against 13 candidates: an
+	// implementation that culled the returned array afterwards would have to have
+	// drawn all 3 wanted assets into a 3-row SQL result out of 13. Filtering inside
+	// the SQL makes this exact every time.
+	const EMonolithProjectSearchStatus TightStatus = Fixture.Database.FullTextSearch(
+		ClassFilterToken, FClassFixture::WantedCount, Results, Error, { TEXT("UserDefinedEnum") });
+	TestEqual(TEXT("tight-limit filtered search succeeds"), TightStatus, EMonolithProjectSearchStatus::Succeeded);
+	TestEqual(TEXT("limit counts matching rows, not pre-filter rows"),
+		Results.Num(), FClassFixture::WantedCount);
+
+	// Case-insensitive: callers should not have to reproduce UClass casing.
+	const EMonolithProjectSearchStatus CaseStatus = Fixture.Database.FullTextSearch(
+		ClassFilterToken, 100, Results, Error, { TEXT("userdefinedenum") });
+	TestEqual(TEXT("lowercase class name still matches"), CaseStatus, EMonolithProjectSearchStatus::Succeeded);
+	TestEqual(TEXT("lowercase class name returns the wanted rows"),
+		Results.Num(), FClassFixture::WantedCount);
+
+	// Multiple classes union rather than intersect.
+	const EMonolithProjectSearchStatus MultiStatus = Fixture.Database.FullTextSearch(
+		ClassFilterToken, 100, Results, Error, { TEXT("UserDefinedEnum"), TEXT("Texture2D") });
+	TestEqual(TEXT("multi-class filter succeeds"), MultiStatus, EMonolithProjectSearchStatus::Succeeded);
+	TestEqual(TEXT("multi-class filter unions the classes"),
+		Results.Num(), FClassFixture::NoiseCount + FClassFixture::WantedCount);
+
+	// A class nobody indexed is a legitimate empty result, not an error.
+	const EMonolithProjectSearchStatus MissStatus = Fixture.Database.FullTextSearch(
+		ClassFilterToken, 100, Results, Error, { TEXT("NoSuchAssetClass") });
+	TestEqual(TEXT("unknown class is a success"), MissStatus, EMonolithProjectSearchStatus::Succeeded);
+	TestEqual(TEXT("unknown class returns nothing"), Results.Num(), 0);
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: action-level asset_class validation is -32602. Every case here returns
+// before the action touches GEditor or the subsystem.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FMonolithProjectSearchAssetClassValidationTest,
+	"Monolith.ProjectSearch.AssetClassValidation",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMonolithProjectSearchAssetClassValidationTest::RunTest(const FString& /*Parameters*/)
+{
+	using namespace MonolithProjectSearchTestDetail;
+
+	auto ExpectInvalidParams = [this](const TCHAR* What, const TSharedPtr<FJsonObject>& Params)
+	{
+		const FMonolithActionResult R = InvokeAction(Params);
+		TestFalse(FString::Printf(TEXT("%s is rejected"), What), R.bSuccess);
+		TestEqual(FString::Printf(TEXT("%s is -32602"), What), R.ErrorCode, -32602);
+	};
+
+	// Wrong scalar type entirely. TryGetStringField would have coerced this to the
+	// string "7" and filtered for a class of that name -- zero results dressed up
+	// as a valid search.
+	TSharedPtr<FJsonObject> NumberClass = MakeShared<FJsonObject>();
+	NumberClass->SetStringField(TEXT("query"), AssetToken);
+	NumberClass->SetNumberField(TEXT("asset_class"), 7);
+	ExpectInvalidParams(TEXT("numeric asset_class"), NumberClass);
+
+	// Array containing a non-string.
+	TSharedPtr<FJsonObject> MixedArray = MakeShared<FJsonObject>();
+	MixedArray->SetStringField(TEXT("query"), AssetToken);
+	{
+		TArray<TSharedPtr<FJsonValue>> Entries;
+		Entries.Add(MakeShared<FJsonValueString>(TEXT("Blueprint")));
+		Entries.Add(MakeShared<FJsonValueNumber>(3));
+		MixedArray->SetArrayField(TEXT("asset_class"), Entries);
+	}
+	ExpectInvalidParams(TEXT("array with a non-string entry"), MixedArray);
+
+	// The same array JSON-encoded as a string, which is how some MCP clients
+	// serialize array arguments. Rejecting it for the same reason proves the string
+	// form is read as an array rather than as a class literally named `["Blueprint", 3]`.
+	TSharedPtr<FJsonObject> EncodedArray = MakeShared<FJsonObject>();
+	EncodedArray->SetStringField(TEXT("query"), AssetToken);
+	EncodedArray->SetStringField(TEXT("asset_class"), TEXT("[\"Blueprint\", 3]"));
+	ExpectInvalidParams(TEXT("JSON-encoded array with a non-string entry"), EncodedArray);
+
+	// Whitespace-only entries trim away to nothing. Widening to an unfiltered
+	// search would be the wrong guess, so this is a caller error.
+	TSharedPtr<FJsonObject> BlankClass = MakeShared<FJsonObject>();
+	BlankClass->SetStringField(TEXT("query"), AssetToken);
+	BlankClass->SetStringField(TEXT("asset_class"), TEXT("   "));
+	ExpectInvalidParams(TEXT("whitespace-only asset_class"), BlankClass);
+
+	// Over the 32-entry cap.
+	TSharedPtr<FJsonObject> TooMany = MakeShared<FJsonObject>();
+	TooMany->SetStringField(TEXT("query"), AssetToken);
+	{
+		TArray<TSharedPtr<FJsonValue>> Entries;
+		for (int32 Index = 0; Index < 33; ++Index)
+		{
+			Entries.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("Class%d"), Index)));
+		}
+		TooMany->SetArrayField(TEXT("asset_class"), Entries);
+	}
+	ExpectInvalidParams(TEXT("over-cap asset_class list"), TooMany);
 
 	return true;
 }
