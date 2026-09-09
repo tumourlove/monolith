@@ -6,10 +6,28 @@
 #include "HAL/Event.h"
 #include "HAL/PlatformTime.h"
 
+bool FMonolithDispatchAbortToken::AbortIfUnclaimed()
+{
+    int32 Expected = StateUnclaimed;
+    return State.CompareExchange(Expected, StateAborted);
+}
+
+bool FMonolithDispatchAbortToken::ClaimForExecution()
+{
+    int32 Expected = StateUnclaimed;
+    return State.CompareExchange(Expected, StateClaimed);
+}
+
+bool FMonolithDispatchAbortToken::IsAborted() const
+{
+    return State.Load() == StateAborted;
+}
+
 void FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
     TUniqueFunction<void()> Work,
     FEvent* CompletionEvent,
-    float TimeoutSeconds)
+    float TimeoutSeconds,
+    TSharedPtr<FMonolithDispatchAbortToken>* OutAbortToken)
 {
     // Start time captured by value so each tick can compute elapsed.
     const double StartTime = FPlatformTime::Seconds();
@@ -22,6 +40,7 @@ void FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
         FEvent* CompletionEvent = nullptr;
         double StartTime = 0.0;
         float TimeoutSeconds = 120.0f;
+        TSharedPtr<FMonolithDispatchAbortToken> AbortToken;
     };
 
     TSharedPtr<FDispatchState> State = MakeShared<FDispatchState>();
@@ -29,10 +48,28 @@ void FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
     State->CompletionEvent = CompletionEvent;
     State->StartTime = StartTime;
     State->TimeoutSeconds = TimeoutSeconds;
+    State->AbortToken = MakeShared<FMonolithDispatchAbortToken>();
+    if (OutAbortToken)
+    {
+        *OutAbortToken = State->AbortToken;
+    }
 
     FTSTicker::GetCoreTicker().AddTicker(
         FTickerDelegate::CreateLambda([State](float /*DeltaTime*/) -> bool
         {
+            // The caller abandoned its wait (editor exit) and has unwound. Its
+            // payload captures reference that retired stack, so the payload must
+            // never run. Trigger anyway — the abandoning caller deliberately
+            // leaked the event, so this is a no-op rather than a dangling write.
+            if (State->AbortToken->IsAborted())
+            {
+                if (State->CompletionEvent)
+                {
+                    State->CompletionEvent->Trigger();
+                }
+                return false;
+            }
+
             const int32 RemainingAssets = FAssetCompilingManager::Get().GetNumRemainingAssets();
             const double Elapsed = FPlatformTime::Seconds() - State->StartTime;
             const bool bTimedOut = Elapsed >= static_cast<double>(State->TimeoutSeconds);
@@ -48,7 +85,11 @@ void FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
 
                 // Invoke payload. We are on the main game-thread tick here,
                 // outside FTextureCompilingManager::PostCompilation's guard.
-                if (State->Work)
+                // Claim it first: that closes the window where the caller aborts
+                // between the check above and the call below. Losing the claim
+                // means the caller withdrew the payload — skip it and just
+                // release the (leaked) event.
+                if (State->Work && State->AbortToken->ClaimForExecution())
                 {
                     State->Work();
                 }

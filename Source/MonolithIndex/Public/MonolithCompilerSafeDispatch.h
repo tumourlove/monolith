@@ -2,8 +2,58 @@
 
 #include "CoreMinimal.h"
 #include "Containers/Ticker.h"
+#include "Templates/Atomic.h"
 
 class FEvent;
+
+/**
+ * Handle that lets a caller who can no longer wait for a dispatch withdraw its
+ * payload before the game thread runs it.
+ *
+ * Why it exists: RunOnGameThreadWhenCompilerIdle's contract is "the caller waits
+ * on the completion event, so the payload's captures outlive the tick". At editor
+ * exit that contract inverts into a deadlock — the game thread is parked in
+ * UMonolithIndexSubsystem::Deinitialize joining the indexing worker, so no tick
+ * can ever run, while the worker blocks on an event only a tick can trigger. The
+ * worker must abandon its wait and unwind, which retires the very stack the
+ * payload's captures point at.
+ *
+ * The payload is therefore handed to exactly one of the two racers: the ticker
+ * claims it before invoking it, the caller aborts it before unwinding, and the
+ * loser backs off. Both transitions are a single compare-exchange from Unclaimed.
+ */
+class MONOLITHINDEX_API FMonolithDispatchAbortToken
+{
+public:
+    /**
+     * Withdraw the payload so it is never invoked.
+     * @return true  the payload was still unclaimed and will never run — the
+     *               caller may unwind immediately.
+     *         false the game thread claimed it first and is executing it right
+     *               now. The caller MUST wait for the completion event instead
+     *               of unwinding: that same tick triggers the event when the
+     *               payload returns, so the wait is bounded and cannot deadlock
+     *               (a claiming tick proves the game thread is still running).
+     */
+    bool AbortIfUnclaimed();
+
+    /**
+     * Dispatcher-internal, called from the ticker immediately before invoking
+     * the payload. Takes ownership of it for execution.
+     * @return false the caller aborted first — do not invoke the payload.
+     */
+    bool ClaimForExecution();
+
+    /** Dispatcher-internal: has the caller withdrawn the payload? */
+    bool IsAborted() const;
+
+private:
+    static constexpr int32 StateUnclaimed = 0;
+    static constexpr int32 StateClaimed = 1;
+    static constexpr int32 StateAborted = 2;
+
+    TAtomic<int32> State{StateUnclaimed};
+};
 
 /**
  * Schedules Work to run on the game thread only when the asset compiler is idle
@@ -40,11 +90,21 @@ class FEvent;
  *   delegates are dropped at that point. The captured Work lambda and
  *   FEvent* are owned by the caller's stack frame — the caller already
  *   Waits on the event before returning, so the capture outlives the tick.
+ *
+ *   The one caller that cannot honour that "waits before returning" half of the
+ *   contract is the indexing worker at editor exit; it passes OutAbortToken and
+ *   follows the protocol on FMonolithDispatchAbortToken.
  */
 struct MONOLITHINDEX_API FMonolithCompilerSafeDispatch
 {
+    /**
+     * @param OutAbortToken  optional; receives the handle a caller needs to
+     *        withdraw Work if it is ever forced to abandon its wait. Callers
+     *        that always wait to completion can ignore it.
+     */
     static void RunOnGameThreadWhenCompilerIdle(
         TUniqueFunction<void()> Work,
         FEvent* CompletionEvent = nullptr,
-        float TimeoutSeconds = 120.0f);
+        float TimeoutSeconds = 120.0f,
+        TSharedPtr<FMonolithDispatchAbortToken>* OutAbortToken = nullptr);
 };

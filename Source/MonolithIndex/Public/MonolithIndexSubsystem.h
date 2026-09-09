@@ -12,6 +12,8 @@
 #include "MonolithIndexer.h"
 #include "MonolithIndexSubsystem.generated.h"
 
+class FEvent;
+
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnIndexingProgress, int32 /*Current*/, int32 /*Total*/);
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnIndexingComplete, bool /*bSuccess*/);
 
@@ -134,6 +136,18 @@ private:
 		virtual void Stop() override { bShouldStop = true; }
 
 		TAtomic<bool> bShouldStop{false};
+
+		/**
+		 * Set by Deinitialize immediately before it joins this worker. From that
+		 * point the game thread is (or is about to be) parked in
+		 * WaitForCompletion: it will not tick FTSTicker or drain its task queue,
+		 * so nothing this worker dispatches can ever complete. It is the precise
+		 * form of the deadlock condition — IsEngineExitRequested() covers the
+		 * editor-quit case, this also covers a module unload, which reaches the
+		 * same join with the engine still running.
+		 */
+		TAtomic<bool> bGameThreadIsJoining{false};
+
 		TAtomic<int32> CurrentIndex{0};
 		TAtomic<int32> TotalAssets{0};
 		TArray<FIndexedPluginInfo> PluginsToIndex;
@@ -143,6 +157,38 @@ private:
 
 	private:
 		UMonolithIndexSubsystem* Owner;
+
+		/**
+		 * Wait for an event that only the game thread can trigger, without
+		 * hanging editor exit.
+		 *
+		 * Deinitialize() parks the game thread in WaitForCompletion() joining
+		 * this worker. Joining does not pump the game thread's task queue or
+		 * tick FTSTicker, so from that moment nothing this worker dispatches can
+		 * ever run and a bare Wait() blocks the exit forever. This polls in
+		 * 100ms slices and gives up only once the stop flag is set AND the game
+		 * thread has stopped being able to serve us (bGameThreadIsJoining, or
+		 * engine exit). A plain user cancel does NOT qualify: the game thread is
+		 * still ticking and will service the dispatch, so those waits complete
+		 * normally and the pass keeps its usual semantics.
+		 *
+		 * @return true  the event was triggered; return it to the pool as usual.
+		 *         false the wait was abandoned. The caller must NOT return the
+		 *               event to the pool: a Trigger arriving late on a leaked
+		 *               event is a no-op, but on a recycled one it silently
+		 *               releases an unrelated waiter.
+		 */
+		bool WaitForGameThreadEvent(FEvent* Event);
+
+		/**
+		 * RunOnGameThreadWhenCompilerIdle + WaitForGameThreadEvent + the abandon
+		 * protocol. On abandon it withdraws Work through the dispatch's abort
+		 * token, because Work's captures reference this worker's stack frame and
+		 * must never be invoked once Run() unwinds past them.
+		 *
+		 * @return false the wait was abandoned at shutdown — stop the pass.
+		 */
+		bool DispatchToGameThreadAndWait(TUniqueFunction<void()> Work);
 	};
 
 	/**

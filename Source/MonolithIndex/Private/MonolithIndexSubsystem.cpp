@@ -8,7 +8,9 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
 #include "Misc/Paths.h"
+#include "HAL/Event.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformProcess.h"
 #include "HAL/RunnableThread.h"
 #include "IO/IoHash.h"
 #include "Async/Async.h"
@@ -274,6 +276,11 @@ void UMonolithIndexSubsystem::Deinitialize()
 		{
 			UE_LOG(LogMonolithIndex, Warning, TEXT("Indexing was still in progress during shutdown — force-stopped"));
 		}
+		// Order matters: announce the join BEFORE requesting the stop. The worker
+		// bails out of a game-thread wait only when it sees both, so setting the
+		// join flag first means the stop flag is the last one to land and there
+		// is no window where the worker observes a stop it cannot act on.
+		IndexingTaskPtr->bGameThreadIsJoining = true;
 		IndexingTaskPtr->Stop();
 		if (IndexingThread)
 		{
@@ -289,6 +296,19 @@ void UMonolithIndexSubsystem::Deinitialize()
 	// path force-stops the worker without routing through OnIndexingFinished).
 	GIncrementalGCOverride.Reset();
 
+	// Skipping OnIndexingFinished also means the notification is still Pending,
+	// and destroying it in that state trips a checkf in
+	// ~FCoreAsyncTaskNotificationImpl ("AsyncTaskNotification was still pending
+	// when destroyed. Missing call to SetComplete?",
+	// CoreAsyncTaskNotificationImpl.cpp:17). That was always reachable here —
+	// the shutdown deadlock simply hung the editor first.
+	if (TaskNotification)
+	{
+		TaskNotification->SetComplete(
+			FText::FromString(TEXT("Monolith")),
+			FText::FromString(TEXT("Project indexing interrupted by shutdown")),
+			/*bSuccess*/ false);
+	}
 	TaskNotification.Reset();
 
 	if (Database.IsValid())
@@ -555,6 +575,68 @@ UMonolithIndexSubsystem::FIndexingTask::FIndexingTask(UMonolithIndexSubsystem* I
 {
 }
 
+bool UMonolithIndexSubsystem::FIndexingTask::WaitForGameThreadEvent(FEvent* Event)
+{
+	// 100ms slices: short enough that editor exit costs at most one slice per
+	// outstanding wait, long enough to be free during a normal multi-second
+	// dispatch. See the header for why the bail condition needs BOTH flags.
+	constexpr uint32 WaitSliceMs = 100;
+
+	while (!Event->Wait(WaitSliceMs))
+	{
+		// Every condition here is level-triggered state re-read on each slice,
+		// so there is no edge to miss: whichever flag lands last, the next slice
+		// observes them all and bails. Stopping is necessary but not sufficient —
+		// a user cancel also sets it, and the game thread is alive then, so the
+		// wait must still complete normally. The second half is what says the
+		// game thread can no longer serve us at all.
+		if (bShouldStop.Load() && (bGameThreadIsJoining.Load() || IsEngineExitRequested()))
+		{
+			UE_LOG(LogMonolithIndex, Warning,
+				TEXT("Abandoning a game-thread wait during engine exit — the game thread is joining this worker and can no longer service indexing work."));
+			return false;
+		}
+	}
+
+	return true;
+}
+
+bool UMonolithIndexSubsystem::FIndexingTask::DispatchToGameThreadAndWait(TUniqueFunction<void()> Work)
+{
+	FEvent* Event = FPlatformProcess::GetSynchEventFromPool(true);
+
+	TSharedPtr<FMonolithDispatchAbortToken> AbortToken;
+	FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
+		MoveTemp(Work), Event, 120.0f, &AbortToken);
+
+	if (WaitForGameThreadEvent(Event))
+	{
+		FPlatformProcess::ReturnSynchEventToPool(Event);
+		return true;
+	}
+
+	// Abandoned. Withdraw the payload before unwinding: it writes through
+	// references into this stack frame, and the ticker has no way to know the
+	// frame is about to retire.
+	if (AbortToken.IsValid() && !AbortToken->AbortIfUnclaimed())
+	{
+		// Lost the race — the game thread claimed the payload and is running it
+		// inside a tick right now. That proves it is still ticking, and the same
+		// tick triggers the event as soon as the payload returns, so this wait is
+		// bounded by the payload's own runtime. It is also mandatory: unwinding
+		// past a live payload is exactly the corruption the token exists to stop.
+		Event->Wait();
+		FPlatformProcess::ReturnSynchEventToPool(Event);
+		return false;
+	}
+
+	// The payload will never run, but a late Trigger from the ticker still can,
+	// so this event is DELIBERATELY LEAKED rather than returned to the pool.
+	// Do not "fix" this: a Trigger on a leaked event is a no-op, while the same
+	// Trigger on a recycled one wakes an unrelated waiter early.
+	return false;
+}
+
 uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 {
 	const UMonolithSettings* GlobalSettings = GetDefault<UMonolithSettings>();
@@ -572,10 +654,21 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		FMonolithMemoryHelper::LogMemoryStats(TEXT("Full index starting"));
 	}
 
-	// Asset Registry enumeration MUST happen on the game thread
-	TArray<FAssetData> AllAssets;
-	FEvent* RegistryEvent = FPlatformProcess::GetSynchEventFromPool(true);
-	AsyncTask(ENamedThreads::GameThread, [this, &AllAssets, RegistryEvent]()
+	// Asset Registry enumeration MUST happen on the game thread. Unlike every
+	// other AsyncTask here, this one owns ALL of its state through a shared
+	// pointer — no `this`, no stack references. Abandoning the wait below at
+	// engine exit leaves a queued copy that may still run against a worker stack
+	// that has already unwound, so nothing it touches may live on that stack.
+	struct FRegistryScan
+	{
+		TArray<FAssetData> Assets;
+		TArray<FIndexedPluginInfo> Plugins;
+		FEvent* Event = nullptr;
+	};
+	TSharedPtr<FRegistryScan> Scan = MakeShared<FRegistryScan>();
+	Scan->Plugins = PluginsToIndex;
+	Scan->Event = FPlatformProcess::GetSynchEventFromPool(true);
+	AsyncTask(ENamedThreads::GameThread, [Scan]()
 	{
 		IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
 
@@ -588,7 +681,7 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		FARFilter Filter;
 		Filter.PackagePaths.Add(FName(TEXT("/Game")));
 		// Add marketplace plugin mount paths
-		for (const FIndexedPluginInfo& PluginInfo : PluginsToIndex)
+		for (const FIndexedPluginInfo& PluginInfo : Scan->Plugins)
 		{
 			FString CleanPath = PluginInfo.MountPath;
 			if (CleanPath.EndsWith(TEXT("/")))
@@ -617,12 +710,17 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			}
 		}
 		Filter.bRecursivePaths = true;
-		AssetRegistry.GetAssets(Filter, AllAssets);
+		AssetRegistry.GetAssets(Filter, Scan->Assets);
 
-		RegistryEvent->Trigger();
+		Scan->Event->Trigger();
 	});
-	RegistryEvent->Wait();
-	FPlatformProcess::ReturnSynchEventToPool(RegistryEvent);
+	if (!WaitForGameThreadEvent(Scan->Event))
+	{
+		return 1; // engine exit — event deliberately leaked, see the helper
+	}
+	FPlatformProcess::ReturnSynchEventToPool(Scan->Event);
+
+	TArray<FAssetData> AllAssets = MoveTemp(Scan->Assets);
 
 	TotalAssets = AllAssets.Num();
 	Owner->IndexingStatusMessage = FString::Printf(TEXT("Scanning %d assets..."), TotalAssets.Load());
@@ -962,7 +1060,10 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 					}
 					GCEvent->Trigger();
 				});
-				GCEvent->Wait();
+				if (!WaitForGameThreadEvent(GCEvent))
+				{
+					break; // engine exit — event deliberately leaked
+				}
 				FPlatformProcess::ReturnSynchEventToPool(GCEvent);
 
 				if (bLogMemory)
@@ -983,7 +1084,10 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 					FPlatformProcess::Sleep(1.0f); // Longer yield for critical situation
 					CriticalGCEvent->Trigger();
 				});
-				CriticalGCEvent->Wait();
+				if (!WaitForGameThreadEvent(CriticalGCEvent))
+				{
+					break; // engine exit — event deliberately leaked
+				}
 				FPlatformProcess::ReturnSynchEventToPool(CriticalGCEvent);
 			}
 
@@ -1029,8 +1133,6 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 				RequireTransaction(DB->CommitTransaction(), TEXT("deep attempt-marker commit"));
 			}
 
-			FEvent* BatchEvent = FPlatformProcess::GetSynchEventFromPool(true);
-
 			// CRITICAL: Dispatch via FTSTicker (not AsyncTask(GT)) so our work only
 			// fires once the asset compiler reports idle (GetNumRemainingAssets() == 0).
 			// AsyncTask(GT) can be drained inside FTextureCompilingManager::PostCompilation's
@@ -1038,7 +1140,10 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			// in FinishAllCompilation (TextureCompiler.cpp:454). The previous fix
 			// (calling FinishAllCompilation inside the lambda) was the exact trigger —
 			// see GitHub issue #19, regression from commit 168c087.
-			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
+			// DispatchToGameThreadAndWait wraps that dispatcher and layers the
+			// shutdown-abandon protocol on top — this payload captures worker
+			// stack references, so it must be withdrawn rather than outlive us.
+			const bool bBatchRan = DispatchToGameThreadAndWait(
 				[DB, BatchSlice = MoveTemp(BatchSlice), &DeepIndexed, &DeepErrors, &bTransactionFailure, FrameBudgetSeconds]()
 			{
 				if (!DB->BeginTransaction())
@@ -1105,11 +1210,11 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 					bTransactionFailure = true;
 					UE_LOG(LogMonolithIndex, Error, TEXT("Index transaction failure (deep batch commit) — this run will not be marked complete"));
 				}
-			},
-			BatchEvent);
-
-			BatchEvent->Wait();
-			FPlatformProcess::ReturnSynchEventToPool(BatchEvent);
+			});
+			if (!bBatchRan)
+			{
+				break; // engine exit — payload withdrawn via the abort token
+			}
 
 			BatchNumber++;
 
@@ -1123,7 +1228,10 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 					FMonolithMemoryHelper::YieldToEditor();
 					PeriodicGCEvent->Trigger();
 				});
-				PeriodicGCEvent->Wait();
+				if (!WaitForGameThreadEvent(PeriodicGCEvent))
+				{
+					break; // engine exit — event deliberately leaked
+				}
 				FPlatformProcess::ReturnSynchEventToPool(PeriodicGCEvent);
 			}
 
@@ -1169,8 +1277,11 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			FMonolithMemoryHelper::ForceGarbageCollection(true);
 			FinalGCEvent->Trigger();
 		});
-		FinalGCEvent->Wait();
-		FPlatformProcess::ReturnSynchEventToPool(FinalGCEvent);
+		if (WaitForGameThreadEvent(FinalGCEvent))
+		{
+			FPlatformProcess::ReturnSynchEventToPool(FinalGCEvent);
+		}
+		// else: engine exit — event deliberately leaked
 
 		UE_LOG(LogMonolithIndex, Log, TEXT("Deep indexing complete: %d indexed, %d errors"),
 			DeepIndexed.Load(), DeepErrors.Load());
@@ -1223,7 +1334,10 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			FMonolithMemoryHelper::YieldToEditor();
 			GCEvent->Trigger();
 		});
-		GCEvent->Wait();
+		if (!WaitForGameThreadEvent(GCEvent))
+		{
+			return; // engine exit — event deliberately leaked
+		}
 		FPlatformProcess::ReturnSynchEventToPool(GCEvent);
 	};
 
@@ -1278,17 +1392,15 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			{
 				DepRaw->SetIndexedPaths(IndexedPaths);
 			}
-			FEvent* DepEvent = FPlatformProcess::GetSynchEventFromPool(true);
-			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
+			if (DispatchToGameThreadAndWait(
 				[DB, DepIndexerCopy, &RunSentinelInTransaction]()
 			{
 				RunSentinelInTransaction(DB, DepIndexerCopy);
-			},
-			DepEvent);
-			DepEvent->Wait();
-			FPlatformProcess::ReturnSynchEventToPool(DepEvent);
-			UE_LOG(LogMonolithIndex, Log, TEXT("Dependency indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
-			GCBetweenIndexers();
+			}))
+			{
+				UE_LOG(LogMonolithIndex, Log, TEXT("Dependency indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
+				GCBetweenIndexers();
+			}
 		}
 	}
 
@@ -1306,17 +1418,15 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			{
 				LevelRaw->SetIndexedPaths(IndexedPaths);
 			}
-			FEvent* LevelEvent = FPlatformProcess::GetSynchEventFromPool(true);
-			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
+			if (DispatchToGameThreadAndWait(
 				[DB, LevelIndexerCopy, &RunSentinelInTransaction]()
 			{
 				RunSentinelInTransaction(DB, LevelIndexerCopy);
-			},
-			LevelEvent);
-			LevelEvent->Wait();
-			FPlatformProcess::ReturnSynchEventToPool(LevelEvent);
-			UE_LOG(LogMonolithIndex, Log, TEXT("Level indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
-			GCBetweenIndexers();
+			}))
+			{
+				UE_LOG(LogMonolithIndex, Log, TEXT("Level indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
+				GCBetweenIndexers();
+			}
 		}
 	}
 
@@ -1330,17 +1440,15 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			double SentinelStart = FPlatformTime::Seconds();
 			UE_LOG(LogMonolithIndex, Log, TEXT("Running DataTable indexer..."));
 			TSharedPtr<IMonolithIndexer> DTIndexerCopy = *DTIndexer;
-			FEvent* DTEvent = FPlatformProcess::GetSynchEventFromPool(true);
-			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
+			if (DispatchToGameThreadAndWait(
 				[DB, DTIndexerCopy, &RunSentinelInTransaction]()
 			{
 				RunSentinelInTransaction(DB, DTIndexerCopy);
-			},
-			DTEvent);
-			DTEvent->Wait();
-			FPlatformProcess::ReturnSynchEventToPool(DTEvent);
-			UE_LOG(LogMonolithIndex, Log, TEXT("DataTable indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
-			GCBetweenIndexers();
+			}))
+			{
+				UE_LOG(LogMonolithIndex, Log, TEXT("DataTable indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
+				GCBetweenIndexers();
+			}
 		}
 	}
 
@@ -1382,23 +1490,21 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			double SentinelStart = FPlatformTime::Seconds();
 			UE_LOG(LogMonolithIndex, Log, TEXT("Running animation indexer..."));
 			TSharedPtr<IMonolithIndexer> AnimIndexerCopy = *AnimIndexer;
-			FEvent* AnimEvent = FPlatformProcess::GetSynchEventFromPool(true);
 			// No transaction here: FAnimationIndexer owns its own, one per batch.
 			// The animation pass walks thousands of assets, and a single
 			// transaction spanning all of them meant a crash discarded the whole
 			// pass. It keeps the single dispatch and its batch structure — per-asset
 			// dispatch would cost a game-thread frame per animation asset.
-			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
+			if (DispatchToGameThreadAndWait(
 				[DB, AnimIndexerCopy]()
 			{
 				FAssetData DummyData;
 				AnimIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
-			},
-			AnimEvent);
-			AnimEvent->Wait();
-			FPlatformProcess::ReturnSynchEventToPool(AnimEvent);
-			UE_LOG(LogMonolithIndex, Log, TEXT("Animation indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
-			GCBetweenIndexers();
+			}))
+			{
+				UE_LOG(LogMonolithIndex, Log, TEXT("Animation indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
+				GCBetweenIndexers();
+			}
 		}
 	}
 
@@ -1412,17 +1518,15 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			double SentinelStart = FPlatformTime::Seconds();
 			UE_LOG(LogMonolithIndex, Log, TEXT("Running gameplay tag indexer..."));
 			TSharedPtr<IMonolithIndexer> TagIndexerCopy = *TagIndexer;
-			FEvent* TagEvent = FPlatformProcess::GetSynchEventFromPool(true);
-			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
+			if (DispatchToGameThreadAndWait(
 				[DB, TagIndexerCopy, &RunSentinelInTransaction]()
 			{
 				RunSentinelInTransaction(DB, TagIndexerCopy);
-			},
-			TagEvent);
-			TagEvent->Wait();
-			FPlatformProcess::ReturnSynchEventToPool(TagEvent);
-			UE_LOG(LogMonolithIndex, Log, TEXT("Gameplay tag indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
-			GCBetweenIndexers();
+			}))
+			{
+				UE_LOG(LogMonolithIndex, Log, TEXT("Gameplay tag indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
+				GCBetweenIndexers();
+			}
 		}
 	}
 
@@ -1436,17 +1540,15 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			double SentinelStart = FPlatformTime::Seconds();
 			UE_LOG(LogMonolithIndex, Log, TEXT("Running Niagara indexer..."));
 			TSharedPtr<IMonolithIndexer> NiagaraIndexerCopy = *NiagaraIndexerPtr;
-			FEvent* NiagaraEvent = FPlatformProcess::GetSynchEventFromPool(true);
-			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
+			if (DispatchToGameThreadAndWait(
 				[DB, NiagaraIndexerCopy, &RunSentinelInTransaction]()
 			{
 				RunSentinelInTransaction(DB, NiagaraIndexerCopy);
-			},
-			NiagaraEvent);
-			NiagaraEvent->Wait();
-			FPlatformProcess::ReturnSynchEventToPool(NiagaraEvent);
-			UE_LOG(LogMonolithIndex, Log, TEXT("Niagara indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
-			GCBetweenIndexers();
+			}))
+			{
+				UE_LOG(LogMonolithIndex, Log, TEXT("Niagara indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
+				GCBetweenIndexers();
+			}
 		}
 	}
 
@@ -1464,17 +1566,15 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			{
 				MeshCatRaw->SetIndexedPaths(IndexedPaths);
 			}
-			FEvent* MeshCatEvent = FPlatformProcess::GetSynchEventFromPool(true);
-			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
+			if (DispatchToGameThreadAndWait(
 				[DB, MeshCatIndexerCopy, &RunSentinelInTransaction]()
 			{
 				RunSentinelInTransaction(DB, MeshCatIndexerCopy);
-			},
-			MeshCatEvent);
-			MeshCatEvent->Wait();
-			FPlatformProcess::ReturnSynchEventToPool(MeshCatEvent);
-			UE_LOG(LogMonolithIndex, Log, TEXT("Mesh catalog indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
-			GCBetweenIndexers();
+			}))
+			{
+				UE_LOG(LogMonolithIndex, Log, TEXT("Mesh catalog indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
+				GCBetweenIndexers();
+			}
 		}
 	}
 
