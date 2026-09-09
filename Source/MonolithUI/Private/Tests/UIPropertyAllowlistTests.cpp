@@ -45,8 +45,17 @@ bool FMonolithUIAllowlistVerticalBoxSlotPaddingTest::RunTest(const FString& /*Pa
 /**
  * MonolithUI.Allowlist.UnknownTypeDenied
  *
- * A widget token that is not in the registry must deny every property path.
- * This is the safe-default behaviour — unknown widget classes get no writes.
+ * A widget token that is not in the registry gets NO type-specific surface --
+ * every curated per-type path is denied. That is the safe default the gate
+ * exists to enforce.
+ *
+ * It does still get the common UWidget base paths. That is deliberate: commit
+ * da2bd31 (Ideas-board request in Discussion #74) allowlists Visibility /
+ * RenderOpacity / ToolTipText / bIsEnabled / RenderTransform.* for every token
+ * so `set_widget_property` handles the basics on an uncurated widget class
+ * without raw_mode. Those seven properties live on UWidget itself and are
+ * purely cosmetic, so the fallback is bounded rather than open. This test pins
+ * that bound: exactly those seven, and nothing else.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FMonolithUIAllowlistUnknownTypeDeniedTest,
@@ -64,14 +73,35 @@ bool FMonolithUIAllowlistUnknownTypeDeniedTest::RunTest(const FString& /*Paramet
     const FUIPropertyAllowlist& Allowlist = Sub->GetAllowlist();
     const FName Bogus = FName(TEXT("WidgetThatDoesNotExist_91827463"));
 
+    // Type-specific curated paths stay denied for an unregistered token.
     TestFalse(TEXT("Unknown widget rejects Slot.Padding"),
         Allowlist.IsAllowed(Bogus, TEXT("Slot.Padding")));
     TestFalse(TEXT("Unknown widget rejects Text"),
         Allowlist.IsAllowed(Bogus, TEXT("Text")));
 
-    // GetAllowedPaths returns an empty (not null) array.
-    TestEqual(TEXT("Unknown widget has empty allowed-paths list"),
-        Allowlist.GetAllowedPaths(Bogus).Num(), 0);
+    // The common UWidget base paths ARE granted (see the header comment).
+    TestTrue(TEXT("Unknown widget accepts the common base path Visibility"),
+        Allowlist.IsAllowed(Bogus, TEXT("Visibility")));
+
+    // ...and the granted set is exactly those base paths -- no wider.
+    const TArray<FString> ExpectedCommonPaths = {
+        TEXT("Visibility"),
+        TEXT("RenderOpacity"),
+        TEXT("ToolTipText"),
+        TEXT("bIsEnabled"),
+        TEXT("RenderTransform.Angle"),
+        TEXT("RenderTransform.Scale"),
+        TEXT("RenderTransform.Translation"),
+    };
+
+    const TArray<FString>& UnknownPaths = Allowlist.GetAllowedPaths(Bogus);
+    TestEqual(TEXT("Unknown widget exposes only the common UWidget base paths"),
+        UnknownPaths.Num(), ExpectedCommonPaths.Num());
+    for (const FString& Expected : ExpectedCommonPaths)
+    {
+        TestTrue(FString::Printf(TEXT("Unknown widget base path '%s' present"), *Expected),
+            UnknownPaths.Contains(Expected));
+    }
 
     return true;
 }

@@ -213,25 +213,44 @@ namespace
     }
 
     // FLinearColor — "#RRGGBBAA" OR array[r,g,b,a] OR object{r,g,b,a}.
-    // Routes hex-string parses through MonolithUI::ParseColor (degamma path).
+    // Hex text is sRGB and gets degamma'd; float shapes are already linear and
+    // are stored verbatim.
     bool ParseLinearColor(const TSharedPtr<FJsonValue>& Value, FLinearColor& Out)
     {
         if (!Value.IsValid()) return false;
 
         if (Value->Type == EJson::String)
         {
-            FLinearColor Parsed;
-            if (MonolithUI::TryParseColor(Value->AsString(), Parsed))
-            {
-                Out = Parsed;
-                return true;
-            }
-            // Fall back to legacy ParseColor (degamma path) for # forms only —
-            // it returns White silently on garbage so we wrap it explicitly.
             const FString S = Value->AsString().TrimStartAndEnd();
+
+            // A "#RRGGBB" literal is an sRGB colour and MUST be degamma'd on
+            // the way into an FLinearColor. These properties are Slate tints,
+            // and Slate packs a tint into its vertex colour with
+            // `ToFColor(bSRGBVertexColor)` (SlateCore ElementBatcher.h:282-287)
+            // — the exact inverse of the `sRGBToLinearTable` lookup in the
+            // FLinearColor(FColor) ctor that ParseColor uses. Storing the raw
+            // byte/255 value instead leaves Slate re-encoding an already-encoded
+            // number, so "#FF8800" reaches the screen as #FFC100.
+            //
+            // TryParseColor is the deliberate NO-degamma variant, reserved for
+            // MD_UI material parameters whose shader does its own gamma
+            // correction (see MonolithUICommon.h). It must not be used here:
+            // this is the engine-widget-property path.
             if (S.StartsWith(TEXT("#")))
             {
+                // ParseColor returns White on unrecognised text, but only "#"
+                // forms reach it here and FColor::FromHex already yields
+                // zeroed-black for a bad length — so the write stays a write
+                // and never silently substitutes a different named colour.
                 Out = MonolithUI::ParseColor(S);
+                return true;
+            }
+
+            // "r,g,b[,a]" text is linear already — pass it through untouched.
+            FLinearColor Parsed;
+            if (MonolithUI::TryParseColor(S, Parsed))
+            {
+                Out = Parsed;
                 return true;
             }
             return false;

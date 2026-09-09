@@ -368,6 +368,47 @@ namespace MonolithUI::EffectActionsInternal
         return MonolithUI::TryParseColor(S, OutColor);
     }
 
+    /**
+     * Build the JSON value for an effect-surface FLinearColor slot.
+     *
+     * These slots are MD_UI material parameters, NOT Slate tints: the effect
+     * shader applies its own gamma, so they hold the sRGB bytes divided by 255
+     * with NO degamma -- the `TryParseColor` contract in MonolithUICommon.h.
+     * The reflection helper's hex-string branch is the engine-widget-property
+     * path and DOES degamma, so a colour must never be handed to it as "#RRGGBB"
+     * from here. Emitting the components as a float array takes the helper's
+     * verbatim linear-array branch instead, which is also what the spec-side
+     * `EffectSurfaceBuilder::MakeColor` does for the same properties.
+     *
+     * This replaces an older "#" + ToFColor(false).ToHex() round-trip that
+     * relied on the helper's hex branch being a no-degamma pass-through. The
+     * stored value is unchanged for hex input and now avoids the round-trip's
+     * 8-bit quantisation for "r,g,b,a" float input.
+     */
+    static TSharedPtr<FJsonValue> MakeEffectColorJson(const FLinearColor& C)
+    {
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        Arr.Reserve(4);
+        Arr.Add(MakeShared<FJsonValueNumber>(C.R));
+        Arr.Add(MakeShared<FJsonValueNumber>(C.G));
+        Arr.Add(MakeShared<FJsonValueNumber>(C.B));
+        Arr.Add(MakeShared<FJsonValueNumber>(C.A));
+        return MakeShared<FJsonValueArray>(Arr);
+    }
+
+    /** Same, for a colour still in its "#RRGGBBAA" / "r,g,b[,a]" text form. */
+    static TSharedPtr<FJsonValue> MakeEffectColorJsonFromText(const FString& ColorText)
+    {
+        FLinearColor C;
+        if (MonolithUI::TryParseColor(ColorText, C))
+        {
+            return MakeEffectColorJson(C);
+        }
+        // Unparseable -- forward the caller's raw text so the helper reports
+        // ParseFailed against what was actually supplied.
+        return MakeShared<FJsonValueString>(ColorText);
+    }
+
     /** Optional[FVector2D] reader -- accepts {x,y} object or [x,y] array. */
     static bool TryGetVector2D(
         const TSharedPtr<FJsonObject>& Params,
@@ -721,9 +762,8 @@ FMonolithActionResult MonolithUI::FEffectSurfaceActions::HandleSetFill(const TSh
     FLinearColor SolidColor;
     if (TryGetColor(Params, TEXT("color"), SolidColor))
     {
-        const FString HexAlpha = SolidColor.ToFColor(/*bSRGB=*/false).ToHex();
         ApplyPath(Surface, TEXT("Effect.Fill.SolidColor"),
-            MakeShared<FJsonValueString>(TEXT("#") + HexAlpha), PathsWritten, Failures);
+            MakeEffectColorJson(SolidColor), PathsWritten, Failures);
     }
 
     if (TOptional<float> Angle = TryGetFloat(Params, TEXT("angle")); Angle.IsSet())
@@ -797,8 +837,7 @@ FMonolithActionResult MonolithUI::FEffectSurfaceActions::HandleSetBorder(const T
     if (TryGetColor(Params, TEXT("color"), Color))
     {
         ApplyPath(Surface, TEXT("Effect.Border.Color"),
-            MakeShared<FJsonValueString>(TEXT("#") + Color.ToFColor(false).ToHex()),
-            PathsWritten, Failures);
+            MakeEffectColorJson(Color), PathsWritten, Failures);
     }
     if (TOptional<float> Offset = TryGetFloat(Params, TEXT("offset")); Offset.IsSet())
     {
@@ -816,8 +855,7 @@ FMonolithActionResult MonolithUI::FEffectSurfaceActions::HandleSetBorder(const T
     if (TryGetColor(Params, TEXT("glow_color"), GlowColor))
     {
         ApplyPath(Surface, TEXT("Effect.Border.GlowColor"),
-            MakeShared<FJsonValueString>(TEXT("#") + GlowColor.ToFColor(false).ToHex()),
-            PathsWritten, Failures);
+            MakeEffectColorJson(GlowColor), PathsWritten, Failures);
     }
 
     MergeFeatureFlagBits(Surface, EFFECT_FEATURE_BORDER, PathsWritten, Failures);
@@ -936,8 +974,7 @@ FMonolithActionResult MonolithUI::FEffectSurfaceActions::HandleSetGlow(const TSh
     if (TryGetColor(Params, TEXT("color"), Color))
     {
         ApplyPath(Surface, TEXT("Effect.Glow.Color"),
-            MakeShared<FJsonValueString>(TEXT("#") + Color.ToFColor(false).ToHex()),
-            PathsWritten, Failures);
+            MakeEffectColorJson(Color), PathsWritten, Failures);
     }
     if (TOptional<float> Intensity = TryGetFloat(Params, TEXT("intensity")); Intensity.IsSet())
     {
@@ -1096,8 +1133,7 @@ FMonolithActionResult MonolithUI::FEffectSurfaceActions::HandleSetInsetHighlight
     if (TryGetColor(Params, TEXT("color"), Color))
     {
         ApplyPath(Surface, TEXT("Effect.InsetHighlight.Color"),
-            MakeShared<FJsonValueString>(TEXT("#") + Color.ToFColor(false).ToHex()),
-            PathsWritten, Failures);
+            MakeEffectColorJson(Color), PathsWritten, Failures);
     }
     if (TOptional<float> Intensity = TryGetFloat(Params, TEXT("intensity")); Intensity.IsSet())
     {
@@ -1500,7 +1536,7 @@ FMonolithActionResult MonolithUI::FEffectSurfaceActions::HandleApplyPreset(const
         if (Fill->TryGetStringField(TEXT("color"), ColorStr))
         {
             ApplyPath(Surface, TEXT("Effect.Fill.SolidColor"),
-                MakeShared<FJsonValueString>(ColorStr), PathsWritten, Failures);
+                MakeEffectColorJsonFromText(ColorStr), PathsWritten, Failures);
         }
         double Angle = 0.0;
         if (Fill->TryGetNumberField(TEXT("angle"), Angle))
@@ -1532,7 +1568,7 @@ FMonolithActionResult MonolithUI::FEffectSurfaceActions::HandleApplyPreset(const
         if (Border->TryGetStringField(TEXT("color"), BC))
         {
             ApplyPath(Surface, TEXT("Effect.Border.Color"),
-                MakeShared<FJsonValueString>(BC), PathsWritten, Failures);
+                MakeEffectColorJsonFromText(BC), PathsWritten, Failures);
         }
         double BG = 0.0;
         if (Border->TryGetNumberField(TEXT("glow"), BG))
@@ -1544,7 +1580,7 @@ FMonolithActionResult MonolithUI::FEffectSurfaceActions::HandleApplyPreset(const
         if (Border->TryGetStringField(TEXT("glow_color"), BGC))
         {
             ApplyPath(Surface, TEXT("Effect.Border.GlowColor"),
-                MakeShared<FJsonValueString>(BGC), PathsWritten, Failures);
+                MakeEffectColorJsonFromText(BGC), PathsWritten, Failures);
         }
     }
 
@@ -1583,7 +1619,7 @@ FMonolithActionResult MonolithUI::FEffectSurfaceActions::HandleApplyPreset(const
         if (Glow->TryGetStringField(TEXT("color"), GC))
         {
             ApplyPath(Surface, TEXT("Effect.Glow.Color"),
-                MakeShared<FJsonValueString>(GC), PathsWritten, Failures);
+                MakeEffectColorJsonFromText(GC), PathsWritten, Failures);
         }
         double GI = 0.0;
         if (Glow->TryGetNumberField(TEXT("intensity"), GI))
