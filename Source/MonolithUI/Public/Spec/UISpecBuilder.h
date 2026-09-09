@@ -34,19 +34,45 @@
 
 #include "CoreMinimal.h"
 #include "Spec/UISpec.h"
+#include "Spec/UISpecLossAudit.h"
 
 class UWidgetBlueprint;
 
 /**
+ * How one Build pass treats a pre-existing WBP (issue #139).
+ *
+ * `Rebuild` is the historical — and still default — behaviour: the widget tree
+ * is torn down and re-created from the spec, so every property the spec schema
+ * does not model reverts to its class default. That teardown is now audited
+ * up-front (`FUISpecLossAudit`) instead of happening silently.
+ *
+ * `Patch` reuses existing widgets by id and writes only the spec-modelled
+ * surface on top, leaving everything else — including slot objects and
+ * localization keys — untouched.
+ */
+enum class EUISpecBuildMode : uint8
+{
+    /** Full teardown + recreate. Default; unchanged from pre-#139 behaviour. */
+    Rebuild,
+
+    /** Differential update: reuse by id, touch only what the spec names. */
+    Patch,
+};
+
+/**
  * Caller-supplied inputs to one Build pass. Mirrors the MCP action's params
- * shape (asset_path / overwrite / dry_run / treat_warnings_as_errors / raw_mode
- * / request_id) plus the pre-parsed FUISpecDocument the validator already saw.
+ * shape (asset_path / mode / overwrite / dry_run / treat_warnings_as_errors /
+ * raw_mode / request_id) plus the pre-parsed FUISpecDocument the validator
+ * already saw.
  *
  * Keeping these in a single struct lets us add fields without bloating the
  * Build signature when v2 adds e.g. a manifest hash or per-widget override list.
  */
 struct MONOLITHUI_API FUISpecBuilderInputs
 {
+    /** Teardown-vs-patch policy for a pre-existing WBP. Defaults to Rebuild. */
+    EUISpecBuildMode Mode = EUISpecBuildMode::Rebuild;
+
     /** Parsed spec document. The caller (MCP handler) parses + validates first. */
     const FUISpecDocument* Document = nullptr;
 
@@ -105,6 +131,27 @@ struct MONOLITHUI_API FUISpecBuilderResult
 
     /** Number of widgets removed (existing-WBP overwrite path). */
     int32 NodesRemoved = 0;
+
+    /** Number of widgets reused in place rather than reconstructed (patch mode only). */
+    int32 NodesReused = 0;
+
+    /** Echo of the mode this pass ran in, so the response is never ambiguous. */
+    EUISpecBuildMode Mode = EUISpecBuildMode::Rebuild;
+
+    /**
+     * True when this pass tore an existing widget tree down (rebuild mode over
+     * a pre-existing WBP). The counter triple `created:N, modified:0, removed:N`
+     * reads like bookkeeping; this flag is the unambiguous signal.
+     */
+    bool bTeardown = false;
+
+    /**
+     * Pre-flight audit of everything a teardown was about to reset. Populated
+     * whenever a pre-existing WBP is rebuilt (including dry-run) and left empty
+     * for create-new and patch passes. Its findings are also mirrored into
+     * `Validation.Warnings` so `warning_count` reflects them.
+     */
+    FUISpecLossAuditResult LossAudit;
 
     /** Free-form diff lines. Always populated; richer when bDryRun=true. */
     TArray<FString> DiffLines;

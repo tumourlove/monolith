@@ -38,6 +38,7 @@
 #include "CoreMinimal.h"
 #include "Spec/UISpec.h"
 
+class UPanelWidget;
 class UWidget;
 class UWidgetBlueprint;
 class FUIPropertyAllowlist;
@@ -73,6 +74,42 @@ struct FUIBuildContext
 
     /** True when raw_mode bypasses the per-write allowlist gate. */
     bool bRawMode = false;
+
+    /**
+     * True when the pass runs in PATCH mode (issue #139). Patch mode skips the
+     * teardown entirely: existing widgets are matched by spec id, reused in
+     * place, and only the spec-modelled surface is written on top. Everything
+     * the spec cannot express -- FButtonStyle tints, BlurStrength, localization
+     * keys, unmodelled slot fields -- survives because the widget and slot
+     * UObjects are never destroyed.
+     *
+     * Rebuild mode (the default) leaves this false and behaves exactly as it
+     * did before, so existing callers see no change.
+     */
+    bool bPatchMode = false;
+
+    /**
+     * Patch mode only. Pre-existing widgets keyed by variable name, captured
+     * BEFORE the walk. The sub-builders consume entries from here instead of
+     * calling ConstructWidget; whatever is never consumed is what the spec
+     * dropped, and gets removed in the post-walk sweep.
+     */
+    TMap<FName, TWeakObjectPtr<UWidget>> ReusableWidgets;
+
+    /** Patch mode only. Ids actually reused this pass (drives the orphan sweep). */
+    TSet<FName> ReusedWidgetIds;
+
+    /**
+     * Patch mode only. Next spec-order child index per parent panel. Children
+     * are placed at the cursor (ShiftChild for an in-place child, InsertChildAt
+     * for a moved/new one) so spec order wins without destroying slots; after
+     * the walk, children at or beyond the final cursor are the ones the spec
+     * no longer names.
+     */
+    TMap<TWeakObjectPtr<UPanelWidget>, int32> PatchChildCursor;
+
+    /** Counter — widgets reused in place rather than reconstructed (patch mode). */
+    int32 NodesReused = 0;
 
     /**
      * Editor-side variable-name -> live UWidget* map. Populated AFTER compile

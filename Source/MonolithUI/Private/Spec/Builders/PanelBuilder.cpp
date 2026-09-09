@@ -15,6 +15,7 @@
 
 #include "Spec/Builders/PanelBuilder.h"
 
+#include "Spec/Builders/WidgetReuse.h"
 #include "Spec/UIBuildContext.h"
 #include "Spec/UISpec.h"
 #include "MonolithUICommon.h"
@@ -99,6 +100,24 @@ namespace MonolithUI::PanelBuilderInternal
         return Rule == TEXT("Automatic") || Rule == TEXT("Fill");
     }
 
+    /**
+     * Patch-mode guard for writes that carry no "was this authored?" signal.
+     *
+     * FUISpecStyle / FUISpecContent have no per-field presence bit, so the
+     * builder's standing convention is that a field left at its struct default
+     * counts as unset -- that is already how HAlign (IsNone), Text (IsEmpty),
+     * Padding (HasAnyPadding) and Background (HasAuthoredColor) behave. Two
+     * writes ignored the convention and always fired: RenderOpacity and
+     * TextBlock ColorAndOpacity. In rebuild mode that is harmless (the widget
+     * is brand new and sitting on its class defaults anyway); in patch mode it
+     * would clobber an authored value the spec never mentioned, which is the
+     * class of bug patch mode exists to avoid. So apply the convention there.
+     */
+    static bool ShouldWriteUnflaggedField(const FUIBuildContext& Context, bool bIsSpecDefault)
+    {
+        return !Context.bPatchMode || !bIsSpecDefault;
+    }
+
     static void ApplyAlignmentOnly(const FUISpecSlot& S, UScaleBoxSlot* Slot)
     {
         if (!Slot)
@@ -147,6 +166,18 @@ namespace MonolithUI::PanelBuilderInternal
             return nullptr;
         }
 
+        // Patch mode (#139): reuse the existing panel with this id and class so
+        // its children, slot, and unmodelled properties survive.
+        if (UWidget* Reused = MonolithUI::WidgetReuse::TakeReusable(Context, Node, WidgetClass))
+        {
+            if (!MonolithUI::WidgetReuse::PlaceInPatchMode(Context, Node, Reused, ParentPanel))
+            {
+                return nullptr;
+            }
+            MonolithUI::RegisterCreatedWidget(Context.TargetWBP, Reused);
+            return Reused;
+        }
+
         UWidget* Constructed = Context.TargetWBP->WidgetTree->ConstructWidget<UWidget>(
             WidgetClass, Node.Id);
         if (!Constructed)
@@ -165,7 +196,15 @@ namespace MonolithUI::PanelBuilderInternal
         // Attach to parent. nullptr ParentPanel means "this is the root" —
         // the dispatcher does the WidgetTree::RootWidget assignment when it
         // sees a null parent on the recursion entry.
-        if (ParentPanel)
+        if (ParentPanel && Context.bPatchMode)
+        {
+            // New node inside a patch pass — place at the spec-order cursor.
+            if (!MonolithUI::WidgetReuse::PlaceInPatchMode(Context, Node, Constructed, ParentPanel))
+            {
+                return nullptr;
+            }
+        }
+        else if (ParentPanel)
         {
             UPanelSlot* Slot = ParentPanel->AddChild(Constructed);
             if (!Slot)
@@ -341,7 +380,10 @@ namespace MonolithUI::PanelBuilderInternal
         if (!Widget) return;
 
         const FUISpecStyle& S = Node.Style;
-        Widget->SetRenderOpacity(FMath::Clamp(S.Opacity, 0.f, 1.f));
+        if (ShouldWriteUnflaggedField(Context, FMath::IsNearlyEqual(S.Opacity, 1.f)))
+        {
+            Widget->SetRenderOpacity(FMath::Clamp(S.Opacity, 0.f, 1.f));
+        }
 
         if (!S.Visibility.IsNone())
         {

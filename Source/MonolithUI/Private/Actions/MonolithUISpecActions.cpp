@@ -22,6 +22,7 @@
 #include "Spec/UISpec.h"
 #include "Spec/UISpecValidator.h"
 #include "Spec/UISpecBuilder.h"
+#include "Spec/UISpecLossAudit.h"
 // Phase J: dump_ui_spec serializer.
 #include "Spec/UISpecSerializer.h"
 
@@ -432,6 +433,63 @@ namespace MonolithUI::SpecActionsInternal
         return true;
     }
 
+    // ------------------------------------------------------------------
+    // mode / loss-report tokens (issue #139)
+
+    static const TCHAR* BuildModeToToken(EUISpecBuildMode Mode)
+    {
+        return Mode == EUISpecBuildMode::Patch ? TEXT("patch") : TEXT("rebuild");
+    }
+
+    static const TCHAR* LossKindToToken(EUISpecLossKind Kind)
+    {
+        switch (Kind)
+        {
+        case EUISpecLossKind::LocalizationKey:        return TEXT("localization_key");
+        case EUISpecLossKind::UnmodelledSlotProperty: return TEXT("unmodelled_slot_property");
+        case EUISpecLossKind::UnmodelledProperty:
+        default:                                      return TEXT("unmodelled_property");
+        }
+    }
+
+    /**
+     * Parse the optional `mode` param.
+     *
+     * An unrecognised token is a hard error, never a fallback to rebuild --
+     * silently tearing an asset down when the caller asked for something else
+     * is the exact failure this parameter exists to fix (issue #139).
+     */
+    static bool ParseBuildMode(
+        const TSharedPtr<FJsonObject>& Params,
+        EUISpecBuildMode& OutMode,
+        FString& OutError)
+    {
+        OutMode = EUISpecBuildMode::Rebuild;
+
+        FString Token;
+        if (!Params.IsValid() || !Params->TryGetStringField(TEXT("mode"), Token) || Token.IsEmpty())
+        {
+            return true;
+        }
+        if (Token.Equals(TEXT("rebuild"), ESearchCase::IgnoreCase))
+        {
+            OutMode = EUISpecBuildMode::Rebuild;
+            return true;
+        }
+        if (Token.Equals(TEXT("patch"), ESearchCase::IgnoreCase))
+        {
+            OutMode = EUISpecBuildMode::Patch;
+            return true;
+        }
+
+        OutError = FString::Printf(
+            TEXT("Unknown mode '%s'. Valid values: \"rebuild\" (default; full teardown, resets every ")
+            TEXT("property the spec schema does not model) or \"patch\" (differential; touches only ")
+            TEXT("what the spec names)."),
+            *Token);
+        return false;
+    }
+
     /**
      * Pack a populated FUISpecBuilderResult into the JSON response shape.
      * Mirror of the documented action wire shape:
@@ -443,6 +501,7 @@ namespace MonolithUI::SpecActionsInternal
         TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
         Out->SetBoolField  (TEXT("bSuccess"),    R.bSuccess);
         Out->SetStringField(TEXT("asset_path"),  R.AssetPath);
+        Out->SetStringField(TEXT("mode"),        BuildModeToToken(R.Mode));
         if (!R.RequestId.IsEmpty())
         {
             Out->SetStringField(TEXT("request_id"), R.RequestId);
@@ -454,11 +513,71 @@ namespace MonolithUI::SpecActionsInternal
         Validation->SetStringField(TEXT("llm_report"), R.Validation.ToLLMReport());
         Out->SetObjectField(TEXT("validation"), Validation);
 
+        // Headline counts, so a caller never has to parse llm_report to learn
+        // whether anything was flagged. Issue #139: a rebuild that was about to
+        // drop custom button styles and blur strength reported error_count 0 /
+        // warning_count 0 and looked clean.
+        Out->SetNumberField(TEXT("error_count"),
+            R.Validation.Errors.Num() + R.Errors.Num());
+        Out->SetNumberField(TEXT("warning_count"),
+            R.Validation.Warnings.Num() + R.Warnings.Num());
+
+        // Teardown is the single most misread thing about this action: the
+        // created:N / modified:0 / removed:N triple reads like bookkeeping when
+        // it actually means the whole tree was destroyed and rebuilt. Say so.
+        Out->SetBoolField(TEXT("teardown"), R.bTeardown);
+
         TSharedPtr<FJsonObject> Counts = MakeShared<FJsonObject>();
         Counts->SetNumberField(TEXT("created"),  R.NodesCreated);
         Counts->SetNumberField(TEXT("modified"), R.NodesModified);
         Counts->SetNumberField(TEXT("removed"),  R.NodesRemoved);
+        Counts->SetNumberField(TEXT("reused"),   R.NodesReused);
+        Counts->SetStringField(TEXT("semantics"),
+            R.bTeardown
+                ? TEXT("mode=rebuild over an existing asset: the widget tree was TORN DOWN and re-created. "
+                       "removed counts every pre-existing widget, created counts every widget in the spec, and "
+                       "modified is always 0 because nothing is patched in place. Any property the spec schema "
+                       "does not model was reset to its class default - see data_loss.")
+                : (R.Mode == EUISpecBuildMode::Patch
+                    ? TEXT("mode=patch: widgets matching a spec id were reused in place (reused/modified); "
+                           "created counts only nodes the spec adds and removed only nodes the spec drops. "
+                           "Properties outside the spec schema - widget styles, blur strength, localization "
+                           "keys, unmodelled slot fields - are left untouched.")
+                    : TEXT("New asset: every widget in the spec was created. Nothing pre-existed, so nothing was lost.")));
         Out->SetObjectField(TEXT("node_counts"), Counts);
+
+        // Pre-flight data-loss report (issue #139). Present only when a teardown
+        // was actually about to drop something.
+        if (R.LossAudit.HasLoss())
+        {
+            TSharedPtr<FJsonObject> Loss = MakeShared<FJsonObject>();
+            Loss->SetNumberField(TEXT("property_count"),          R.LossAudit.Findings.Num());
+            Loss->SetNumberField(TEXT("widget_count"),            R.LossAudit.WidgetsWithLoss);
+            Loss->SetNumberField(TEXT("widgets_audited"),         R.LossAudit.WidgetsAudited);
+            Loss->SetNumberField(TEXT("localization_keys_reset"), R.LossAudit.LocalizationKeysReset);
+            Loss->SetNumberField(TEXT("suppressed"),              R.LossAudit.TruncatedCount);
+            Loss->SetStringField(TEXT("advice"),
+                bDryRun
+                    ? TEXT("Dry run - nothing was written. Re-issue with mode=patch to keep these properties, "
+                           "or accept the loss and re-issue with mode=rebuild.")
+                    : TEXT("These properties have been reset. Re-apply them with ui::set_widget_property, or use "
+                           "mode=patch next time so the rebuild does not touch them at all."));
+
+            TArray<TSharedPtr<FJsonValue>> Props;
+            for (const FUISpecLossFinding& F : R.LossAudit.Findings)
+            {
+                TSharedPtr<FJsonObject> PObj = MakeShared<FJsonObject>();
+                PObj->SetStringField(TEXT("kind"),          LossKindToToken(F.Kind));
+                PObj->SetStringField(TEXT("widget"),        F.WidgetId.ToString());
+                PObj->SetStringField(TEXT("widget_class"),  F.WidgetClass);
+                PObj->SetStringField(TEXT("property_path"), F.PropertyPath);
+                PObj->SetStringField(TEXT("current_value"), F.CurrentValue);
+                PObj->SetStringField(TEXT("resets_to"),     F.DefaultValue);
+                Props.Add(MakeShared<FJsonValueObject>(PObj));
+            }
+            Loss->SetArrayField(TEXT("properties"), Props);
+            Out->SetObjectField(TEXT("data_loss"), Loss);
+        }
 
         if (R.Errors.Num() > 0)
         {
@@ -475,10 +594,15 @@ namespace MonolithUI::SpecActionsInternal
             }
             Out->SetArrayField(TEXT("errors"), Errs);
         }
-        if (R.Warnings.Num() > 0)
+        // `warnings` carries BOTH the validator-surface and builder-surface
+        // findings so its length equals `warning_count`. The data-loss findings
+        // live on the validator surface (that is what feeds llm_report's
+        // warning_count line) and would otherwise be invisible to a caller that
+        // only reads this array.
+        if (R.Validation.Warnings.Num() > 0 || R.Warnings.Num() > 0)
         {
             TArray<TSharedPtr<FJsonValue>> Warns;
-            for (const FUISpecError& W : R.Warnings)
+            auto AppendWarning = [&Warns](const FUISpecError& W)
             {
                 TSharedPtr<FJsonObject> WObj = MakeShared<FJsonObject>();
                 WObj->SetStringField(TEXT("category"), W.Category.ToString());
@@ -486,7 +610,9 @@ namespace MonolithUI::SpecActionsInternal
                 WObj->SetStringField(TEXT("message"),  W.Message);
                 WObj->SetStringField(TEXT("suggested_fix"), W.SuggestedFix);
                 Warns.Add(MakeShared<FJsonValueObject>(WObj));
-            }
+            };
+            for (const FUISpecError& W : R.Validation.Warnings) { AppendWarning(W); }
+            for (const FUISpecError& W : R.Warnings)            { AppendWarning(W); }
             Out->SetArrayField(TEXT("warnings"), Warns);
         }
         if (bDryRun || R.DiffLines.Num() > 0)
@@ -534,6 +660,17 @@ namespace MonolithUI::SpecActionsInternal
         FString RequestId;
         Params->TryGetStringField(TEXT("request_id"), RequestId);
 
+        // Resolve `mode` BEFORE the spec parse so a typo fails fast with -32602
+        // instead of silently running the destructive default (issue #139).
+        EUISpecBuildMode BuildMode = EUISpecBuildMode::Rebuild;
+        {
+            FString ModeError;
+            if (!ParseBuildMode(Params, BuildMode, ModeError))
+            {
+                return FMonolithActionResult::Error(ModeError, -32602);
+            }
+        }
+
         FUISpecDocument Document;
         FUISpecValidationResult ParseValidation;
         if (!ParseDocument(*SpecObjPtr, Document, ParseValidation))
@@ -550,6 +687,7 @@ namespace MonolithUI::SpecActionsInternal
         FUISpecBuilderInputs Inputs;
         Inputs.Document  = &Document;
         Inputs.AssetPath = AssetPath;
+        Inputs.Mode                   = BuildMode;
         Inputs.bOverwrite             = true;  // default per spec
         Inputs.bDryRun                = false;
         Inputs.bTreatWarningsAsErrors = false;
@@ -654,6 +792,34 @@ namespace MonolithUI::SpecActionsInternal
                 }
             }
             Out->SetObjectField(TEXT("allowlist_by_type"), ByType);
+        }
+
+        // Build-mode contract (issue #139). The schema is where a caller looks
+        // before round-tripping dump -> edit -> build, so the teardown semantics
+        // belong here rather than only in the action description.
+        {
+            TSharedPtr<FJsonObject> Modes = MakeShared<FJsonObject>();
+            Modes->SetStringField(TEXT("rebuild"),
+                TEXT("DEFAULT. Destroys the existing widget tree and re-creates every node from the "
+                     "spec. Only what this schema models survives -- everything else on a pre-existing "
+                     "widget (custom WidgetStyle tints, BackgroundBlur.BlurStrength, tooltips, "
+                     "clipping, render transforms, unmodelled slot fields) resets to its class "
+                     "default, and FText values are re-minted culture-invariant so localization "
+                     "namespaces/keys are reassigned. build_ui_from_spec audits this BEFORE the "
+                     "teardown and reports every affected property under data_loss with a matching "
+                     "warning, so warning_count is non-zero whenever a rebuild is about to drop "
+                     "something."));
+            Modes->SetStringField(TEXT("patch"),
+                TEXT("Differential. Matches spec nodes to existing widgets by id (and exact class), "
+                     "reuses those widget and slot objects, and writes only the fields this schema "
+                     "models. Adds nodes the spec adds, removes nodes the spec drops, reorders to "
+                     "spec order, and leaves an unchanged FText untouched so its localization key "
+                     "survives. Everything outside the schema is preserved because nothing is "
+                     "destroyed."));
+            Modes->SetStringField(TEXT("note"),
+                TEXT("dump_ui_spec -> edit -> build_ui_from_spec is only a safe round-trip under "
+                     "mode=patch. Under mode=rebuild it is a regeneration, not a patch."));
+            Out->SetObjectField(TEXT("build_modes"), Modes);
         }
 
         return FMonolithActionResult::Success(Out);
@@ -1027,6 +1193,14 @@ namespace MonolithUI::SpecActionsInternal
         Params->TryGetStringField(TEXT("request_id"), RequestId);
 
         bool bDryRun = false, bTreatWarningsAsErrors = false, bRawMode = false, bOverwrite = true;
+        EUISpecBuildMode ScreenMode = EUISpecBuildMode::Rebuild;
+        {
+            FString ModeError;
+            if (!ParseBuildMode(Params, ScreenMode, ModeError))
+            {
+                return FMonolithActionResult::Error(ModeError, -32602);
+            }
+        }
         Params->TryGetBoolField(TEXT("dry_run"), bDryRun);
         Params->TryGetBoolField(TEXT("treat_warnings_as_errors"), bTreatWarningsAsErrors);
         Params->TryGetBoolField(TEXT("raw_mode"), bRawMode);
@@ -1105,7 +1279,8 @@ namespace MonolithUI::SpecActionsInternal
 
         // ---- Per-screen dispatch into FUISpecBuilder -------------------------
         TArray<TSharedPtr<FJsonValue>> ScreenResults;
-        int32 TotalCreated = 0, TotalModified = 0, TotalRemoved = 0;
+        int32 TotalCreated = 0, TotalModified = 0, TotalRemoved = 0, TotalReused = 0;
+        int32 TotalLossFindings = 0;
         bool bAllSucceeded = true;
 
         for (int32 i = 0; i < Screens->Num(); ++i)
@@ -1173,6 +1348,7 @@ namespace MonolithUI::SpecActionsInternal
             FUISpecBuilderInputs In;
             In.Document  = &Document;
             In.AssetPath = ScreenAssetPath;
+            In.Mode                   = ScreenMode;
             In.bOverwrite             = bOverwrite;
             In.bDryRun                = bDryRun;
             In.bTreatWarningsAsErrors = bTreatWarningsAsErrors;
@@ -1187,6 +1363,8 @@ namespace MonolithUI::SpecActionsInternal
             TotalCreated  += R.NodesCreated;
             TotalModified += R.NodesModified;
             TotalRemoved  += R.NodesRemoved;
+            TotalReused   += R.NodesReused;
+            TotalLossFindings += R.LossAudit.Findings.Num();
             if (!R.bSuccess) bAllSucceeded = false;
 
             // Each screen reuses the shared PackResponse shape for symmetry
@@ -1217,7 +1395,21 @@ namespace MonolithUI::SpecActionsInternal
         Counts->SetNumberField(TEXT("created"),  TotalCreated);
         Counts->SetNumberField(TEXT("modified"), TotalModified);
         Counts->SetNumberField(TEXT("removed"),  TotalRemoved);
+        Counts->SetNumberField(TEXT("reused"),   TotalReused);
         Out->SetObjectField(TEXT("aggregate_node_counts"), Counts);
+        Out->SetStringField(TEXT("mode"), BuildModeToToken(ScreenMode));
+
+        // Aggregate data-loss headline (issue #139). Per-screen detail rides in
+        // screens[N].build_result.data_loss.
+        if (TotalLossFindings > 0)
+        {
+            TSharedPtr<FJsonObject> Loss = MakeShared<FJsonObject>();
+            Loss->SetNumberField(TEXT("property_count"), TotalLossFindings);
+            Loss->SetStringField(TEXT("advice"),
+                TEXT("mode=rebuild reset properties the spec schema cannot model. See each "
+                     "screens[N].build_result.data_loss for the per-widget list, or re-issue with mode=patch."));
+            Out->SetObjectField(TEXT("aggregate_data_loss"), Loss);
+        }
 
         if (StructuralErrors.Num() > 0)  Out->SetArrayField(TEXT("errors"),   StructuralErrors);
         if (StructuralWarnings.Num() > 0) Out->SetArrayField(TEXT("warnings"), StructuralWarnings);
@@ -1243,13 +1435,28 @@ void MonolithUI::FSpecActions::Register(FMonolithToolRegistry& Registry)
              "referenced styles, walks the tree, compiles, rebuilds the post-compile widget-id map, "
              "saves. Atomic: any failure between get-or-create and save rolls back the new asset (or "
              "cancels the in-place edit transaction). Supports dry_run, overwrite, treat_warnings_as_errors, "
-             "raw_mode (per-write allowlist bypass), request_id (echoed back). Returns "
-             "{ bSuccess, asset_path, request_id?, validation, node_counts, errors?, warnings?, diff? }."),
+             "raw_mode (per-write allowlist bypass), request_id (echoed back). "
+             "mode=\"rebuild\" (default) is a FULL TEARDOWN of any existing tree: properties the spec "
+             "schema does not model reset to class defaults, and the response now names every one of "
+             "them under data_loss with a matching warning. mode=\"patch\" reuses existing widgets by "
+             "id and touches only what the spec names. Returns "
+             "{ bSuccess, asset_path, mode, teardown, error_count, warning_count, request_id?, "
+             "validation, node_counts{created,modified,removed,reused,semantics}, data_loss?, "
+             "errors?, warnings?, diff? }."),
         FMonolithActionHandler::CreateStatic(&HandleBuildUIFromSpec),
         FParamSchemaBuilder()
             .RequiredAssetPath(TEXT("asset_path"), TEXT("Long-package asset path, e.g. /Game/UI/MyMenu"))
             .Required(TEXT("spec"),       TEXT("object"), TEXT("FUISpecDocument JSON. Use ui::dump_ui_spec_schema for the shape."))
-            .Optional(TEXT("overwrite"),  TEXT("boolean"), TEXT("Replace an existing WBP at asset_path. Default true."), TEXT("true"))
+            .Optional(TEXT("mode"),       TEXT("string"), TEXT("\"rebuild\" (default) or \"patch\". rebuild TEARS THE EXISTING WIDGET TREE DOWN "
+                 "and recreates it from the spec, so every property the spec schema does not model "
+                 "-- custom WidgetStyle tints, BackgroundBlur.BlurStrength, tooltips, render "
+                 "transforms, unmodelled slot fields, and localization namespace/keys -- resets to "
+                 "its class default. Those resets are audited and listed under data_loss BEFORE they "
+                 "happen. patch reuses existing widgets by id and writes only what the spec names, "
+                 "leaving everything else untouched. An unknown value is rejected with -32602, never "
+                 "silently downgraded to rebuild."),
+                TEXT("rebuild"))
+            .Optional(TEXT("overwrite"),  TEXT("boolean"), TEXT("Replace an existing WBP at asset_path. Ignored when mode=\"patch\" (patch never destroys the asset). Default true."), TEXT("true"))
             .Optional(TEXT("dry_run"),    TEXT("boolean"), TEXT("Validate + walk + report a diff but do not commit. Default false."), TEXT("false"))
             .Optional(TEXT("treat_warnings_as_errors"), TEXT("boolean"), TEXT("Promote validator warnings to errors. Default false."), TEXT("false"))
             .Optional(TEXT("raw_mode"),   TEXT("boolean"), TEXT("Bypass the per-write allowlist gate. Default false."), TEXT("false"))
@@ -1303,8 +1510,9 @@ void MonolithUI::FSpecActions::Register(FMonolithToolRegistry& Registry)
              "dispatch deferred to issue #3-18b). layers / focus_table / nav_overrides are accepted, "
              "validated structurally, and echoed under `deferred_aggregation` so user-space tooling "
              "can post-process — the cross-screen activatable-stack hierarchy, focus-table CDO writes, "
-             "and nav-override propagation are deferred. Modes (`dry_run`, `treat_warnings_as_errors`, "
-             "`raw_mode`, `overwrite`) propagate to every per-screen build call. Returns "
+             "and nav-override propagation are deferred. Modes (`mode`, `dry_run`, "
+             "`treat_warnings_as_errors`, `raw_mode`, `overwrite`) propagate to every per-screen build "
+             "call - note `mode` defaults to \"rebuild\", which tears down each existing screen WBP. Returns "
              "{ bSuccess, status, screens[], aggregate_node_counts, errors?, warnings?, "
              "deferred_aggregation?, request_id? } where each screens[] entry includes a full "
              "build_result object (same shape as build_ui_from_spec)."),
@@ -1319,8 +1527,14 @@ void MonolithUI::FSpecActions::Register(FMonolithToolRegistry& Registry)
                 TEXT("[{ screen, target }, ...] — per-screen DesiredFocusTargetName CDO writes. STUB (echoed back)."))
             .Optional(TEXT("nav_overrides"), TEXT("array"),
                 TEXT("[{ screen, widget, direction, target }, ...] — per-widget nav overrides. STUB (echoed back)."))
+            .Optional(TEXT("mode"), TEXT("string"), TEXT("\"rebuild\" (default) or \"patch\", applied to every per-screen build. rebuild "
+                     "TEARS DOWN each existing screen WBP and recreates it, resetting every property "
+                     "the spec schema does not model (reported under each screen's data_loss). patch "
+                     "reuses existing widgets by id and touches only what the spec names. An unknown "
+                     "value is rejected with -32602."),
+                TEXT("rebuild"))
             .Optional(TEXT("overwrite"), TEXT("boolean"),
-                TEXT("Replace existing WBPs at each screen's asset_path. Default true."), TEXT("true"))
+                TEXT("Replace existing WBPs at each screen's asset_path. Ignored when mode=\"patch\". Default true."), TEXT("true"))
             .Optional(TEXT("dry_run"), TEXT("boolean"),
                 TEXT("Validate + walk each per-screen spec; do not commit. Default false."), TEXT("false"))
             .Optional(TEXT("treat_warnings_as_errors"), TEXT("boolean"),
