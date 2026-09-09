@@ -19,6 +19,7 @@
 #include "Risk/FHotspotScorer.h"
 #include "Risk/FConditionalGateIndexer.h"
 
+#include "FScopedTestDb.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformFileManager.h"
 #include "Interfaces/IPluginManager.h"
@@ -29,14 +30,7 @@
 
 namespace MonolithRiskTestDetail
 {
-	static bool OpenTempDb(FSQLiteDatabase& OutDb, FString& OutPath)
-	{
-		const FString Dir = FPaths::AutomationTransientDir();
-		FPlatformFileManager::Get().GetPlatformFile().CreateDirectoryTree(*Dir);
-		OutPath = Dir / FString::Printf(TEXT("risk-test-%s.db"), *FGuid::NewGuid().ToString());
-		IFileManager::Get().Delete(*OutPath, /*bRequireExists=*/false, /*bEvenReadOnly=*/true);
-		return OutDb.Open(*OutPath, ESQLiteDatabaseOpenMode::ReadWriteCreate);
-	}
+	using MonolithReflectionIntelTests::FScopedTestDb;
 
 	static int32 CountRows(FSQLiteDatabase& Db, const TCHAR* Table)
 	{
@@ -87,13 +81,13 @@ bool FRiskGitCoChangeSchemaTest::RunTest(const FString& /*Parameters*/)
 {
 	using namespace MonolithRiskTestDetail;
 
-	FSQLiteDatabase Db;
-	FString DbPath;
-	if (!OpenTempDb(Db, DbPath))
+	FScopedTestDb ScopedDb;
+	if (!ScopedDb.Open(TEXT("risk-test")))
 	{
-		AddError(TEXT("OpenTempDb failed"));
+		AddError(TEXT("Failed to open the transient test database"));
 		return false;
 	}
+	FSQLiteDatabase& Db = ScopedDb.Get();
 
 	// Empty roots — git mining no-ops but schema must still bootstrap.
 	FGitCoChangeIndexer Indexer;
@@ -106,8 +100,6 @@ bool FRiskGitCoChangeSchemaTest::RunTest(const FString& /*Parameters*/)
 	TestTrue(TEXT("git_file_churn table created"),
 		TableExists(Db, TEXT("git_file_churn")));
 
-	Db.Close();
-	IFileManager::Get().Delete(*DbPath, false, true);
 	return true;
 }
 
@@ -158,14 +150,14 @@ bool FRiskConditionalGateSweepTest::RunTest(const FString& /*Parameters*/)
 		FFileHelper::SaveStringToFile(CppText, *StagedCpp);
 	}
 
-	FSQLiteDatabase Db;
-	FString DbPath;
-	if (!OpenTempDb(Db, DbPath))
+	FScopedTestDb ScopedDb;
+	if (!ScopedDb.Open(TEXT("risk-test")))
 	{
-		AddError(TEXT("OpenTempDb failed"));
+		AddError(TEXT("Failed to open the transient test database"));
 		IFileManager::Get().DeleteDirectory(*WorkDir, false, true);
 		return false;
 	}
+	FSQLiteDatabase& Db = ScopedDb.Get();
 
 	FConditionalGateIndexer Indexer;
 	FString Status;
@@ -204,8 +196,6 @@ bool FRiskConditionalGateSweepTest::RunTest(const FString& /*Parameters*/)
 		}
 	}
 
-	Db.Close();
-	IFileManager::Get().Delete(*DbPath, false, true);
 	IFileManager::Get().DeleteDirectory(*WorkDir, false, true);
 	return true;
 }
@@ -223,13 +213,15 @@ bool FRiskHotspotScoreFormulaTest::RunTest(const FString& /*Parameters*/)
 {
 	using namespace MonolithRiskTestDetail;
 
-	FSQLiteDatabase Db;
-	FString DbPath;
-	if (!OpenTempDb(Db, DbPath))
+	// Declared before the prepared statements below: they are destroyed first, so the
+	// holder's Close() cannot hit SQLITE_BUSY on a still-live statement.
+	FScopedTestDb ScopedDb;
+	if (!ScopedDb.Open(TEXT("risk-test")))
 	{
-		AddError(TEXT("OpenTempDb failed"));
+		AddError(TEXT("Failed to open the transient test database"));
 		return false;
 	}
+	FSQLiteDatabase& Db = ScopedDb.Get();
 
 	// Set up the minimum schema needed for HotspotScorer's join:
 	//   - git_file_churn (the scorer's churn source)
@@ -320,8 +312,6 @@ bool FRiskHotspotScoreFormulaTest::RunTest(const FString& /*Parameters*/)
 		AddError(TEXT("Heavy.cpp row not found in risk_hotspot_scores"));
 	}
 
-	Db.Close();
-	IFileManager::Get().Delete(*DbPath, false, true);
 	return true;
 }
 
@@ -339,13 +329,13 @@ bool FRiskCoChangeWeightingTest::RunTest(const FString& /*Parameters*/)
 {
 	using namespace MonolithRiskTestDetail;
 
-	FSQLiteDatabase Db;
-	FString DbPath;
-	if (!OpenTempDb(Db, DbPath))
+	FScopedTestDb ScopedDb;
+	if (!ScopedDb.Open(TEXT("risk-test")))
 	{
-		AddError(TEXT("OpenTempDb failed"));
+		AddError(TEXT("Failed to open the transient test database"));
 		return false;
 	}
+	FSQLiteDatabase& Db = ScopedDb.Get();
 
 	// Bootstrap schema via an empty Run() — the no-input call creates tables.
 	FGitCoChangeIndexer Indexer;
@@ -394,8 +384,6 @@ bool FRiskCoChangeWeightingTest::RunTest(const FString& /*Parameters*/)
 		}
 	}
 
-	Db.Close();
-	IFileManager::Get().Delete(*DbPath, false, true);
 	return true;
 }
 

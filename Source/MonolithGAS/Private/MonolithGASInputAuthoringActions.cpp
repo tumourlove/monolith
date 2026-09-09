@@ -18,6 +18,7 @@
 #include "UObject/Package.h"
 #include "UObject/UnrealType.h"
 #include "UObject/UObjectGlobals.h"
+#include "UObject/UObjectHash.h"
 
 #define LOCTEXT_NAMESPACE "MonolithGASInputAuthoring"
 
@@ -89,14 +90,67 @@ namespace MonolithInputAuthoring
 		return NewObject<UObject>(Owner, Class, NAME_None, MaskedOuterFlags);
 	}
 
+	/**
+	 * Finds the class a `modifier_class` / `trigger_class` spec names, without routing the
+	 * common cases through UClass::TryFindTypeSlow. That function's short-name branch logs
+	 * a LogClass warning plus a captured callstack on EVERY call, so accepting the
+	 * documented short form used to mean spamming the user's log for correct input.
+	 *
+	 * Resolution order:
+	 *   1. an object path ("/Script/EnhancedInput.InputModifierNegate") — anything holding a
+	 *      '/' is what FPackageName::IsShortPackageName treats as a path, which is exactly
+	 *      the branch that resolves silently;
+	 *   2. the name qualified against the package the base class lives in, first as given
+	 *      then with the kind's prefix, which covers every engine modifier/trigger and the
+	 *      documented short form ("Negate" -> /Script/EnhancedInput.InputModifierNegate);
+	 *   3. a name match over the loaded subclasses of the base — this is what resolves a
+	 *      modifier or trigger declared in the user's own game module or a Blueprint
+	 *      subclass, neither of which lives under /Script/EnhancedInput.
+	 *
+	 * Only a spec that matches none of those falls through to a name-only search, and it
+	 * does so through StaticFindFirstObject (the same lookup TryFindTypeSlow performs,
+	 * minus the warning) purely so a class that exists but is the wrong type still gets the
+	 * specific "is not a modifier" error rather than "no class named".
+	 */
+	UClass* FindInstancedClass(const FString& Spec, const FKindInfo& Kind)
+	{
+		if (Spec.Contains(TEXT("/")))
+		{
+			return FindObject<UClass>(nullptr, *Spec);
+		}
+
+		const FString BasePackage = Kind.BaseClass->GetPackage()->GetName();
+		const FString PrefixedName = FString(Kind.ShortPrefix) + Spec;
+		if (UClass* Exact = FindObject<UClass>(nullptr, *(BasePackage + TEXT(".") + Spec)))
+		{
+			return Exact;
+		}
+		if (UClass* Prefixed = FindObject<UClass>(nullptr, *(BasePackage + TEXT(".") + PrefixedName)))
+		{
+			return Prefixed;
+		}
+
+		// Name comparison is case-insensitive to match the FName lookups above.
+		TArray<UClass*> Derived;
+		GetDerivedClasses(Kind.BaseClass, Derived, /*bRecursive=*/true);
+		for (UClass* Candidate : Derived)
+		{
+			const FString CandidateName = Candidate->GetName();
+			if (CandidateName.Equals(Spec, ESearchCase::IgnoreCase) ||
+				CandidateName.Equals(PrefixedName, ESearchCase::IgnoreCase))
+			{
+				return Candidate;
+			}
+		}
+
+		return Cast<UClass>(StaticFindFirstObject(UClass::StaticClass(), Spec,
+			EFindFirstObjectOptions::NativeFirst));
+	}
+
 	/** Accepts a /Script path, an exact class name, or a short name ("Negate" -> "InputModifierNegate"). */
 	UClass* ResolveInstancedClass(const FString& Spec, const FKindInfo& Kind, FMonolithActionResult& OutError)
 	{
-		UClass* Found = UClass::TryFindTypeSlow<UClass>(Spec);
-		if (!Found && !Spec.Contains(TEXT("/")) && !Spec.Contains(TEXT(".")))
-		{
-			Found = UClass::TryFindTypeSlow<UClass>(FString(Kind.ShortPrefix) + Spec);
-		}
+		UClass* Found = FindInstancedClass(Spec, Kind);
 		if (!Found)
 		{
 			OutError = InvalidParam(Kind.ClassField, FString::Printf(

@@ -18,6 +18,7 @@
 
 #include "Decision/FDecisionRecordIndexer.h"
 
+#include "FScopedTestDb.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformFileManager.h"
 #include "Interfaces/IPluginManager.h"
@@ -44,18 +45,8 @@ namespace MonolithDecisionTestDetail
 			/ TEXT("Private") / TEXT("Tests") / TEXT("Fixtures") / TEXT("DecisionCorpus");
 	}
 
-	/** Open (or create) a disposable temp DB at AutomationTransientDir/decision-test-<rand>.db. */
-	static bool OpenTempDb(FSQLiteDatabase& OutDb, FString& OutPath)
-	{
-		const FString Dir = FPaths::AutomationTransientDir();
-		FPlatformFileManager::Get().GetPlatformFile().CreateDirectoryTree(*Dir);
-		OutPath = Dir / FString::Printf(TEXT("decision-test-%s.db"), *FGuid::NewGuid().ToString());
-
-		// Pre-delete in case a prior aborted run left a stale file.
-		IFileManager::Get().Delete(*OutPath, /*bRequireExists=*/false, /*bEvenReadOnly=*/true);
-
-		return OutDb.Open(*OutPath, ESQLiteDatabaseOpenMode::ReadWriteCreate);
-	}
+	/** Disposable temp DB at AutomationTransientDir/decision-test-<rand>.db, closed on scope exit. */
+	using MonolithReflectionIntelTests::FScopedTestDb;
 
 	/** Count rows in a table. -1 on prepare failure. */
 	static int32 CountRows(FSQLiteDatabase& Db, const TCHAR* Table)
@@ -95,13 +86,13 @@ bool FDecisionSchemaBootstrapTest::RunTest(const FString& /*Parameters*/)
 {
 	using namespace MonolithDecisionTestDetail;
 
-	FSQLiteDatabase Db;
-	FString DbPath;
-	if (!OpenTempDb(Db, DbPath))
+	FScopedTestDb ScopedDb;
+	if (!ScopedDb.Open(TEXT("decision-test")))
 	{
-		AddError(TEXT("OpenTempDb failed"));
+		AddError(TEXT("Failed to open the transient test database"));
 		return false;
 	}
+	FSQLiteDatabase& Db = ScopedDb.Get();
 
 	// Empty corpus run — schema must still be created.
 	FDecisionRecordIndexer Indexer;
@@ -111,8 +102,6 @@ bool FDecisionSchemaBootstrapTest::RunTest(const FString& /*Parameters*/)
 	TestTrue(TEXT("decision_records table created"),    TableExists(Db, TEXT("decision_records")));
 	TestTrue(TEXT("decision_supersedes table created"), TableExists(Db, TEXT("decision_supersedes")));
 
-	Db.Close();
-	IFileManager::Get().Delete(*DbPath, /*bRequireExists=*/false, /*bEvenReadOnly=*/true);
 	return true;
 }
 
@@ -141,13 +130,15 @@ bool FDecisionHeuristicAccuracyTest::RunTest(const FString& /*Parameters*/)
 		return true;
 	}
 
-	FSQLiteDatabase Db;
-	FString DbPath;
-	if (!OpenTempDb(Db, DbPath))
+	// Declared before the prepared statement below: it is destroyed first, so the
+	// holder's Close() cannot hit SQLITE_BUSY on a still-live statement.
+	FScopedTestDb ScopedDb;
+	if (!ScopedDb.Open(TEXT("decision-test")))
 	{
-		AddError(TEXT("OpenTempDb failed"));
+		AddError(TEXT("Failed to open the transient test database"));
 		return false;
 	}
+	FSQLiteDatabase& Db = ScopedDb.Get();
 
 	FDecisionRecordIndexer Indexer;
 	FString Status;
@@ -169,8 +160,6 @@ bool FDecisionHeuristicAccuracyTest::RunTest(const FString& /*Parameters*/)
 		TestEqual(TEXT("03_non_decision contributes zero rows"), NonDecCount, 0);
 	}
 
-	Db.Close();
-	IFileManager::Get().Delete(*DbPath, /*bRequireExists=*/false, /*bEvenReadOnly=*/true);
 	return true;
 }
 
@@ -194,9 +183,9 @@ bool FDecisionSupersessionChainTest::RunTest(const FString& /*Parameters*/)
 		return true;
 	}
 
-	FSQLiteDatabase Db;
-	FString DbPath;
-	if (!OpenTempDb(Db, DbPath)) { AddError(TEXT("OpenTempDb failed")); return false; }
+	FScopedTestDb ScopedDb;
+	if (!ScopedDb.Open(TEXT("decision-test"))) { AddError(TEXT("Failed to open the transient test database")); return false; }
+	FSQLiteDatabase& Db = ScopedDb.Get();
 
 	FDecisionRecordIndexer Indexer;
 	FString Status;
@@ -205,8 +194,6 @@ bool FDecisionSupersessionChainTest::RunTest(const FString& /*Parameters*/)
 	const int32 EdgeCount = CountRows(Db, TEXT("decision_supersedes"));
 	TestTrue(TEXT("At least one supersession edge resolved from corpus"), EdgeCount >= 1);
 
-	Db.Close();
-	IFileManager::Get().Delete(*DbPath, /*bRequireExists=*/false, /*bEvenReadOnly=*/true);
 	return true;
 }
 
@@ -252,9 +239,11 @@ bool FDecisionStalenessFlagTest::RunTest(const FString& /*Parameters*/)
 	const FDateTime AgedTime = FDateTime::UtcNow() - FTimespan::FromDays(60.0);
 	IFileManager::Get().SetTimeStamp(*Dst, AgedTime);
 
-	FSQLiteDatabase Db;
-	FString DbPath;
-	if (!OpenTempDb(Db, DbPath)) { AddError(TEXT("OpenTempDb failed")); return false; }
+	// Declared before the prepared statement below: it is destroyed first, so the
+	// holder's Close() cannot hit SQLITE_BUSY on a still-live statement.
+	FScopedTestDb ScopedDb;
+	if (!ScopedDb.Open(TEXT("decision-test"))) { AddError(TEXT("Failed to open the transient test database")); return false; }
+	FSQLiteDatabase& Db = ScopedDb.Get();
 
 	FDecisionRecordIndexer Indexer;
 	FString Status;
@@ -274,8 +263,6 @@ bool FDecisionStalenessFlagTest::RunTest(const FString& /*Parameters*/)
 	}
 	TestTrue(TEXT("At least one stale row past 30-day cutoff"), StaleCount >= 1);
 
-	Db.Close();
-	IFileManager::Get().Delete(*DbPath, /*bRequireExists=*/false, /*bEvenReadOnly=*/true);
 	IFileManager::Get().DeleteDirectory(*WorkDir, /*bRequireExists=*/false, /*bTree=*/true);
 	return true;
 }
