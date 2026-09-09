@@ -32,7 +32,9 @@
 //        block with the same key:value lines a standalone FUISpecError emits.
 //
 // Throwaway WBPs land under /Game/Tests/Monolith/UI/ErrorFormatting/ per the
-// agent-rules test-asset rule.
+// agent-rules test-asset rule. Every fixture gets a per-run-unique name and is
+// removed again when its scope exits -- see FScratchWBP below for why a fixed
+// name is not survivable here.
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -61,75 +63,206 @@
 #include "Components/TextBlock.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "UObject/SavePackage.h"
+#include "HAL/FileManager.h"
+#include "Misc/Guid.h"
 #include "Misc/PackageName.h"
+#include "Misc/ScopeExit.h"
+#include "UObject/Package.h"
+#include "UObject/SavePackage.h"
+#include "UObject/UObjectGlobals.h"
 
 namespace MonolithUI::ErrorFormattingTests
 {
-    /** Test asset path. Each test scopes a sub-suffix to avoid PIE cross-pollution. */
-    static FString MakeTestPath(const FString& Suffix)
+    /** Folder every scratch fixture in this file lives under. */
+    static const TCHAR* const GScratchFolder = TEXT("/Game/Tests/Monolith/UI/ErrorFormatting");
+
+    /**
+     * Build a scratch asset path that is unique to THIS invocation.
+     *
+     * The suffix alone is not enough. UWidgetBlueprintFactory::FactoryCreateNew
+     * forwards to FKismetEditorUtilities::CreateBlueprint, which opens with
+     *
+     *     check(FindObject<UBlueprint>(Outer, *NewBPName.ToString()) == NULL);
+     *
+     * (UE 5.7 Kismet2.cpp:435 / UE 5.8 Kismet2.cpp:441). That is a fatal assert,
+     * not a recoverable failure -- an already-taken name kills the editor and
+     * takes the rest of the automation run down with it. A fixture still resident
+     * from an earlier run in this session, or reloaded from a .uasset a previous
+     * session left on disk, is exactly that collision, which is why a fixed name
+     * makes the suite pass only on a project that has never run it before. The
+     * GUID token means no leftover -- however it was left behind -- can occupy
+     * the name we are about to create.
+     */
+    static FString MakeUniqueTestPath(const FString& Suffix)
     {
-        return FString::Printf(TEXT("/Game/Tests/Monolith/UI/ErrorFormatting/WBP_%s"), *Suffix);
+        return FString::Printf(TEXT("%s/WBP_%s_%s"), GScratchFolder, *Suffix,
+            *FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
+    }
+
+    /** Split a long package name into its parent path and leaf asset name. */
+    static bool SplitAssetPath(const FString& AssetPath, FString& OutPackagePath, FString& OutAssetName)
+    {
+        return AssetPath.Split(TEXT("/"), &OutPackagePath, &OutAssetName,
+            ESearchCase::IgnoreCase, ESearchDir::FromEnd) && !OutAssetName.IsEmpty();
     }
 
     /**
-     * Construct a CanvasPanel-rooted WBP with one named child of the requested
-     * widget class. Returns the asset path (so the test can pass it to MCP
-     * actions) and stashes the live UWidgetBlueprint pointer via OutWBP.
-     *
-     * Mirrors the helper shape used in EffectSurfaceActionsTests + UISpecBuilderTests
-     * so the bookkeeping (RegisterCreatedWidget / MarkBlueprintAsStructurallyModified
-     * / CompileBlueprint / SavePackage) is consistent across the suite.
+     * True when nothing occupies AssetPath: no object of that name inside an
+     * already-loaded package, and no package file on disk that a later load
+     * could revive into one. This is the CreateBlueprint precondition, checked
+     * before we hand the name to the factory.
      */
-    static FString CreateScratchWBP(
-        const FString& Suffix,
-        UClass* ChildClass,
-        const FName& ChildName,
-        UWidgetBlueprint*& OutWBP)
+    static bool IsScratchPathFree(const FString& AssetPath)
     {
-        OutWBP = nullptr;
-        const FString AssetPath = MakeTestPath(Suffix);
         FString PackagePath, AssetName;
-        AssetPath.Split(TEXT("/"), &PackagePath, &AssetName, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
-
-        UPackage* Package = CreatePackage(*AssetPath);
-        if (!Package) return AssetPath;
-
-        UWidgetBlueprintFactory* Factory = NewObject<UWidgetBlueprintFactory>();
-        Factory->BlueprintType = BPTYPE_Normal;
-        Factory->ParentClass   = UUserWidget::StaticClass();
-        UObject* Created = Factory->FactoryCreateNew(
-            UWidgetBlueprint::StaticClass(), Package,
-            FName(*AssetName), RF_Public | RF_Standalone, nullptr, GWarn);
-        UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(Created);
-        if (!WBP || !WBP->WidgetTree) return AssetPath;
-
-        UCanvasPanel* Root = WBP->WidgetTree->ConstructWidget<UCanvasPanel>(
-            UCanvasPanel::StaticClass(), TEXT("RootCanvas"));
-        WBP->WidgetTree->RootWidget = Root;
-        WBP->OnVariableAdded(Root->GetFName());
-
-        if (ChildClass)
+        if (!SplitAssetPath(AssetPath, PackagePath, AssetName))
         {
-            UWidget* Child = WBP->WidgetTree->ConstructWidget<UWidget>(ChildClass, ChildName);
-            Root->AddChild(Child);
-            WBP->OnVariableAdded(Child->GetFName());
+            return false;
+        }
+        if (FPackageName::DoesPackageExist(AssetPath))
+        {
+            return false;
+        }
+        if (UPackage* Existing = FindPackage(nullptr, *AssetPath))
+        {
+            return FindObject<UObject>(Existing, *AssetName) == nullptr;
+        }
+        return true;
+    }
+
+    /**
+     * Remove a scratch asset: detach whatever object is loaded at AssetPath and
+     * delete its .uasset. Safe to call for a path where nothing was created.
+     *
+     * ObjectTools::DeleteAssets / DeleteObjectsUnchecked are deliberately NOT
+     * used. Both funnel into ObjectTools::DeleteSingleObject, which can raise a
+     * modal FMessageDialog when a delegate vetoes the delete (UE 5.7
+     * ObjectTools.cpp:3394) -- in an automation run that hangs the suite instead
+     * of failing it. The manual path below touches only the fixture we made.
+     */
+    static void DestroyScratchAsset(const FString& AssetPath)
+    {
+        FString PackagePath, AssetName;
+        if (AssetPath.IsEmpty() || !SplitAssetPath(AssetPath, PackagePath, AssetName))
+        {
+            return;
         }
 
-        FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
-        FKismetEditorUtilities::CompileBlueprint(WBP);
+        if (UPackage* Package = FindPackage(nullptr, *AssetPath))
+        {
+            if (UObject* Existing = FindObject<UObject>(Package, *AssetName))
+            {
+                // Notify the registry while the object is still addressable.
+                FAssetRegistryModule::AssetDeleted(Existing);
 
-        FAssetRegistryModule::AssetCreated(WBP);
-        Package->MarkPackageDirty();
-        FSavePackageArgs SaveArgs;
-        SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-        UPackage::SavePackage(Package, WBP,
-            *FPackageName::LongPackageNameToFilename(AssetPath, FPackageName::GetAssetPackageExtension()),
-            SaveArgs);
+                // Drop the keep-alive flags and move the asset (a UBlueprint
+                // brings its generated + skeleton classes along -- see
+                // UBlueprint::RenameGeneratedClasses) out to the transient
+                // package, so the name is free again inside this session.
+                Existing->ClearFlags(RF_Public | RF_Standalone);
+                Existing->Rename(nullptr, GetTransientPackage(),
+                    REN_DoNotDirty | REN_DontCreateRedirectors | REN_NonTransactional);
+            }
 
-        OutWBP = WBP;
-        return AssetPath;
+            // A throwaway must not raise a save prompt on editor shutdown.
+            Package->SetDirtyFlag(false);
+        }
+
+        const FString Filename = FPackageName::LongPackageNameToFilename(
+            AssetPath, FPackageName::GetAssetPackageExtension());
+        IFileManager::Get().Delete(*Filename, /*RequireExists=*/false,
+            /*EvenReadOnly=*/true, /*Quiet=*/true);
     }
+
+    /**
+     * Scratch fixture: a CanvasPanel-rooted WBP with one named child of the
+     * requested widget class, created at a per-run-unique path and deleted again
+     * when the scope exits -- including on an early `return false` from a failed
+     * assertion, which is the case that used to leave the collision behind.
+     *
+     * The asset is still compiled and saved to disk exactly as before: the
+     * actions under test resolve `asset_path` through the normal load path, and
+     * the save keeps that path honest. It just does not outlive the test.
+     *
+     * Bookkeeping (OnVariableAdded / MarkBlueprintAsStructurallyModified /
+     * CompileBlueprint / AssetCreated / SavePackage) matches the shared helper in
+     * Hoisted/MonolithUITestFixtureUtils.h so the suite stays consistent.
+     */
+    struct FScratchWBP
+    {
+        FString AssetPath;
+        UWidgetBlueprint* WBP = nullptr;
+
+        FScratchWBP(const FString& Suffix, UClass* ChildClass, const FName& ChildName)
+        {
+            // Never hand CreateBlueprint a name whose assert precondition is
+            // already violated -- reroll instead. With a GUID token this loop
+            // does not spin in practice, but the guarantee is the check, not the
+            // improbability of a collision.
+            for (int32 Attempt = 0; Attempt < 8; ++Attempt)
+            {
+                FString Candidate = MakeUniqueTestPath(Suffix);
+                if (IsScratchPathFree(Candidate))
+                {
+                    AssetPath = MoveTemp(Candidate);
+                    break;
+                }
+            }
+            if (AssetPath.IsEmpty())
+            {
+                return;
+            }
+
+            FString PackagePath, AssetName;
+            if (!SplitAssetPath(AssetPath, PackagePath, AssetName)) return;
+
+            UPackage* Package = CreatePackage(*AssetPath);
+            if (!Package) return;
+
+            UWidgetBlueprintFactory* Factory = NewObject<UWidgetBlueprintFactory>();
+            Factory->BlueprintType = BPTYPE_Normal;
+            Factory->ParentClass   = UUserWidget::StaticClass();
+            UObject* Created = Factory->FactoryCreateNew(
+                UWidgetBlueprint::StaticClass(), Package,
+                FName(*AssetName), RF_Public | RF_Standalone, nullptr, GWarn);
+            UWidgetBlueprint* Built = Cast<UWidgetBlueprint>(Created);
+            if (!Built || !Built->WidgetTree) return;
+
+            UCanvasPanel* Root = Built->WidgetTree->ConstructWidget<UCanvasPanel>(
+                UCanvasPanel::StaticClass(), TEXT("RootCanvas"));
+            Built->WidgetTree->RootWidget = Root;
+            Built->OnVariableAdded(Root->GetFName());
+
+            if (ChildClass)
+            {
+                UWidget* Child = Built->WidgetTree->ConstructWidget<UWidget>(ChildClass, ChildName);
+                Root->AddChild(Child);
+                Built->OnVariableAdded(Child->GetFName());
+            }
+
+            FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Built);
+            FKismetEditorUtilities::CompileBlueprint(Built);
+
+            FAssetRegistryModule::AssetCreated(Built);
+            Package->MarkPackageDirty();
+            FSavePackageArgs SaveArgs;
+            SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+            UPackage::SavePackage(Package, Built,
+                *FPackageName::LongPackageNameToFilename(AssetPath, FPackageName::GetAssetPackageExtension()),
+                SaveArgs);
+
+            WBP = Built;
+        }
+
+        ~FScratchWBP()
+        {
+            WBP = nullptr;
+            DestroyScratchAsset(AssetPath);
+        }
+
+        FScratchWBP(const FScratchWBP&) = delete;
+        FScratchWBP& operator=(const FScratchWBP&) = delete;
+    };
 
     /** Build a JSON params object from a list of (key, string-value) pairs. */
     static TSharedPtr<FJsonObject> MakeStringParams(
@@ -241,8 +374,14 @@ bool FMonolithUIErrorFormattingRequestIdEchoesTest::RunTest(const FString& /*Par
     // Path 1 — validate-fail: empty `spec` produces an immediate validator
     // failure. The response must still echo request_id.
     {
+        // Unique path + unconditional teardown: this path is not supposed to
+        // commit an asset, but the fixture must not be able to poison a re-run
+        // even if that ever regresses.
+        const FString AssetPath = MakeUniqueTestPath(TEXT("RequestIdEcho_ValidateFail"));
+        ON_SCOPE_EXIT { DestroyScratchAsset(AssetPath); };
+
         TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
-        Params->SetStringField(TEXT("asset_path"),  MakeTestPath(TEXT("RequestIdEcho_ValidateFail")));
+        Params->SetStringField(TEXT("asset_path"),  AssetPath);
         Params->SetObjectField(TEXT("spec"),        MakeShared<FJsonObject>()); // empty object => no rootWidget
         Params->SetStringField(TEXT("request_id"),  TestRequestId);
 
@@ -274,8 +413,11 @@ bool FMonolithUIErrorFormattingRequestIdEchoesTest::RunTest(const FString& /*Par
         Root->SetStringField(TEXT("id"),   TEXT("RootBox"));
         Spec->SetObjectField(TEXT("rootWidget"), Root);
 
+        const FString AssetPath = MakeUniqueTestPath(TEXT("RequestIdEcho_Success"));
+        ON_SCOPE_EXIT { DestroyScratchAsset(AssetPath); };
+
         TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
-        Params->SetStringField(TEXT("asset_path"), MakeTestPath(TEXT("RequestIdEcho_Success")));
+        Params->SetStringField(TEXT("asset_path"), AssetPath);
         Params->SetObjectField(TEXT("spec"),       Spec);
         Params->SetStringField(TEXT("request_id"), TestRequestId);
         Params->SetBoolField(TEXT("dry_run"),      true); // don't pollute disk
@@ -298,8 +440,11 @@ bool FMonolithUIErrorFormattingRequestIdEchoesTest::RunTest(const FString& /*Par
     // present-as-empty-string), so callers can distinguish "unset" from "set
     // to empty string".
     {
+        const FString AssetPath = MakeUniqueTestPath(TEXT("RequestIdEcho_Omitted"));
+        ON_SCOPE_EXIT { DestroyScratchAsset(AssetPath); };
+
         TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
-        Params->SetStringField(TEXT("asset_path"), MakeTestPath(TEXT("RequestIdEcho_Omitted")));
+        Params->SetStringField(TEXT("asset_path"), AssetPath);
         Params->SetObjectField(TEXT("spec"),       MakeShared<FJsonObject>()); // validate-fail again
 
         const FMonolithActionResult R = FMonolithToolRegistry::Get().ExecuteAction(
@@ -330,17 +475,15 @@ bool FMonolithUISetWidgetPropertyBadPathSurfacesValidOptionsTest::RunTest(const 
 {
     using namespace MonolithUI::ErrorFormattingTests;
 
-    UWidgetBlueprint* WBP = nullptr;
-    const FString AssetPath = CreateScratchWBP(
-        TEXT("BadPropertyPath"), UButton::StaticClass(),
-        FName(TEXT("PrimaryButton")), WBP);
-    if (!TestNotNull(TEXT("Test fixture WBP created"), WBP))
+    FScratchWBP Scratch(TEXT("BadPropertyPath"), UButton::StaticClass(),
+        FName(TEXT("PrimaryButton")));
+    if (!TestNotNull(TEXT("Test fixture WBP created"), Scratch.WBP))
     {
         return false;
     }
 
     TSharedPtr<FJsonObject> Params = MakeStringParams({
-        { TEXT("asset_path"),    AssetPath },
+        { TEXT("asset_path"),    Scratch.AssetPath },
         { TEXT("widget_name"),   TEXT("PrimaryButton") },
         // Intentionally bogus path — guaranteed to miss any allowlist entry.
         { TEXT("property_name"), TEXT("ThisPropertyDoesNotExist_K5a") },
@@ -391,17 +534,15 @@ bool FMonolithUISetAnchorPresetBadPresetEnumeratesValidOptionsTest::RunTest(cons
 {
     using namespace MonolithUI::ErrorFormattingTests;
 
-    UWidgetBlueprint* WBP = nullptr;
-    const FString AssetPath = CreateScratchWBP(
-        TEXT("BadAnchorPreset"), UButton::StaticClass(),
-        FName(TEXT("PrimaryButton")), WBP);
-    if (!TestNotNull(TEXT("Test fixture WBP created"), WBP))
+    FScratchWBP Scratch(TEXT("BadAnchorPreset"), UButton::StaticClass(),
+        FName(TEXT("PrimaryButton")));
+    if (!TestNotNull(TEXT("Test fixture WBP created"), Scratch.WBP))
     {
         return false;
     }
 
     TSharedPtr<FJsonObject> Params = MakeStringParams({
-        { TEXT("asset_path"),  AssetPath },
+        { TEXT("asset_path"),  Scratch.AssetPath },
         { TEXT("widget_name"), TEXT("PrimaryButton") },
         { TEXT("preset"),      TEXT("middle_of_nowhere") }
     });
@@ -463,11 +604,9 @@ bool FMonolithUISetBrushBadDrawTypeEnumeratesValidOptionsTest::RunTest(const FSt
 {
     using namespace MonolithUI::ErrorFormattingTests;
 
-    UWidgetBlueprint* WBP = nullptr;
-    const FString AssetPath = CreateScratchWBP(
-        TEXT("BadDrawType"), UImage::StaticClass(),
-        FName(TEXT("PrimaryImage")), WBP);
-    if (!TestNotNull(TEXT("Test fixture WBP created"), WBP))
+    FScratchWBP Scratch(TEXT("BadDrawType"), UImage::StaticClass(),
+        FName(TEXT("PrimaryImage")));
+    if (!TestNotNull(TEXT("Test fixture WBP created"), Scratch.WBP))
     {
         return false;
     }
@@ -475,7 +614,7 @@ bool FMonolithUISetBrushBadDrawTypeEnumeratesValidOptionsTest::RunTest(const FSt
     // UImage::Brush is the canonical FSlateBrush property name. set_brush
     // walks property_name dotted segments; a single-segment path is fine.
     TSharedPtr<FJsonObject> Params = MakeStringParams({
-        { TEXT("asset_path"),    AssetPath },
+        { TEXT("asset_path"),    Scratch.AssetPath },
         { TEXT("widget_name"),   TEXT("PrimaryImage") },
         { TEXT("property_name"), TEXT("Brush") },
         { TEXT("draw_type"),     TEXT("LightningBolt") } // not a valid draw type
