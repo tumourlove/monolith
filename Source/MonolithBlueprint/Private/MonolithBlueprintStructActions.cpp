@@ -41,14 +41,14 @@ void FMonolithBlueprintStructActions::RegisterActions(FMonolithToolRegistry& Reg
 	// to be done by hand in the editor, and its schema could not be read back at all.
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("get_struct_fields"),
-		TEXT("Read the field schema of a User Defined Struct, in declaration order. Types are reported in the same grammar add_variable / add_struct_field accept, so the output round-trips straight back into the writers. Returns name (the display name the other struct-field actions target), type, guid, var_name, default_value and tooltip."),
+		TEXT("Read the field schema of a User Defined Struct, in declaration order. Types are reported in the same grammar add_variable / add_struct_field accept, so a reported type can be fed straight back into the writers. Returns name (the display name the other struct-field actions target), type, guid, var_name, default_value and tooltip. A never-named member is flagged 'placeholder': every new struct is seeded with one because a struct can never be empty, so when reproducing this schema in a FRESH struct, configure that struct's own placeholder (set_struct_field_type / rename_struct_field) rather than adding over it."),
 		FMonolithActionHandler::CreateStatic(&HandleGetStructFields),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("User Defined Struct asset path, e.g. /Game/Data/S_MyStruct"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("add_struct_field"),
-		TEXT("Append a field to an existing User Defined Struct, optionally positioned after a named field. Recompiles the struct; assets that break it are reported as 'dependents' but are NOT recompiled by this call."),
+		TEXT("Append a field to an existing User Defined Struct, optionally positioned after a named field. Recompiles the struct; assets that break it are reported as 'dependents' but are NOT recompiled by this call. A name that collides with the struct's seeded placeholder member is refused with the recipe for configuring it instead (it cannot be deleted first -- a struct can never be empty)."),
 		FMonolithActionHandler::CreateStatic(&HandleAddStructField),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"),  TEXT("User Defined Struct asset path"))
@@ -1347,6 +1347,45 @@ namespace MonolithStructFieldDetail
 		return nullptr;
 	}
 
+	/**
+	 * True for a member that still carries the name the ENGINE generated for it,
+	 * i.e. one that nobody has ever named.
+	 *
+	 * This matters because a User Defined Struct can never be empty --
+	 * RemoveVariable hardcodes bAllowToMakeEmpty = false -- so the engine seeds
+	 * every newly created struct with one placeholder bool. That member is added
+	 * with an empty name base, which FMemberVariableNameHelper::Generate renders
+	 * as "MemberVar_<n>"; RenameVariable afterwards writes the caller's string
+	 * verbatim, so a field still matching that shape has never been renamed.
+	 * (Identical in 5.7 and 5.8: StructureEditorUtils.cpp:235-263.)
+	 *
+	 * A caller replaying a get_struct_fields dump into a fresh struct collides
+	 * with this member on its first write and CANNOT delete it out of the way
+	 * first. Identifying it is what makes such a dump actionable, so it is
+	 * flagged on read and named in the collision error.
+	 */
+	static bool IsUnnamedPlaceholder(const FString& FriendlyName)
+	{
+		const FString Prefix(TEXT("MemberVar_"));
+		if (!FriendlyName.StartsWith(Prefix, ESearchCase::CaseSensitive))
+		{
+			return false;
+		}
+		const FString Suffix = FriendlyName.RightChop(Prefix.Len());
+		if (Suffix.IsEmpty())
+		{
+			return false;
+		}
+		for (const TCHAR Char : Suffix)
+		{
+			if (!FChar::IsDigit(Char))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
 	/** Comma-joined field list, so a no-such-field error can be acted on. */
 	static FString DescribeAvailableFields(const TArray<FStructVariableDescription>& Desc)
 	{
@@ -1385,10 +1424,19 @@ namespace MonolithStructFieldDetail
 
 	static TSharedPtr<FJsonObject> DescribeField(const FStructVariableDescription& D)
 	{
+		const FString Name = D.FriendlyName.IsEmpty() ? D.VarName.ToString() : D.FriendlyName;
+
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-		Obj->SetStringField(TEXT("name"), D.FriendlyName.IsEmpty() ? D.VarName.ToString() : D.FriendlyName);
+		Obj->SetStringField(TEXT("name"), Name);
 		// Reported in the same grammar the writers accept, so get -> add round-trips.
 		Obj->SetStringField(TEXT("type"), DescribePinType(D.ToPinType()));
+		if (IsUnnamedPlaceholder(Name))
+		{
+			// Flagged rather than hidden: it IS a real member of the struct, but it
+			// is the one a caller replaying this dump has to configure rather than
+			// add (see IsUnnamedPlaceholder).
+			Obj->SetBoolField(TEXT("placeholder"), true);
+		}
 		Obj->SetStringField(TEXT("guid"), D.VarGuid.ToString());
 		Obj->SetStringField(TEXT("var_name"), D.VarName.ToString());
 		if (!D.DefaultValue.IsEmpty()) { Obj->SetStringField(TEXT("default_value"), D.DefaultValue); }
@@ -1484,9 +1532,15 @@ FMonolithActionResult FMonolithBlueprintStructActions::HandleGetStructFields(con
 	if (!Struct) { return FMonolithActionResult::Error(Error); }
 
 	TArray<TSharedPtr<FJsonValue>> Fields;
+	FString PlaceholderName;
 	for (const FStructVariableDescription& D : *Desc)
 	{
 		Fields.Add(MakeShared<FJsonValueObject>(DescribeField(D)));
+		const FString Name = D.FriendlyName.IsEmpty() ? D.VarName.ToString() : D.FriendlyName;
+		if (PlaceholderName.IsEmpty() && IsUnnamedPlaceholder(Name))
+		{
+			PlaceholderName = Name;
+		}
 	}
 
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
@@ -1494,6 +1548,16 @@ FMonolithActionResult FMonolithBlueprintStructActions::HandleGetStructFields(con
 	Root->SetStringField(TEXT("struct_name"), Struct->GetName());
 	Root->SetNumberField(TEXT("field_count"), Fields.Num());
 	Root->SetArrayField(TEXT("fields"), Fields);
+	if (!PlaceholderName.IsEmpty())
+	{
+		// Called out at the top level because it changes how this dump can be
+		// replayed: every fresh struct carries one of these, so a caller
+		// reproducing this schema elsewhere hits it on the first write.
+		Root->SetStringField(TEXT("placeholder_field"), PlaceholderName);
+		Root->SetStringField(TEXT("placeholder_note"), FString::Printf(
+			TEXT("%s has never been named, so it is the member the engine seeds every new struct with (a User Defined Struct can never be empty). When reproducing this schema in another struct, configure that struct's own placeholder with set_struct_field_type / rename_struct_field instead of adding over it, or add the other fields first and then remove_struct_field it."),
+			*PlaceholderName));
+	}
 	Root->SetBoolField(TEXT("success"), true);
 	return FMonolithActionResult::Success(Root);
 }
@@ -1517,8 +1581,19 @@ FMonolithActionResult FMonolithBlueprintStructActions::HandleAddStructField(cons
 	{
 		return FMonolithActionResult::Error(TEXT("Both name and type are required"));
 	}
-	if (FindField(*Desc, FieldName))
+	if (const FStructVariableDescription* Existing = FindField(*Desc, FieldName))
 	{
+		// The collision a caller is most likely to hit first, and the one the
+		// generic message gives no way out of: they are adding over the
+		// never-named member the engine seeds every struct with, which cannot be
+		// deleted first because a struct can never be empty.
+		if (IsUnnamedPlaceholder(Existing->FriendlyName))
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("%s on %s is the placeholder member the engine seeds every new struct with, not a field anyone authored -- and it cannot be removed first, because a User Defined Struct can never be empty. Configure it instead of adding over it: set_struct_field_type to give it the type you want, then rename_struct_field to name it. Alternatively add your other fields first and then remove_struct_field it, which only becomes legal once the struct has more than one member."),
+				*FieldName, *Struct->GetName()));
+		}
+
 		return FMonolithActionResult::Error(FString::Printf(
 			TEXT("Field %s already exists on %s. Use rename_struct_field or set_struct_field_type to change it."),
 			*FieldName, *Struct->GetName()));

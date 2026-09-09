@@ -116,6 +116,20 @@ namespace MonolithStructFieldTests
 		return (Desc && Desc->Num() > 0) ? (*Desc)[0].FriendlyName : FString();
 	}
 
+	/**
+	 * The member get_struct_fields flags as the engine's seeded placeholder, if
+	 * the struct still has one. Empty once every member has been named.
+	 */
+	static FString ReadPlaceholderField(const FMonolithActionResult& Result)
+	{
+		FString Name;
+		if (Result.bSuccess && Result.Result.IsValid())
+		{
+			Result.Result->TryGetStringField(TEXT("placeholder_field"), Name);
+		}
+		return Name;
+	}
+
 	/** Collect name -> type from a get_struct_fields payload, in declaration order. */
 	static bool ReadFields(const FMonolithActionResult& Result,
 		TArray<TPair<FString, FString>>& OutFields)
@@ -231,12 +245,23 @@ bool FMonolithStructFieldEngineContractTest::RunTest(const FString& /*Parameters
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: get_struct_fields output feeds straight back into add_struct_field.
+// Test 2: a get_struct_fields dump replays into a fresh struct.
 //
 // The read action is only useful as an input to the writers if the type grammar
 // survives the trip. Containers are where it breaks: PinTypeToString alone
 // reports array:int as plain `int`, and "map:" plus a key type alone parses back
 // as "a map with no value type".
+//
+// The replay is driven the way a caller actually has to drive it, not the way
+// the contract first read. A User Defined Struct can never be empty, so the
+// engine seeds every new one with a placeholder member -- which means the
+// destination is NOT blank, and a dump replayed naively collides with that
+// member on its very first write and cannot delete it out of the way. The
+// documented recipe is to configure the placeholder into the first field
+// (set_struct_field_type + rename_struct_field) and add the rest, and that is
+// what this test does. The grammar is still what is under test: a type that
+// failed to round-trip would either be refused by the writer or come back
+// different in the final comparison.
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FMonolithStructFieldRoundTripTest,
@@ -274,14 +299,76 @@ bool FMonolithStructFieldRoundTripTest::RunTest(const FString& /*Parameters*/)
 			R.bSuccess);
 	}
 
+	const FMonolithActionResult SourceDump =
+		FMonolithBlueprintStructActions::HandleGetStructFields(Params(Source.Path));
 	TArray<TPair<FString, FString>> SourceFields;
-	TestTrue(TEXT("get_struct_fields reads the source struct"),
-		ReadFields(FMonolithBlueprintStructActions::HandleGetStructFields(Params(Source.Path)), SourceFields));
+	TestTrue(TEXT("get_struct_fields reads the source struct"), ReadFields(SourceDump, SourceFields));
 
-	// Feed every reported type back in. A type that does not round-trip fails
-	// here rather than silently producing a differently-typed field.
-	for (const TPair<FString, FString>& Field : SourceFields)
+	// The dump is not just the fields the caller added: the engine's placeholder
+	// is a real member and comes back with them. Flagging it is what makes the
+	// dump replayable, so assert the flag rather than the absence of the field.
+	const FString SourcePlaceholder = ReadPlaceholderField(SourceDump);
+	TestFalse(TEXT("the source dump flags its seeded placeholder"), SourcePlaceholder.IsEmpty());
+	if (TestTrue(TEXT("the dump has more entries than the fields that were added"),
+			SourceFields.Num() == Types.Num() + 1))
 	{
+		TestEqual(TEXT("the placeholder is the first entry in the dump"),
+			SourceFields[0].Key, SourcePlaceholder);
+	}
+
+	const FMonolithActionResult DestBefore =
+		FMonolithBlueprintStructActions::HandleGetStructFields(Params(Dest.Path));
+	const FString DestPlaceholder = ReadPlaceholderField(DestBefore);
+	if (!TestFalse(TEXT("the fresh destination has a seeded placeholder of its own"),
+			DestPlaceholder.IsEmpty()))
+	{
+		Source.Destroy();
+		Dest.Destroy();
+		return false;
+	}
+
+	// The wall every naive replay hits first. The refusal has to carry the way
+	// out, because the obvious move -- delete it and start clean -- is the one
+	// thing the engine forbids.
+	{
+		TSharedPtr<FJsonObject> P = Params(Dest.Path);
+		P->SetStringField(TEXT("name"), DestPlaceholder);
+		P->SetStringField(TEXT("type"), TEXT("bool"));
+		const FMonolithActionResult R = FMonolithBlueprintStructActions::HandleAddStructField(P);
+		TestFalse(TEXT("adding over the seeded placeholder is refused"), R.bSuccess);
+		TestTrue(TEXT("the refusal names the action that configures it instead"),
+			R.ErrorMessage.Contains(TEXT("set_struct_field_type")));
+		TestTrue(TEXT("the refusal explains why it cannot simply be deleted first"),
+			R.ErrorMessage.Contains(TEXT("can never be empty")));
+	}
+
+	// Replay the dump the documented way: the destination's placeholder hosts
+	// the first entry, everything after it is added. Feeding a reported type
+	// back into a writer is the round-trip claim, and a type that does not
+	// survive it fails here rather than silently producing a different field.
+	for (int32 i = 0; i < SourceFields.Num(); ++i)
+	{
+		const TPair<FString, FString>& Field = SourceFields[i];
+		if (i == 0)
+		{
+			TSharedPtr<FJsonObject> Retype = Params(Dest.Path);
+			Retype->SetStringField(TEXT("name"), DestPlaceholder);
+			Retype->SetStringField(TEXT("type"), Field.Value);
+			const FMonolithActionResult TypeResult =
+				FMonolithBlueprintStructActions::HandleSetStructFieldType(Retype);
+			TestTrue(FString::Printf(TEXT("the placeholder takes the reported type '%s' (%s)"),
+				*Field.Value, *TypeResult.ErrorMessage), TypeResult.bSuccess);
+
+			TSharedPtr<FJsonObject> Rename = Params(Dest.Path);
+			Rename->SetStringField(TEXT("name"), DestPlaceholder);
+			Rename->SetStringField(TEXT("new_name"), Field.Key);
+			const FMonolithActionResult NameResult =
+				FMonolithBlueprintStructActions::HandleRenameStructField(Rename);
+			TestTrue(FString::Printf(TEXT("the placeholder takes the reported name '%s' (%s)"),
+				*Field.Key, *NameResult.ErrorMessage), NameResult.bSuccess);
+			continue;
+		}
+
 		TSharedPtr<FJsonObject> P = Params(Dest.Path);
 		P->SetStringField(TEXT("name"), Field.Key);
 		P->SetStringField(TEXT("type"), Field.Value);
@@ -294,15 +381,17 @@ bool FMonolithStructFieldRoundTripTest::RunTest(const FString& /*Parameters*/)
 	TestTrue(TEXT("get_struct_fields reads the destination struct"),
 		ReadFields(FMonolithBlueprintStructActions::HandleGetStructFields(Params(Dest.Path)), DestFields));
 
-	// Both structs carry their own seeded member first, so compare by name.
-	for (const TPair<FString, FString>& Field : SourceFields)
+	// Compared by index, which locks declaration order as well as the types:
+	// the replayed struct must read back exactly as the struct it came from.
+	if (TestEqual(TEXT("the replayed struct has the same number of fields"),
+			DestFields.Num(), SourceFields.Num()))
 	{
-		const TPair<FString, FString>* Match = DestFields.FindByPredicate(
-			[&Field](const TPair<FString, FString>& D) { return D.Key == Field.Key; });
-		if (TestNotNull(*FString::Printf(TEXT("%s exists on the round-tripped struct"), *Field.Key), Match))
+		for (int32 i = 0; i < SourceFields.Num(); ++i)
 		{
-			TestEqual(FString::Printf(TEXT("%s keeps its reported type"), *Field.Key),
-				Match->Value, Field.Value);
+			TestEqual(FString::Printf(TEXT("field %d keeps its name"), i),
+				DestFields[i].Key, SourceFields[i].Key);
+			TestEqual(FString::Printf(TEXT("%s keeps its reported type"), *SourceFields[i].Key),
+				DestFields[i].Value, SourceFields[i].Value);
 		}
 	}
 
