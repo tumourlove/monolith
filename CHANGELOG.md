@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The MCP proxies default to `http://127.0.0.1:9316/mcp` instead of `http://localhost:9316/mcp`.** On Windows `localhost` resolves to `::1` first, and the editor's listener does not accept on `::1`, so each connection waited about two seconds for the refused IPv6 attempt before falling back to `127.0.0.1`. `Scripts/monolith_proxy.py` (urllib) paid that on every request, including the health check; `Tools/MonolithProxy` (WinHTTP) at least on the first request of each process. `Templates/.mcp.json.example` and the docs use the same address. `MONOLITH_URL` still overrides the default.
+
 ## [0.24.0] - 2026-10-18
 
 > **Action count is approximate.** **~1,400+ actions across 26 in-tree namespaces** — query `monolith_discover()` for the live figure.
