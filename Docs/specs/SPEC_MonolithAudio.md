@@ -63,7 +63,7 @@ Source-of-truth: PR [#18](https://github.com/tumourlove/monolith/pull/18) by **@
 
 Naming disambiguates from the Builder-side actions: PR's `get_graph_data` → `get_metasound_document` (vs Builder-side `get_metasound_graph`); PR's `get_node_details` → `inspect_metasound_node_instance` (vs Builder-side `get_metasound_node_info`); PR's `get_connections` → `get_metasound_document_connections` (vs Builder-side `list_metasound_connections`); PR's `get_user_parameters` → `get_metasound_user_parameters` (vs Builder-side `get_metasound_input_names`).
 
-Companion deep indexer: `FMetaSoundIndexer` lives in `MonolithIndex/Private/Indexers/MetaSoundIndexer.cpp`, also from PR #18 by @alakangas. Sentinel-class registration mirroring `FNiagaraIndexer`. Walks all project MetaSounds at reindex time and records nodes / edges / variables / dependencies into `ProjectIndex.db` for cross-asset query via `project_query`. Throttled via `FMonolithMemoryHelper`. Toggle: `bIndexMetaSounds` (default true) under Editor Preferences → Plugins → Monolith → Indexing → Deep Indexers.
+Companion deep indexer: `FMetaSoundIndexer` lives in `MonolithIndex/Private/Indexers/MetaSoundIndexer.cpp`, also from PR #18 by @alakangas. Sentinel-class registration mirroring `FNiagaraIndexer`. Walks all project MetaSounds at reindex time and records nodes / edges / variables / dependencies into `ProjectIndex.db` for cross-asset query via `project_query`. Throttled via `FMonolithMemoryHelper`. Toggle: `bIndexMetaSounds` (default true) under Project Settings → Plugins → Monolith → Indexing → Deep Indexers.
 
 ### Key Actions
 

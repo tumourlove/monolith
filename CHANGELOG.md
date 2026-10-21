@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The plugin's default settings file is read.** `UMonolithSettings` is `config=Monolith`, and the engine loads a plugin's own branch from `Config/Base<Name>.ini` / `Config/Default<Name>.ini`; any other file in the plugin's `Config/` folder only modifies a branch of the same name, and `MonolithSettings` names no branch, so `Config/MonolithSettings.ini` was skipped and editing it did nothing. It is now `Config/DefaultMonolith.ini`. Its module toggles used names that match no property (`bBlueprintEnabled` and so on; the properties are `bEnableBlueprint` and so on), `LogVerbosity=3` would have parsed as `VeryVerbose` under the current four-value enum, and `DatabasePathOverride=` was not a valid `FDirectoryPath` value; these are corrected so the file restates the C++ defaults and loading it changes no behaviour. The docs now point at Project Settings, where `UMonolithSettings` actually appears.
+
 ## [0.24.0] - 2026-10-18
 
 > **Action count is approximate.** **~1,400+ actions across 26 in-tree namespaces** — query `monolith_discover()` for the live figure.
