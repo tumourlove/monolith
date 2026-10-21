@@ -456,11 +456,8 @@ namespace
         bOutCompiled = true;
 
         WBP->GetPackage()->MarkPackageDirty();
-        FSavePackageArgs SaveArgs;
-        SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-        SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
         const FString FileName = FPackageName::LongPackageNameToFilename(AssetPath, FPackageName::GetAssetPackageExtension());
-        UPackage::SavePackage(WBP->GetPackage(), WBP, *FileName, SaveArgs);
+        FMonolithAssetUtils::SaveAssetPackage(WBP->GetPackage());
         bOutSaved = true;
     }
 

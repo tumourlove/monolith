@@ -4,6 +4,7 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
 #include "AssetRegistry/AssetData.h"
+#include "FileHelpers.h"
 #include "UObject/SoftObjectPath.h"
 #include "UObject/UObjectHash.h"
 #include "UObject/Package.h"
@@ -194,4 +195,42 @@ TArray<FAssetData> FMonolithAssetUtils::GetAssetsByClass(const FTopLevelAssetPat
 FString FMonolithAssetUtils::GetAssetName(const FString& AssetPath)
 {
 	return FPackageName::GetShortName(AssetPath);
+}
+
+bool FMonolithAssetUtils::SaveAssetPackage(UPackage* Package, FString* OutError)
+{
+	auto Fail = [OutError](FString&& Reason) -> bool
+	{
+		UE_LOG(LogMonolith, Warning, TEXT("%s"), *Reason);
+		if (nullptr != OutError)
+		{
+			*OutError = MoveTemp(Reason);
+		}
+		return false;
+	};
+
+	if (nullptr == Package)
+	{
+		return Fail(TEXT("No package to save."));
+	}
+
+	// SavePackages silently drops these and still reports success.
+	if (Package == GetTransientPackage() || Package->HasAnyPackageFlags(PKG_CompiledIn))
+	{
+		return Fail(FString::Printf(TEXT("'%s' is not a savable asset package."), *Package->GetName()));
+	}
+
+	// Same guard UEditorAssetSubsystem::SaveLoadedAsset sets, so the save path takes its
+	// no-prompt branches instead of raising a modal the MCP caller cannot answer.
+	TGuardValue<bool> UnattendedScriptGuard(GIsRunningUnattendedScript, true);
+
+	const TArray<UPackage*> Packages = { Package };
+	if (!UEditorLoadingAndSavingUtils::SavePackages(Packages, /*bOnlyDirty*/ false))
+	{
+		return Fail(FString::Printf(
+			TEXT("Saving '%s' failed. If it is under revision control, check that it is not ")
+			TEXT("checked out or locked by someone else."), *Package->GetName()));
+	}
+
+	return true;
 }

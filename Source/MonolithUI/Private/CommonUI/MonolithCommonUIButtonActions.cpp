@@ -46,6 +46,7 @@
 #include "Components/TextBlock.h"
 #include "Blueprint/WidgetBlueprintGeneratedClass.h"
 #include "Input/CommonBoundActionBar.h"
+#include "MonolithAssetUtils.h"
 
 namespace MonolithCommonUIButton
 {
@@ -409,12 +410,7 @@ namespace MonolithCommonUIButton
 								FKismetEditorUtilities::CompileBlueprint(BP);
 								FAssetRegistryModule::AssetCreated(BP);
 								Pkg->MarkPackageDirty();
-								FSavePackageArgs SaveArgs;
-								SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-								SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-								UPackage::SavePackage(Pkg, BP,
-									*FPackageName::LongPackageNameToFilename(DefaultPath, FPackageName::GetAssetPackageExtension()),
-									SaveArgs);
+								FMonolithAssetUtils::SaveAssetPackage(Pkg);
 							}
 						}
 					}

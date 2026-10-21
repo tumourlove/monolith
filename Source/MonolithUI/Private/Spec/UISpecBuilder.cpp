@@ -78,6 +78,7 @@
 #if WITH_COMMONUI
 #include "CommonActivatableWidget.h"
 #include "CommonUserWidget.h"
+#include "MonolithAssetUtils.h"
 #endif
 
 #define LOCTEXT_NAMESPACE "MonolithUISpecBuilder"
@@ -837,13 +838,10 @@ namespace MonolithUI::SpecBuilderInternal
         FAssetRegistryModule::AssetCreated(WBP);
         WBP->GetPackage()->MarkPackageDirty();
 
-        FSavePackageArgs SaveArgs;
-        SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-        SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
         const FString PackageFilename = FPackageName::LongPackageNameToFilename(
             AssetPath, FPackageName::GetAssetPackageExtension());
 
-        if (!UPackage::SavePackage(WBP->GetPackage(), WBP, *PackageFilename, SaveArgs))
+        if (!FMonolithAssetUtils::SaveAssetPackage(WBP->GetPackage()))
         {
             OutError = FString::Printf(TEXT("UPackage::SavePackage failed for '%s'."), *AssetPath);
             return false;

@@ -133,6 +133,7 @@
 #include "GameFramework/WorldSettings.h"
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/PlayerStart.h"
+#include "MonolithAssetUtils.h"
 
 // --- Compile state ---
 
@@ -3591,11 +3592,7 @@ FMonolithActionResult FMonolithEditorActions::HandleImportTexture(
 
 	// Save the package
 	UPackage* Package = Texture->GetOutermost();
-	FString PackageFilename = FPackageName::LongPackageNameToFilename(
-		Package->GetName(), FPackageName::GetAssetPackageExtension());
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	UPackage::SavePackage(Package, Texture, *PackageFilename, SaveArgs);
+	FMonolithAssetUtils::SaveAssetPackage(Package);
 
 	// Return result
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
@@ -3835,11 +3832,7 @@ FMonolithActionResult FMonolithEditorActions::HandleStitchFlipbook(
 	Texture->MarkPackageDirty();
 
 	// Save
-	FString PackageFilename = FPackageName::LongPackageNameToFilename(
-		Package->GetName(), FPackageName::GetAssetPackageExtension());
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	bool bSaved = UPackage::SavePackage(Package, Texture, *PackageFilename, SaveArgs);
+	bool bSaved = FMonolithAssetUtils::SaveAssetPackage(Package);
 
 	if (!bSaved)
 	{

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Write actions check the asset out before saving.** About sixty save sites across every namespace called `UPackage::SavePackage` directly, which never talks to source control: under a provider that keeps files read-only until checked out the save failed, and without one the file changed on disk while source control still reported it unmodified. They now go through `FMonolithAssetUtils::SaveAssetPackage`, which wraps `UEditorLoadingAndSavingUtils::SavePackages` (the call `UEditorAssetSubsystem::SaveLoadedAsset` uses): it checks the package out, saves without dialogs, marks a new file for add, and returns whether the package reached disk. Map packages save through the editor's world path, so their external packages are saved and checked out with them. `editor save_packages` keeps its own handling from #147, and the UI test fixtures keep the direct save so automation runs do not touch source control.
+
 ## [0.24.0] - 2026-10-18
 
 > **Action count is approximate.** **~1,400+ actions across 26 in-tree namespaces** — query `monolith_discover()` for the live figure.

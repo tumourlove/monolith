@@ -676,12 +676,7 @@ FMonolithActionResult FMonolithGASAttributeActions::HandleCreateAttributeSet(con
 		}
 
 		// Save the package
-		FString PackageFilename = FPackageName::LongPackageNameToFilename(
-			Package->GetName(), FPackageName::GetAssetPackageExtension());
-		FSavePackageArgs SaveArgs;
-		SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-		SaveArgs.TopLevelFlags = RF_Standalone;
-		UPackage::SavePackage(Package, Blueprint, *PackageFilename, SaveArgs);
+		FMonolithAssetUtils::SaveAssetPackage(Package);
 
 		// Notify asset registry
 		FAssetRegistryModule::AssetCreated(Blueprint);
@@ -858,12 +853,7 @@ FMonolithActionResult FMonolithGASAttributeActions::HandleAddAttribute(const TSh
 		UPackage* OuterPackage = BP->GetOutermost();
 		if (OuterPackage)
 		{
-			FString PackageFilename = FPackageName::LongPackageNameToFilename(
-				OuterPackage->GetName(), FPackageName::GetAssetPackageExtension());
-			FSavePackageArgs SaveArgs;
-			SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-			SaveArgs.TopLevelFlags = RF_Standalone;
-			UPackage::SavePackage(OuterPackage, BP, *PackageFilename, SaveArgs);
+			FMonolithAssetUtils::SaveAssetPackage(OuterPackage);
 		}
 
 		TSharedPtr<FJsonObject> Result = MonolithGAS::MakeAssetResult(AttrSet,
@@ -2309,17 +2299,13 @@ FMonolithActionResult FMonolithGASAttributeActions::HandleCreateAttributeInitDat
 	Package->MarkPackageDirty();
 	FAssetRegistryModule::AssetCreated(DataTable);
 
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-	FSavePackageResultStruct SaveResult = UPackage::Save(Package, DataTable,
-		*FPackageName::LongPackageNameToFilename(SavePath, FPackageName::GetAssetPackageExtension()), SaveArgs);
+	const bool bSaveOk = FMonolithAssetUtils::SaveAssetPackage(Package);
 
 	TSharedPtr<FJsonObject> Result = MonolithGAS::MakeAssetResult(SavePath,
 		FString::Printf(TEXT("Created FAttributeMetaData DataTable with %d rows for %s"), RowCount, *SetClassName));
 	Result->SetNumberField(TEXT("row_count"), RowCount);
 	Result->SetStringField(TEXT("attribute_set"), SetClassName);
-	Result->SetBoolField(TEXT("saved"), SaveResult.Result == ESavePackageResult::Success);
+	Result->SetBoolField(TEXT("saved"), bSaveOk);
 	return FMonolithActionResult::Success(Result);
 }
 

@@ -46,6 +46,7 @@
 #include "WidgetBlueprintEditorUtils.h"
 #include "MonolithJsonUtils.h"        // R3b: ErrOptionalDepUnavailable for the §5.5 helper
 #include "MonolithToolRegistry.h"
+#include "MonolithAssetUtils.h"
 #include "WidgetBlueprintFactory.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "UObject/SavePackage.h"
@@ -433,12 +434,7 @@ namespace MonolithUIInternal
         FKismetEditorUtilities::CompileBlueprint(WBP);
         FAssetRegistryModule::AssetCreated(WBP);
         WBP->GetPackage()->MarkPackageDirty();
-        FSavePackageArgs SaveArgs;
-        SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-        SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-        UPackage::SavePackage(WBP->GetPackage(), WBP,
-            *FPackageName::LongPackageNameToFilename(SavePath, FPackageName::GetAssetPackageExtension()),
-            SaveArgs);
+        FMonolithAssetUtils::SaveAssetPackage(WBP->GetPackage());
     }
 
     // Helper: add a child widget to a panel, returning the slot

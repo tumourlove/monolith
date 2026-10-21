@@ -25,6 +25,7 @@
 // JSON.
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "MonolithAssetUtils.h"
 
 namespace
 {
@@ -94,10 +95,7 @@ namespace
 
 		const FString PackageFilename = FPackageName::LongPackageNameToFilename(
 			Pkg->GetName(), FPackageName::GetAssetPackageExtension());
-		FSavePackageArgs SaveArgs;
-		SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		const bool bSaved = UPackage::SavePackage(Pkg, Sound, *PackageFilename, SaveArgs);
+		const bool bSaved = FMonolithAssetUtils::SaveAssetPackage(Pkg);
 		if (!bSaved)
 		{
 			OutError = FString::Printf(TEXT("Failed to save package '%s'"), *PackageFilename);

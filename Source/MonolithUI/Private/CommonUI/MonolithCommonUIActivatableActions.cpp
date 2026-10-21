@@ -32,6 +32,7 @@
 #include "UObject/SavePackage.h"
 #include "UObject/UObjectIterator.h"
 #include "Engine/World.h"
+#include "MonolithAssetUtils.h"
 
 namespace MonolithCommonUIActivatable
 {
@@ -90,12 +91,7 @@ namespace MonolithCommonUIActivatable
 
 		FAssetRegistryModule::AssetCreated(Wbp);
 		Package->MarkPackageDirty();
-		FSavePackageArgs SaveArgs;
-		SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		UPackage::SavePackage(Package, Wbp,
-			*FPackageName::LongPackageNameToFilename(SavePath, FPackageName::GetAssetPackageExtension()),
-			SaveArgs);
+		FMonolithAssetUtils::SaveAssetPackage(Package);
 
 		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetStringField(TEXT("asset_path"), SavePath);

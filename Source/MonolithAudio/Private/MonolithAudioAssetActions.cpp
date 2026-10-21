@@ -29,6 +29,7 @@
 // JSON
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "MonolithAssetUtils.h"
 
 // ============================================================================
 // Helpers
@@ -137,11 +138,7 @@ TAsset* FMonolithAudioAssetActions::CreateAudioAsset(const FString& AssetPath, F
 	Pkg->MarkPackageDirty();
 
 	// Save to disk
-	FString PackageFilename = FPackageName::LongPackageNameToFilename(AssetPath, FPackageName::GetAssetPackageExtension());
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-	UPackage::SavePackage(Pkg, Asset, *PackageFilename, SaveArgs);
+	FMonolithAssetUtils::SaveAssetPackage(Pkg);
 
 	return Asset;
 }
@@ -1663,10 +1660,7 @@ FMonolithActionResult FMonolithAudioAssetActions::CreateTestWave(const TSharedPt
 	Pkg->MarkPackageDirty();
 
 	const FString PackageFilename = FPackageName::LongPackageNameToFilename(AssetPath, FPackageName::GetAssetPackageExtension());
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-	const bool bSaved = UPackage::SavePackage(Pkg, Wave, *PackageFilename, SaveArgs);
+	const bool bSaved = FMonolithAssetUtils::SaveAssetPackage(Pkg);
 	if (!bSaved)
 	{
 		return FMonolithActionResult::Error(FString::Printf(

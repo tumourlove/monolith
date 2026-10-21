@@ -293,12 +293,7 @@ FMonolithActionResult FMonolithGASTargetActions::HandleCreateTargetActor(const T
 	Package->MarkPackageDirty();
 	FAssetRegistryModule::AssetCreated(NewBP);
 
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-	FString PackageFilename = FPackageName::LongPackageNameToFilename(
-		Package->GetName(), FPackageName::GetAssetPackageExtension());
-	bool bSaved = UPackage::SavePackage(Package, NewBP, *PackageFilename, SaveArgs);
+	bool bSaved = FMonolithAssetUtils::SaveAssetPackage(Package);
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("asset_path"), SavePath);

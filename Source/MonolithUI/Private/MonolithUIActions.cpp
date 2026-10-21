@@ -37,6 +37,7 @@
 // walk that get_widget_tree / set_widget_property uses.
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Engine/Blueprint.h"
+#include "MonolithAssetUtils.h"
 
 // Phase 2 (Item #7 / #14) — file-static handler forward declarations. Lives
 // here rather than as static members on FMonolithUIActions because the plan
@@ -349,12 +350,7 @@ FMonolithActionResult FMonolithUIActions::HandleCreateWidgetBlueprint(const TSha
     {
         FAssetRegistryModule::AssetCreated(WBP);
         Package->MarkPackageDirty();
-        FSavePackageArgs SaveArgs;
-        SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-        SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-        UPackage::SavePackage(Package, WBP,
-            *FPackageName::LongPackageNameToFilename(SavePath, FPackageName::GetAssetPackageExtension()),
-            SaveArgs);
+        FMonolithAssetUtils::SaveAssetPackage(Package);
     }
 
     // Build result

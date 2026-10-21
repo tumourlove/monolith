@@ -25,6 +25,7 @@
 #include "AssetToolsModule.h"                   // FAssetToolsModule
 #include "IAssetTools.h"                        // IAssetTools::CreateUniqueAssetName
 #include "Modules/ModuleManager.h"              // FModuleManager::LoadModuleChecked
+#include "MonolithAssetUtils.h"
 
 namespace MonolithUI::FontIngestInternal
 {
@@ -272,12 +273,7 @@ FMonolithActionResult MonolithUI::FFontIngestActions::HandleImportFontFamily(con
             const FString FacePackageFilename = FPackageName::LongPackageNameToFilename(
                 FacePackage->GetName(), FPackageName::GetAssetPackageExtension());
 
-            FSavePackageArgs SaveArgs;
-            SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-            SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-            SaveArgs.SaveFlags = SAVE_NoError;
-            const bool bSaved = UPackage::SavePackage(
-                FacePackage, FaceAsset, *FacePackageFilename, SaveArgs);
+            const bool bSaved = FMonolithAssetUtils::SaveAssetPackage(FacePackage);
             if (!bSaved)
             {
                 Warnings.Add(FString::Printf(
@@ -353,12 +349,7 @@ FMonolithActionResult MonolithUI::FFontIngestActions::HandleImportFontFamily(con
         const FString FamilyPackageFilename = FPackageName::LongPackageNameToFilename(
             FamilyPackage->GetName(), FPackageName::GetAssetPackageExtension());
 
-        FSavePackageArgs SaveArgs;
-        SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-        SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-        SaveArgs.SaveFlags = SAVE_NoError;
-        const bool bSaved = UPackage::SavePackage(
-            FamilyPackage, FamilyFont, *FamilyPackageFilename, SaveArgs);
+        const bool bSaved = FMonolithAssetUtils::SaveAssetPackage(FamilyPackage);
         if (!bSaved)
         {
             return FMonolithActionResult::Error(

@@ -81,6 +81,7 @@
 #include "Blueprint/WidgetNavigation.h"
 #include "Types/NavigationMetaData.h"
 #include "Types/SlateEnums.h"
+#include "MonolithAssetUtils.h"
 
 namespace MonolithCommonUITemplate
 {
@@ -419,13 +420,7 @@ namespace MonolithCommonUITemplate
         if (!Package || !Wbp) return;
         FAssetRegistryModule::AssetCreated(Wbp);
         Package->MarkPackageDirty();
-        FSavePackageArgs SaveArgs;
-        SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-        SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-        UPackage::SavePackage(
-            Package, Wbp,
-            *FPackageName::LongPackageNameToFilename(SavePath, FPackageName::GetAssetPackageExtension()),
-            SaveArgs);
+        FMonolithAssetUtils::SaveAssetPackage(Package);
     }
 
     // ----- Shared: pull a JSON string array (optional) ------------------------
