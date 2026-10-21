@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`editor run_python` no longer leaves its top-level names in the console globals.** Inline code runs in the editor's shared console globals whatever `file_scope` says (a private scope is only applied to a `.py` path), and `FPyReferenceCollector` reports every UObject a live Python wrapper points at, so an object a script left in a variable stayed reachable after the call, together with the world it belongs to. After each call, the names that did not exist before it are removed, `builtins._` is cleared and `gc.collect()` runs. Pass `keep_globals=true` to keep the old behaviour, where a later call could read names an earlier one defined. The `python_script` and `stages` Python hooks of `run_pie_smoke` / `capture_pie_movement_clip` and the in-session probes get the same cleanup. Values stored outside the top-level globals (module attributes, closures, registered callbacks) are not touched.
+
 ## [0.24.0] - 2026-10-18
 
 > **Action count is approximate.** **~1,400+ actions across 26 in-tree namespaces** — query `monolith_discover()` for the live figure.

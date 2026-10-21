@@ -33,6 +33,7 @@
 
 #include "IPythonScriptPlugin.h" // #4 delayed in-session python probes
 #include "PythonScriptTypes.h"   // FPythonCommandEx
+#include "MonolithPythonGlobalsScope.h"
 
 // Phase 9 (OG-E3): PIE-session-scoped profiling (CSV profiler + Unreal Insights trace).
 // Both live in Core; no new module dependency is required (Core is already a public dep of
@@ -325,7 +326,10 @@ namespace
 					FPythonCommandEx Cmd;
 					Cmd.Command = Python;
 					Cmd.ExecutionMode = EPythonCommandExecutionMode::ExecuteFile;
-					OutPythonOk = PythonPlugin->ExecPythonCommandEx(Cmd);
+					{
+						FMonolithPythonGlobalsScope GlobalsScope(*PythonPlugin);
+						OutPythonOk = PythonPlugin->ExecPythonCommandEx(Cmd);
+					}
 					OutPythonOutput = Cmd.CommandResult;
 				}
 				else

@@ -78,6 +78,7 @@
 // Scripting action includes (HOFF 7)
 #include "IPythonScriptPlugin.h"
 #include "PythonScriptTypes.h"
+#include "MonolithPythonGlobalsScope.h"
 #include "LevelEditorSubsystem.h"
 #include "Editor.h"
 
@@ -839,7 +840,8 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.Required(TEXT("command"), TEXT("string"), TEXT("Python source. May be inline code, a single statement, or a file path with optional space-separated args (when mode=execute_file)."))
 			.Optional(TEXT("mode"), TEXT("string"), TEXT("Execution mode: execute_file (default — multi-statement script or file with args), execute_statement (single stmt, prints result), evaluate_statement (single expr, returns result in 'result')."), TEXT("execute_file"))
 			.Optional(TEXT("unattended"), TEXT("bool"), TEXT("Set GIsRunningUnattendedScript=true to suppress UI dialogs."), TEXT("false"))
-			.Optional(TEXT("file_scope"), TEXT("string"), TEXT("Scope for execute_file: private (isolated locals/globals — default), public (shared with REPL console)."), TEXT("private"))
+			.Optional(TEXT("file_scope"), TEXT("string"), TEXT("Scope for execute_file when command is a .py path: private (isolated locals/globals — default), public (shared with REPL console). Inline code always runs in the shared console globals."), TEXT("private"))
+			.Optional(TEXT("keep_globals"), TEXT("bool"), TEXT("Keep the top-level names this call creates in the shared console globals. By default they are removed after the call, builtins._ is cleared and gc.collect() runs, so UObjects (and their worlds) referenced from those names can be garbage collected. Names stored elsewhere, such as module attributes, are never removed."), TEXT("false"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("load_level"),
@@ -4658,6 +4660,9 @@ FMonolithActionResult FMonolithEditorActions::HandleRunPython(const TSharedPtr<F
 	bool bUnattended = false;
 	Params->TryGetBoolField(TEXT("unattended"), bUnattended);
 
+	bool bKeepGlobals = false;
+	Params->TryGetBoolField(TEXT("keep_globals"), bKeepGlobals);
+
 	FString ScopeStr = TEXT("private");
 	Params->TryGetStringField(TEXT("file_scope"), ScopeStr);
 	EPythonFileExecutionScope FileScope = EPythonFileExecutionScope::Private;
@@ -4699,7 +4704,11 @@ FMonolithActionResult FMonolithEditorActions::HandleRunPython(const TSharedPtr<F
 	Cmd.FileExecutionScope = FileScope;
 	Cmd.Flags = bUnattended ? EPythonCommandFlags::Unattended : EPythonCommandFlags::None;
 
-	const bool bOk = Python->ExecPythonCommandEx(Cmd);
+	bool bOk = false;
+	{
+		FMonolithPythonGlobalsScope GlobalsScope(*Python, !bKeepGlobals);
+		bOk = Python->ExecPythonCommandEx(Cmd);
+	}
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetBoolField(TEXT("ok"), bOk);
@@ -5372,6 +5381,7 @@ namespace MonolithEditorPieSmoke
 					FPythonCommandEx Cmd;
 					Cmd.Command = PythonScript;
 					Cmd.ExecutionMode = EPythonCommandExecutionMode::ExecuteFile;
+					FMonolithPythonGlobalsScope GlobalsScope(*Python);
 					Python->ExecPythonCommandEx(Cmd);
 				}
 			}
@@ -5682,7 +5692,10 @@ namespace MonolithEditorPieSmoke
 					FPythonCommandEx Cmd;
 					Cmd.Command = Stages.PrePie.Python;
 					Cmd.ExecutionMode = EPythonCommandExecutionMode::ExecuteFile;
-					Stages.PrePie.bPythonOk = Python->ExecPythonCommandEx(Cmd);
+					{
+						FMonolithPythonGlobalsScope GlobalsScope(*Python);
+						Stages.PrePie.bPythonOk = Python->ExecPythonCommandEx(Cmd);
+					}
 					Stages.PrePie.PythonOutput = Cmd.CommandResult;
 				}
 				else { Stages.PrePie.PythonOutput = TEXT("Python not available in this build."); }
