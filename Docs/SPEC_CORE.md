@@ -341,7 +341,7 @@ Setting names below match the actual `UMonolithSettings` UPROPERTY identifiers i
 |---------|---------|-------------|
 | ServerPort | 9316 | MCP HTTP server port |
 | bAutoUpdateEnabled | True | GitHub Releases auto-check on startup |
-| DatabasePathOverride | (empty) | Override default DB path (Plugins/Monolith/Saved/) |
+| DatabasePathOverride | (empty) | Override the ProjectIndex.db directory (relative = from the project directory). Default: Plugins/Monolith/Saved/, or <Project>/Saved/Monolith/ when the plugin lives outside the project |
 | EngineSourceDBPathOverride | (empty) | Override engine source DB path |
 | EngineSourcePath | (empty) | Override engine source directory |
 | bEnableBlueprint | True | Enable Blueprint module |
