@@ -50,12 +50,19 @@ namespace
 
 SIZE_T FMonolithMemoryHelper::GetCurrentMemoryUsageMB()
 {
+#if PLATFORM_WINDOWS
 	SIZE_T ProcessMemoryBytes = 0;
 	if (!FPlatformProcess::GetApplicationMemoryUsage(FPlatformProcess::GetCurrentProcessId(), &ProcessMemoryBytes))
 	{
 		return 0;
 	}
 	return ProcessMemoryBytes / BytesPerMB;
+#else
+	// GetApplicationMemoryUsage is implemented only on Windows; elsewhere the generic version is a Fatal error, which
+	// killed every Linux editor the moment the level pass took a memory snapshot. This process's own physical memory
+	// (the resident set on Linux and the footprint on Mac) is the same measure ShouldThrottle uses.
+	return FPlatformMemory::GetStats().UsedPhysical / BytesPerMB;
+#endif
 }
 
 SIZE_T FMonolithMemoryHelper::GetAvailableMemoryMB()
