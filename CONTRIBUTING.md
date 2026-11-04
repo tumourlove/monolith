@@ -36,7 +36,7 @@ YourProject/Plugins/Monolith/   — edit, build, commit, push from here
 
 ## Code Structure
 
-Monolith ships **~1,400+ actions across 26 namespaces** (an approximate, rounded-down figure -- run `monolith_discover()` for the live count; per-module counts are deliberately not listed here because they go stale the moment an action is added).
+Monolith ships **~1,400+ actions across 27 namespaces** (an approximate, rounded-down figure -- run `monolith_discover()` for the live count; per-module counts are deliberately not listed here because they go stale the moment an action is added).
 
 Each module owns a specific domain:
 
@@ -58,6 +58,7 @@ Each module owns a specific domain:
 | **MonolithAudio** | `audio` | Sound cues, waves, classes, submixes, attenuation, concurrency, MetaSounds |
 | **MonolithAudioRuntime** | -- | Runtime support for the audio module (registers no MCP actions) |
 | **MonolithLevelSequence** | `level_sequence` | Sequencer inspection: bindings, directors, event bindings |
+| **MonolithGameplayTags** | `gameplay_tags` | Gameplay tag references (Asset Registry), unused/broken audits, ini tag editing; independent of GAS |
 | **MonolithReflectionIntel** | `cppreflect`, `reflect`, `decision`, `risk`, `pipeline`, `network` (plus additions to existing namespaces) | Reflection intelligence over project C++ and assets: UCLASS/UPROPERTY/UFUNCTION queries, replication audits, decision records, churn/hotspot analysis, release readiness |
 | **MonolithComboGraph** | `combograph` | Optional ComboGraph integration (gated on `WITH_COMBOGRAPH`) |
 | **MonolithLogicDriver** | `logicdriver` | Optional Logic Driver Pro integration (gated on `WITH_LOGICDRIVER`) |

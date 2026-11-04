@@ -2,7 +2,7 @@
 
 **Version:** v0.24.0 · **Last updated:** 2026-10-18
 
-**In-tree action total is approximate: ~1,400+ actions across 26 in-tree namespaces** (public, in-tree only; all active by default, plus 45 experimental town-gen actions that register only when `bEnableProceduralTownGen=true`). v0.23.0 adds two namespaces — `input` (Enhanced Input, 13) and `localization` (read-only culture + StringTable, 4) — plus 6 read-only `chooser` actions and 5 `blueprint` User Defined Struct field actions. The surface is too large to track to the unit — **query `monolith_discover()` (its `total_actions` field) for the exact live figure.** The `ui` namespace re-exports 4 GAS UI binding actions as aliases. v0.19.0 adds an LLM C++ authoring ergonomics pack (`source`, 8 actions + `editor.get_build_errors` fix hints), live-PIE introspection + driving and stat-group readout (`editor`), anim-node binding read/write and time-series PIE sampling (`animation`), a Blueprint variable census + contract reconciliation (`blueprint`), and T3D asset-text export (`project`); plus two first-launch fixes (issue #70) and a ~40% smaller `tools/list` manifest. The `monolith_*` meta-tools (`discover`, `status`, `update`, `reindex`, `guide`) plus the `bulk_fill_query` and `describe_query` framework dispatchers round out the MCP tool count. This total EXCLUDES sibling-plugin actions — they ship in their own repos and are never in the public release zip.
+**In-tree action total is approximate: ~1,400+ actions across 27 in-tree namespaces** (public, in-tree only; all active by default, plus 45 experimental town-gen actions that register only when `bEnableProceduralTownGen=true`). v0.23.0 adds two namespaces — `input` (Enhanced Input, 13) and `localization` (read-only culture + StringTable, 4) — plus 6 read-only `chooser` actions and 5 `blueprint` User Defined Struct field actions. The surface is too large to track to the unit — **query `monolith_discover()` (its `total_actions` field) for the exact live figure.** The `ui` namespace re-exports 4 GAS UI binding actions as aliases. v0.19.0 adds an LLM C++ authoring ergonomics pack (`source`, 8 actions + `editor.get_build_errors` fix hints), live-PIE introspection + driving and stat-group readout (`editor`), anim-node binding read/write and time-series PIE sampling (`animation`), a Blueprint variable census + contract reconciliation (`blueprint`), and T3D asset-text export (`project`); plus two first-launch fixes (issue #70) and a ~40% smaller `tools/list` manifest. The `monolith_*` meta-tools (`discover`, `status`, `update`, `reindex`, `guide`) plus the `bulk_fill_query` and `describe_query` framework dispatchers round out the MCP tool count. This total EXCLUDES sibling-plugin actions — they ship in their own repos and are never in the public release zip.
 
 The per-namespace numbers in the Table of Contents and body sections below are kept for structure, not precision — they drift with every action added and are no longer maintained to the unit. Treat them as ballpark; the live figure always comes from `monolith_discover()`.
 
@@ -37,6 +37,7 @@ The per-namespace numbers in the Table of Contents and body sections below are k
 | [ai](#ai) | 221 | Behavior Trees, State Trees, EQS, Blackboards, AI Controllers, Perception, Smart Objects, Navigation, Mass, Zone Graph, runtime PIE inspection, scaffolds |
 | [logicdriver](#logicdriver) | 66 | Logic Driver Pro state machines: graph CRUD, runtime PIE control, scaffolds, dialogue (conditional on `WITH_LOGICDRIVER`) |
 | [audio](#audio) | 98 | Sound Cue + MetaSound graph CRUD + document introspection, attenuation/class/mix/submix/concurrency, batch ops, Sound Cue templates, perception bindings |
+| [gameplay_tags](#gameplay_tags) | 14 | Gameplay tag references from the Asset Registry, unused/broken audits, ini tag declaring/editing/renaming/moving/removing. Independent of `bEnableGAS` |
 | [level_sequence](#level_sequence) | 8 | Level Sequence inspection: binding inventory (legacy + UE 5.7 custom bindings), Director Blueprint functions/variables, event-track bindings, cross-sequence reverse lookup |
 | [bulk_fill](#bulk_fill) | 2 | Reflection-walker bulk property fill across 12 per-namespace adapters (`apply`, `list_namespaces`) |
 | [describe](#describe) | 3 | Read-only schema introspection for the same 12 adapters (`schema`, `list_targets`, `action_schema`) |
@@ -1424,6 +1425,31 @@ Stamp a `UMonolithSoundPerceptionUserData` onto a `USoundBase` (Cue / MetaSoundS
 > **v0.23.0 — Sound Cue edits no longer crash the editor when the cue's asset editor is closed (#125, reported by @M0rtaI).** A `USoundCue` whose editor has never been opened has no editor graph, and `FinalizeCue` called `LinkGraphNodesFromSoundNodes()` unconditionally — an engine implementation that `CastChecked`s every sound node's editor graph-node back pointer, i.e. a fatal assert rather than a soft failure. `connect_sound_cue_nodes` crashed earlier still, inside `InsertChildNode`. Sound Cue edits now rebuild a missing editor graph before touching it, and skip the graph link entirely when it still cannot be linked safely. **The runtime node chain — the part that plays — is updated either way.** All twelve Sound Cue mutation actions report `graph_link_skipped: true` (and log a warning) when the visual link had to be skipped.
 
 See `Plugins/Monolith/Docs/specs/SPEC_MonolithAudio.md`.
+
+---
+
+## gameplay_tags
+
+Gameplay tags - references read from the Asset Registry SearchableName graph (no reindex), unused and broken tag audits, and ini tag writes through `IGameplayTagsEditorModule`. **14 actions.** `MonolithGameplayTags` module, gated by `bEnableGameplayTags`, independent of GAS.
+
+| Action | Key params | Notes |
+|--------|-----------|-------|
+| `ping` | - | Smoke test |
+| `find_references` | `tag`, `include_children?`, `limit?` | Packages referencing a tag, with asset name and class |
+| `get_asset_tags` | `asset_path` | Tags one package references |
+| `list` | `prefix?`, `limit?` | Tags with parent, child count, sources, dev comment |
+| `get_tag_info` | `tag` | One tag, direct and subtree reference counts |
+| `find_unused` | `prefix?`, `limit?`, `scan_source?` | Tags no asset, project C++ literal or project config setting uses; native tags apart; `branch_root` |
+| `find_broken` | `path_prefix?`, `limit?` | References to unknown tags; redirected ones apart |
+| `list_sources` | - | Declaring sources and their types |
+| `add_source` | `name` | New `Config/Tags/<name>.ini` |
+| `add` | `tags`, `comment?`, `source?`, `restricted?`, `allow_non_restricted_children?` | Declare tags, validated with reasons |
+| `update` | `tag`, `comment?`, `allow_non_restricted_children?` | Edit a declaration |
+| `remove` | `tags`, `dry_run?` | Refused while assets, C++ or config use the tag |
+| `rename` | `old_tag`, `new_tag`, `rename_children?`, `dry_run?` | Redirect-based rename; lists what still spells the old name |
+| `move` | `tags`, `target_source` | Between ini sources |
+
+See `Plugins/Monolith/Docs/specs/SPEC_MonolithGameplayTags.md`.
 
 ---
 
