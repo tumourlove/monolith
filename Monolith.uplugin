@@ -72,6 +72,10 @@
 			"Enabled": true
 		},
 		{
+			"Name": "GameplayTagsEditor",
+			"Enabled": true
+		},
+		{
 			"Name": "StateTree",
 			"Enabled": true
 		},
@@ -218,6 +222,11 @@
 		},
 		{
 			"Name": "MonolithLevelSequence",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "MonolithGameplayTags",
 			"Type": "Editor",
 			"LoadingPhase": "Default"
 		},

@@ -220,6 +220,11 @@ public:
 	UPROPERTY(config, EditAnywhere, Category="Modules", DisplayName="Enable Mesh Module")
 	bool bEnableMesh = true;
 
+	UPROPERTY(config, EditAnywhere, Category="Modules",
+		meta=(DisplayName="Enable Gameplay Tags Module",
+			  ToolTip="Registers gameplay_tags_query actions: tag reference lookups from the Asset Registry, unused and broken tag audits, and declaring, editing, renaming, moving and removing ini tags. Independent of the GAS toggle."))
+	bool bEnableGameplayTags = true;
+
 	// --- Optional Module Toggles ---
 
 	UPROPERTY(config, EditAnywhere, Category="Modules|Optional",
