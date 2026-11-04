@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`gameplay_tags` namespace (new `MonolithGameplayTags` module, 14 actions).** Tag references are read from the Asset Registry `SearchableName` graph, the data the editor itself uses for "still referenced by" - live, no reindex, and covering tags wherever they are serialized (properties, graph pins, level components, containers). On Lyra 5.7 that is 743 references on 197 of 448 tags, against 33 on 29 from the Asset Registry metadata that `gas search_tag_usage` reads; on Lyra 5.8 every answer matches the engine's experimental `GameplayTagsToolset` package for package. Read: `find_references`, `get_asset_tags`, `list`, `get_tag_info`, `find_unused` (dead tags and dead branches, checked against assets, project C++ string literals and `(TagName="...")` config settings, native tags reported apart), `find_broken`. Write, through `IGameplayTagsEditorModule`: `list_sources`, `add_source`, `add`, `update`, `remove` (refused while anything uses the tag, `dry_run`), `rename` (redirect-based, reports what still spells the old name, `dry_run`), `move`. Every refusal comes back with its reason, which the engine module only shows as a toast. Works around two engine behaviours: `UpdateTagInINI` cannot change a dev comment, and `RenameTagInINI` with children leaves the renamed parent undeclared. Gated by the new `bEnableGameplayTags` setting and independent of `bEnableGAS`. Builds on 5.7 and 5.8 with no version gate. Automation tests `Monolith.GameplayTags.*`.
+
 ## [0.24.0] - 2026-10-18
 
 > **Action count is approximate.** **~1,400+ actions across 26 in-tree namespaces** — query `monolith_discover()` for the live figure.
