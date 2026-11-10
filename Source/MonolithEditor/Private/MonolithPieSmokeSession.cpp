@@ -22,6 +22,10 @@
 #include "UObject/Class.h"           // FProperty iteration / SameType / CopyCompleteValue
 
 #include "UnrealClient.h"        // FViewport (PIE frame capture)
+#include "Engine/GameViewportClient.h" // include_ui: the PIE game viewport's own widget
+#include "Framework/Application/SlateApplication.h" // include_ui: FSlateApplication::TakeScreenshot of that widget
+#include "Widgets/SViewport.h"
+#include "Widgets/SWindow.h"
 #include "RenderingThread.h"     // FlushRenderingCommands (render-flush before first ReadPixels)
 #include "RHICommandList.h"      // FRHICommandListImmediate::ReadSurfaceData (guarded PIE read)
 #include "ImageUtils.h"          // FImageUtils::SaveImageAutoFormat
@@ -290,6 +294,90 @@ namespace
 
 		const FString Dir = FPaths::GetPath(OutputPath);
 		IFileManager::Get().MakeDirectory(*Dir, true);
+
+		FImage Image;
+		Image.Init(Size.X, Size.Y, ERawImageFormat::BGRA8, EGammaSpace::sRGB);
+		FMemory::Memcpy(Image.RawData.GetData(), Pixels.GetData(), Size.X * Size.Y * sizeof(FColor));
+		Out.bSaved = FImageUtils::SaveImageAutoFormat(*OutputPath, Image);
+		Out.bValid = Out.bSaved && !Out.bUniform;
+		return Out;
+	}
+
+	// include_ui: the PIE game viewport's OWN widget as the player sees it (Slate composites the game
+	// and the UMG / HUD layers into it), taken here and written to a PNG here.
+	//
+	// This used to be FScreenshotRequest::RequestScreenshot(..., bShowUI=true): a GLOBAL request that
+	// whichever viewport draws first services (FViewport::Draw calls ProcessScreenShots on each,
+	// UnrealClient.cpp:1872). On a seated editor the level editor's own viewport draws too, and
+	// FEditorViewportClient::ProcessScreenShots (EditorViewportClient.cpp:7025) takes the request: it saves
+	// ITS picture under the requested name and never reaches the game viewport. bInRestrictToGameViewport
+	// does not help - it is stored (UnrealClient.cpp:253) and read only for UI composition
+	// (GameViewportClient.cpp:2397), never by the editor viewport.
+	//
+	// The widget is asked for its own window first (TakeScreenshot asserts on a widget that is not in its
+	// window's tree); a widget that is not there or not visible is reported as "not drawn", like the scene
+	// path's undrawn viewport. Returns an FCaptureResult like CapturePieFrame, with the same uniformity verdict.
+	//
+	// TakeScreenshot hands the renderer a POINTER to the pixel array and then draws the window. If Slate does
+	// not draw that window (minimized, or hidden while not rendering offscreen; a modal window active, which is
+	// drawn instead; a zero size) the renderer keeps the pointer (SlateRHIRenderer.cpp:1720, :1757-1761) and the
+	// NEXT real draw of the window writes its readback into it. So the call is not made unless Slate will draw the
+	// window now - the same condition as FSlateApplication::DrawWindowAndChildren - and a refusal is "not drawn"
+	// (the slot is used up, the clip does not retry every tick, as for the scene path's undrawn viewport). The
+	// array is also module-level storage that outlives the call, so a case the guard misses writes into live
+	// memory, never a dead stack frame.
+	TArray<FColor>& PieUiShotStorage()
+	{
+		static TArray<FColor> Storage;
+		return Storage;
+	}
+
+	FCaptureResult CapturePieFrameWithUi(UWorld* PieWorld, const FString& OutputPath)
+	{
+		FCaptureResult Out;
+
+		UGameViewportClient* GameViewport = PieWorld ? PieWorld->GetGameViewport() : nullptr;
+		const TSharedPtr<SViewport> Widget = GameViewport ? GameViewport->GetGameViewportWidget() : nullptr;
+		if (!Widget.IsValid() || !FSlateApplication::IsInitialized())
+		{
+			Out.bNotDrawn = true;
+			return Out;
+		}
+		FSlateApplication& Slate = FSlateApplication::Get();
+		const TSharedPtr<SWindow> Window = Slate.FindWidgetWindow(Widget.ToSharedRef());
+		FWidgetPath WidgetPath;
+		if (!Window.IsValid() || !Slate.GeneratePathToWidgetUnchecked(Widget.ToSharedRef(), WidgetPath))
+		{
+			Out.bNotDrawn = true;
+			return Out;
+		}
+		const FVector2f WindowSize = Window->GetSizeInScreen();
+		const FVector2f WidgetSize = WidgetPath.FindArrangedWidget(Widget.ToSharedRef()).Get(FArrangedWidget::GetNullWidget()).Geometry.GetDrawSize();
+		const bool bWindowDrawn = Slate.IsRenderingOffScreen() || (Window->IsVisible() && !Window->IsWindowMinimized());
+		if (Slate.GetActiveModalWindow().IsValid() || !bWindowDrawn ||
+			static_cast<int32>(WindowSize.X) <= 0 || static_cast<int32>(WindowSize.Y) <= 0 ||
+			static_cast<int32>(WidgetSize.X) <= 0 || static_cast<int32>(WidgetSize.Y) <= 0)
+		{
+			Out.bNotDrawn = true;
+			return Out;
+		}
+
+		TArray<FColor>& Pixels = PieUiShotStorage();
+		Pixels.Reset();
+		FIntVector Size = FIntVector::ZeroValue;
+		if (!Slate.TakeScreenshot(Widget.ToSharedRef(), Pixels, Size) ||
+			Size.X <= 0 || Size.Y <= 0 || Pixels.Num() < Size.X * Size.Y)
+		{
+			return Out; // Pixels is left as it is: the renderer may still point at it
+		}
+
+		Out.bUniform = PixelsAreUniform(Pixels);
+		for (FColor& Px : Pixels)
+		{
+			Px.A = 255; // the back buffer's alpha is not the picture's
+		}
+
+		IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutputPath), true);
 
 		FImage Image;
 		Image.Init(Size.X, Size.Y, ERawImageFormat::BGRA8, EGammaSpace::sRGB);
@@ -1327,43 +1415,15 @@ void FPieSmokeSessionManager::AdvanceSession(FPieSmokeSession& Session)
 			const FString FramePath = Session.OutputDir /
 				FString::Printf(TEXT("frame_%03d.png"), Session.CaptureFrameIndex);
 
-			if (Session.bIncludeUi)
-			{
-				// include_ui: ride the engine screenshot path — the same mechanism the
-				// `shot showui` console command uses (UGameViewportClient::HandleScreenshotCommand)
-				// — so Slate composites the full backbuffer (game + UMG) before the PNG is
-				// written. FViewport::ReadPixels below only ever sees the scene render target,
-				// which is why the default path captures an empty scene for UI work.
-				//
-				// bAddFilenameSuffix=false keeps FramePath verbatim: RequestScreenshot only
-				// prefixes GameScreenshotSaveDirectory when the name has no path separator,
-				// and OutputDir is already an absolute on-disk dir (ResolveCaptureOutputDir).
-				// The extension is already .png so none is appended.
-				//
-				// The write happens at END OF FRAME, so there is no pixel buffer to inspect
-				// here — the #7 uniformity/validity verdict cannot apply. These frames are
-				// recorded as requested-valid and the clip directory is the ground truth.
-				//
-				// UE 5.8 adds a trailing bInRestrictToGameViewport param to this overload;
-				// deliberately left at its default so docked-PIE framing is identical on
-				// 5.7 and 5.8.
-				FScreenshotRequest::RequestScreenshot(FramePath, /*bInShowUI=*/true, /*bAddFilenameSuffix=*/false);
-				Sample.FramePath = FramePath;
-				Sample.bFrameUniform = false;
-				Sample.bFrameValid = true;
-				if (Session.CaptureFrameIndex >= Session.DiscardFirstFrames)
-				{
-					++Session.ValidFrames;
-				}
-				Session.LastCaptureSeconds = SampleTime;
-				++Session.CaptureFrameIndex;
-			}
-			else
+			// include_ui frames are the PIE game viewport's own widget (CapturePieFrameWithUi), read
+			// and written right here, so they get the same saved / uniform / not-drawn accounting as the
+			// scene-only frames below (they used to be a global screenshot request written at end of frame,
+			// which a drawing editor viewport takes - see CapturePieFrameWithUi).
 			{
 				// #7 flush the render thread before the very first ReadPixels so a warm-up /
 				// uniform first frame is not produced in the first place.
 				const bool bFirstCapture = (Session.CaptureFrameIndex == 0);
-				const FCaptureResult Cap = CapturePieFrame(FramePath, bFirstCapture);
+				const FCaptureResult Cap = Session.bIncludeUi ? CapturePieFrameWithUi(PieWorld, FramePath) : CapturePieFrame(FramePath, bFirstCapture);
 				if (Cap.bSaved)
 				{
 					Sample.FramePath = FramePath;

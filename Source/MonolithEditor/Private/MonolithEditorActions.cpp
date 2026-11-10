@@ -623,7 +623,7 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.Optional(TEXT("marker"), TEXT("string"), TEXT("Log marker token. Default MONOLITH_CLIP."), TEXT("MONOLITH_CLIP"))
 			.Optional(TEXT("duration"), TEXT("number"), TEXT("Seconds the editor loop advances PIE before the session auto-completes (clamped 0-120). Default 5."), TEXT("5"))
 			.Optional(TEXT("capture_interval"), TEXT("number"), TEXT("Seconds between captured frames (clamped 0.05-5). Default 0.25."), TEXT("0.25"))
-			.Optional(TEXT("include_ui"), TEXT("bool"), TEXT("Capture the composited backbuffer (game + UMG/Slate UI) via the engine screenshot path — the `shot showui` mechanism — instead of the scene-only viewport read. Required for any UI iteration: the default ReadPixels path never sees UMG, so a UI capture comes back as an empty scene. CAVEATS: (1) the file is written at END OF FRAME (async), so the per-frame uniformity/validity check does NOT apply — these frames are reported as requested-valid and the clip directory is the ground truth; (2) with PIE docked in the editor the backbuffer is the WHOLE EDITOR WINDOW — use new-window PIE for a clean game+UI clip. Default false (no behaviour change)."), TEXT("false"))
+			.Optional(TEXT("include_ui"), TEXT("bool"), TEXT("Capture the PIE game viewport's own widget with the Slate UI composited into it (game + UMG/HUD), instead of the scene-only viewport read. Required for any UI iteration: the default ReadPixels path never sees UMG, so a UI capture comes back as an empty scene. The widget is taken and the PNG written in-process, so the per-frame uniformity/validity check applies like any other frame; the picture is the game viewport only, docked PIE or window PIE (never a global screenshot request, which a drawing editor viewport would take). Default false (no behaviour change)."), TEXT("false"))
 			.Optional(TEXT("sample_vars"), TEXT("array"), TEXT("AnimInstance variable names sampled each frame. Default [GroundSpeed, bShouldMove, DesiredYawDelta]."))
 			.Optional(TEXT("pawn_class"), TEXT("string"), TEXT("Substring of the target pawn's class name to sample. Omit to use the first player controller's pawn."))
 			.Optional(TEXT("console_script"), TEXT("array"), TEXT("Console commands run on the PIE world at start (drive the movement)."))
@@ -5866,17 +5866,9 @@ namespace MonolithEditorPieSmoke
 					TEXT("window, or realtime-off viewport consumes the clip duration."),
 					CapturedFrames, ExpectedFrames, S.NotDrawnFrames, S.MaxCaptureGapSeconds));
 			}
-			// include_ui frames are written asynchronously at end-of-frame by the engine
-			// screenshot path, so no pixel buffer reaches this accounting — the counts are
-			// frames REQUESTED, not frames verified. Say so rather than implying a check ran.
-			Validity->SetBoolField(TEXT("uniformity_checked"), !S.bIncludeUi);
-			if (S.bIncludeUi)
-			{
-				Validity->SetStringField(TEXT("note"),
-					TEXT("include_ui=true: frames are written end-of-frame by the engine screenshot ")
-					TEXT("path, so per-frame uniformity/validity was NOT verified — these counts are ")
-					TEXT("frames requested. Inspect the files in output_dir to confirm."));
-			}
+			// include_ui frames are the game viewport's own widget, taken and written in-process
+			// (CapturePieFrameWithUi), so every frame's pixels are checked like a scene-only frame.
+			Validity->SetBoolField(TEXT("uniformity_checked"), true);
 			if (S.InvalidFrames > 0 && S.ValidFrames == 0)
 			{
 				Validity->SetStringField(TEXT("hint"),
