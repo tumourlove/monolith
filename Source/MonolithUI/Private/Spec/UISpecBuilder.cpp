@@ -27,6 +27,7 @@
 // partially mutated.
 
 #include "Spec/UISpecBuilder.h"
+#include "MonolithAssetUtils.h"
 #include "Runtime/Launch/Resources/Version.h"
 
 #include "Spec/UISpecValidator.h"
