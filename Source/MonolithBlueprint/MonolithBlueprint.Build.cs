@@ -22,6 +22,11 @@ public class MonolithBlueprint : ModuleRules
 			"SubobjectDataInterface",
 			"Kismet",
 			"KismetCompiler",
+			// Slate + GraphEditor: measure_graph_nodes / auto_layout(measured)
+			// build node widgets to read real sizes and pin positions (#161).
+			"Slate",
+			"SlateCore",
+			"GraphEditor",
 			"EditorScriptingUtilities",
 			"EnhancedInput",
 			"Json",

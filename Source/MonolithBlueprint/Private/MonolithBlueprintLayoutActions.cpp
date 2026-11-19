@@ -15,6 +15,7 @@
 #include "Modules/ModuleManager.h"
 #include "IMonolithGraphFormatter.h"
 #include "MonolithBlueprintNodeGeometry.h"
+#include "MonolithBlueprintMeasureActions.h"
 
 // ============================================================================
 //  Registration
@@ -35,7 +36,12 @@ void FMonolithBlueprintLayoutActions::RegisterActions(FMonolithToolRegistry& Reg
 			.Optional(TEXT("layout_mode"), TEXT("string"), TEXT("Layout mode: 'all' (default, lays out every node), 'new_only' (moves only nodes at 0,0 or piled on top of another node, leaving hand-placed nodes alone — note that add_node's cascading default placement lands nodes in clear space, so those are NOT candidates; use 'all' to fold new nodes into the flow), 'selected' (only node_ids)"), TEXT("all"))
 			.Optional(TEXT("node_ids"), TEXT("array"), TEXT("Array of node IDs to layout (for 'selected' mode)"))
 			.Optional(TEXT("formatter"), TEXT("string"), TEXT("Formatter: 'auto' (default, prefers Blueprint Assist if available), 'blueprint_assist' (BA only, fails if unavailable), or 'monolith' (built-in Sugiyama)"), TEXT("auto"))
+			.Optional(TEXT("measured"), TEXT("boolean"), TEXT("Built-in formatter only: measure the real node sizes and pin positions in the Blueprint editor (see measure_graph_nodes) instead of estimating them. Columns widen to fit the widest node, and exec-connected nodes line up their exec pins rather than their tops. Opens the graph in the editor. Falls back to the estimate, with a warning, when measuring is unavailable (e.g. -nullrhi)."), TEXT("false"))
 			.Build());
+
+	// measure_graph_nodes lives in its own file; its registration is chained
+	// here so the module's registration list stays unchanged.
+	FMonolithBlueprintMeasureActions::RegisterActions(Registry);
 }
 
 // ============================================================================
@@ -74,9 +80,16 @@ namespace
 		float Barycenter = 0.f;
 		bool bPinned = false;       // If true, don't move this node
 
-		// Estimated dimensions
+		// Estimated dimensions. These stay the estimate even in measured mode:
+		// new_only's pile test must agree with add_node's placement, which only
+		// ever has the estimate (MonolithBlueprintNodeGeometry).
 		float EstWidth = 300.f;
 		float EstHeight = 74.f;
+
+		// Dimensions used to place the node: the measured size when measured
+		// mode produced one, otherwise the estimate.
+		float LayoutWidth = 300.f;
+		float LayoutHeight = 74.f;
 
 		// Original position (saved before layout for comment containment checks)
 		int32 OrigX = 0;
@@ -177,7 +190,12 @@ namespace
 	void EstimateNodeSize(FLayoutNode& LN)
 	{
 		MonolithBlueprintNodeGeometry::EstimateNodeSize(LN.GraphNode, LN.EstWidth, LN.EstHeight);
+		LN.LayoutWidth = LN.EstWidth;
+		LN.LayoutHeight = LN.EstHeight;
 	}
+
+	/** Smallest clear gap between two columns when columns are sized from measured widths. */
+	constexpr int32 LayoutMeasuredMinColumnGap = 50;
 
 	/** The node's footprint at the position it held when layout started. */
 	MonolithBlueprintNodeGeometry::FNodeRect OriginalRect(const FLayoutNode& LN)
@@ -274,6 +292,9 @@ FMonolithActionResult FMonolithBlueprintLayoutActions::HandleAutoLayout(const TS
 	FString Formatter = Params->GetStringField(TEXT("formatter"));
 	if (Formatter.IsEmpty()) Formatter = TEXT("auto");
 
+	bool bMeasuredRequested = false;
+	Params->TryGetBoolField(TEXT("measured"), bMeasuredRequested);
+
 	// Validate formatter
 	if (Formatter != TEXT("auto") && Formatter != TEXT("blueprint_assist") && Formatter != TEXT("monolith"))
 	{
@@ -366,6 +387,26 @@ FMonolithActionResult FMonolithBlueprintLayoutActions::HandleAutoLayout(const TS
 	}
 	// --- Built-in Sugiyama formatter continues below ---
 
+	// --- Optional: real node sizes and pin positions (issue #161) ---
+	MonolithBlueprintGraphMeasure::FMeasuredGraph Measured;
+	FString MeasureWarning;
+	bool bUseMeasured = false;
+	if (bMeasuredRequested)
+	{
+		FString MeasureError;
+		if (MonolithBlueprintGraphMeasure::MeasureBlueprintGraph(Graph, /*bRestoreView=*/true, Measured, MeasureError)
+			&& Measured.Num() > 0)
+		{
+			bUseMeasured = true;
+		}
+		else
+		{
+			MeasureWarning = FString::Printf(TEXT("measured=true but node measurement was unavailable (%s); used estimated sizes."),
+				MeasureError.IsEmpty() ? TEXT("no node widgets were built") : *MeasureError);
+			Measured.Reset();
+		}
+	}
+
 	// ========================================================================
 	//  PHASE 0: PREPROCESSING — Build node list, classify, build adjacency
 	// ========================================================================
@@ -401,6 +442,15 @@ FMonolithActionResult FMonolithBlueprintLayoutActions::HandleAutoLayout(const TS
 		LN.OrigY = Node->NodePosY;
 		LN.Kind = Kind;
 		EstimateNodeSize(LN);
+		if (bUseMeasured)
+		{
+			const MonolithBlueprintGraphMeasure::FMeasuredNode* M = Measured.Find(Node);
+			if (M && M->Size.X > 0.f && M->Size.Y > 0.f)
+			{
+				LN.LayoutWidth = M->Size.X;
+				LN.LayoutHeight = M->Size.Y;
+			}
+		}
 
 		// Determine pinned status based on layout mode.
 		// "new_only" needs the whole node set before it can decide (see the
@@ -860,11 +910,32 @@ FMonolithActionResult FMonolithBlueprintLayoutActions::HandleAutoLayout(const TS
 	//  PHASE 4: COORDINATE ASSIGNMENT
 	// ========================================================================
 
+	int32 ExecPinsAligned = 0;
 	{
+		// Column origins. With estimates every column is HSpacing apart. With
+		// measured sizes a column also has to clear the widest node of the
+		// column before it, so wide nodes cannot run into the next column.
+		TArray<int32> ColumnX;
+		ColumnX.SetNumZeroed(MaxLayer + 1);
+		for (int32 LayerIdx = 1; LayerIdx <= MaxLayer; LayerIdx++)
+		{
+			int32 Pitch = HSpacing;
+			if (bUseMeasured)
+			{
+				float PrevMaxWidth = 0.f;
+				for (int32 NI : Layers[LayerIdx - 1])
+				{
+					PrevMaxWidth = FMath::Max(PrevMaxWidth, LayoutNodes[NI].LayoutWidth);
+				}
+				Pitch = FMath::Max(HSpacing, FMath::CeilToInt(PrevMaxWidth) + LayoutMeasuredMinColumnGap);
+			}
+			ColumnX[LayerIdx] = ColumnX[LayerIdx - 1] + Pitch;
+		}
+
 		for (int32 LayerIdx = 0; LayerIdx <= MaxLayer; LayerIdx++)
 		{
 			const TArray<int32>& Layer = Layers[LayerIdx];
-			int32 X = LayerIdx * HSpacing;
+			int32 X = ColumnX[LayerIdx];
 			float CurY = 0.f;
 
 			for (int32 i = 0; i < Layer.Num(); i++)
@@ -872,9 +943,40 @@ FMonolithActionResult FMonolithBlueprintLayoutActions::HandleAutoLayout(const TS
 				FLayoutNode& LN = LayoutNodes[Layer[i]];
 				LN.FinalX = X;
 				LN.FinalY = (int32)CurY;
-				CurY += LN.EstHeight + VSpacing;
+				CurY += LN.LayoutHeight + VSpacing;
 			}
 		}
+
+		// Measured mode: the Y that puts this node's input exec pin level with
+		// the output exec pin of an already-placed predecessor driving it.
+		auto FindExecAlignedY = [&](const FLayoutNode& LN, int32& OutY) -> bool
+		{
+			const MonolithBlueprintGraphMeasure::FMeasuredNode* SelfM = Measured.Find(LN.GraphNode);
+			if (!SelfM) return false;
+
+			for (const UEdGraphPin* InPin : LN.GraphNode->Pins)
+			{
+				if (!InPin || InPin->bHidden || InPin->Direction != EGPD_Input || !IsExecPin(InPin)) continue;
+				const MonolithBlueprintGraphMeasure::FMeasuredPin* SelfPin = SelfM->FindPin(InPin);
+				if (!SelfPin) continue;
+
+				for (const UEdGraphPin* SrcPin : InPin->LinkedTo)
+				{
+					if (!SrcPin) continue;
+					UEdGraphNode* SrcNode = SrcPin->GetOwningNode();
+					const int32* PredIdx = SrcNode ? NodeToIndex.Find(SrcNode) : nullptr;
+					if (!PredIdx || LayoutNodes[*PredIdx].Layer >= LN.Layer) continue;
+
+					const MonolithBlueprintGraphMeasure::FMeasuredNode* PredM = Measured.Find(SrcNode);
+					const MonolithBlueprintGraphMeasure::FMeasuredPin* PredPin = PredM ? PredM->FindPin(SrcPin) : nullptr;
+					if (!PredPin) continue;
+
+					OutY = LayoutNodes[*PredIdx].FinalY + FMath::RoundToInt(PredPin->Centre.Y - SelfPin->Centre.Y);
+					return true;
+				}
+			}
+			return false;
+		};
 
 		// Vertical alignment pass: for each node, try to center it on the average Y
 		// of its connected predecessors (if that doesn't cause overlap)
@@ -885,27 +987,40 @@ FMonolithActionResult FMonolithBlueprintLayoutActions::HandleAutoLayout(const TS
 			{
 				FLayoutNode& LN = LayoutNodes[Layer[i]];
 
-				// Compute average Y of predecessors
-				float SumY = 0.f;
-				int32 PredCount = 0;
-				for (int32 EI : LN.InEdges)
+				int32 DesiredY = 0;
+				const bool bExecAligned = bUseMeasured && FindExecAlignedY(LN, DesiredY);
+
+				if (!bExecAligned)
 				{
-					const FLayoutEdge& E = LayoutEdges[EI];
-					int32 PredIdx = E.bReversed ? E.ToNode : E.FromNode;
-					SumY += LayoutNodes[PredIdx].FinalY;
-					PredCount++;
+					// Compute average Y of predecessors
+					float SumY = 0.f;
+					int32 PredCount = 0;
+					for (int32 EI : LN.InEdges)
+					{
+						const FLayoutEdge& E = LayoutEdges[EI];
+						int32 PredIdx = E.bReversed ? E.ToNode : E.FromNode;
+						SumY += LayoutNodes[PredIdx].FinalY;
+						PredCount++;
+					}
+
+					if (PredCount == 0) continue;
+
+					DesiredY = (int32)(SumY / PredCount);
 				}
 
-				if (PredCount == 0) continue;
-
-				int32 DesiredY = (int32)(SumY / PredCount);
-
 				// Clamp: don't go above the bottom of the node above us
+				bool bClamped = false;
 				if (i > 0)
 				{
 					FLayoutNode& Above = LayoutNodes[Layer[i - 1]];
-					int32 MinY = Above.FinalY + (int32)Above.EstHeight + VSpacing;
+					int32 MinY = Above.FinalY + (int32)Above.LayoutHeight + VSpacing;
+					bClamped = DesiredY < MinY;
 					DesiredY = FMath::Max(DesiredY, MinY);
+				}
+
+				if (bExecAligned && !bClamped)
+				{
+					ExecPinsAligned++;
 				}
 
 				LN.FinalY = DesiredY;
@@ -977,8 +1092,8 @@ FMonolithActionResult FMonolithBlueprintLayoutActions::HandleAutoLayout(const TS
 
 				MinX = FMath::Min(MinX, NX);
 				MinY = FMath::Min(MinY, NY);
-				MaxX = FMath::Max(MaxX, NX + (int32)LN.EstWidth);
-				MaxY = FMath::Max(MaxY, NY + (int32)LN.EstHeight);
+				MaxX = FMath::Max(MaxX, NX + (int32)LN.LayoutWidth);
+				MaxY = FMath::Max(MaxY, NY + (int32)LN.LayoutHeight);
 				ContainedCount++;
 			}
 		}
@@ -1012,6 +1127,16 @@ FMonolithActionResult FMonolithBlueprintLayoutActions::HandleAutoLayout(const TS
 	ResultJson->SetStringField(TEXT("formatter_used"), TEXT("monolith"));
 	ResultJson->SetNumberField(TEXT("horizontal_spacing"), HSpacing);
 	ResultJson->SetNumberField(TEXT("vertical_spacing"), VSpacing);
+	ResultJson->SetStringField(TEXT("sizes_source"), bUseMeasured ? TEXT("measured") : TEXT("estimate"));
+	if (bUseMeasured)
+	{
+		ResultJson->SetNumberField(TEXT("nodes_measured"), Measured.Num());
+		ResultJson->SetNumberField(TEXT("exec_pins_aligned"), ExecPinsAligned);
+	}
+	if (!MeasureWarning.IsEmpty())
+	{
+		ResultJson->SetStringField(TEXT("warning"), MeasureWarning);
+	}
 
 	// Include per-layer node counts
 	TArray<TSharedPtr<FJsonValue>> LayerInfo;
