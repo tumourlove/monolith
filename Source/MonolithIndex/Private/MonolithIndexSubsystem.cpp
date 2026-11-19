@@ -1743,9 +1743,30 @@ void UMonolithIndexSubsystem::OnIndexingFinished(bool bSuccess)
 
 FString UMonolithIndexSubsystem::GetDatabasePath() const
 {
+	// The project index belongs to the project. DatabasePathOverride wins when set; a relative path is taken
+	// from the project directory.
+	const UMonolithSettings* Settings = GetDefault<UMonolithSettings>();
+	if (Settings && !Settings->DatabasePathOverride.Path.IsEmpty())
+	{
+		FString Dir = Settings->DatabasePathOverride.Path;
+		if (FPaths::IsRelative(Dir))
+		{
+			Dir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), Dir);
+		}
+		return Dir / TEXT("ProjectIndex.db");
+	}
 	TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("Monolith"));
 	if (Plugin.IsValid())
 	{
+		// A plugin mounted from outside the project (an engine plugin, or a shared folder listed in
+		// AdditionalPluginDirectories) can serve several projects, so its Saved/ folder is not per project.
+		// Keep the index in the project's own Saved/ then. A plugin inside the project is unchanged.
+		const FString PluginDir = FPaths::ConvertRelativePathToFull(Plugin->GetBaseDir());
+		const FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+		if (!FPaths::IsUnderDirectory(PluginDir, ProjectDir))
+		{
+			return FPaths::ProjectSavedDir() / TEXT("Monolith") / TEXT("ProjectIndex.db");
+		}
 		return Plugin->GetBaseDir() / TEXT("Saved") / TEXT("ProjectIndex.db");
 	}
 	return FPaths::ProjectPluginsDir() / TEXT("Monolith") / TEXT("Saved") / TEXT("ProjectIndex.db");

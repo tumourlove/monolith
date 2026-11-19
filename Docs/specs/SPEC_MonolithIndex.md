@@ -71,7 +71,7 @@
 - `fts_assets` — content=assets, tokenize='porter unicode61', columns: asset_name, asset_class, description, package_path, module_name
 - `fts_nodes` — content=nodes, tokenize='porter unicode61', columns: node_name, node_class, node_type
 
-**DB Location:** `Plugins/Monolith/Saved/ProjectIndex.db`
+**DB Location:** `Plugins/Monolith/Saved/ProjectIndex.db` when the plugin sits inside the project; `<Project>/Saved/Monolith/ProjectIndex.db` when the plugin is mounted from outside the project (engine plugin, or a shared `AdditionalPluginDirectories` folder). `DatabasePathOverride` (relative = from the project directory) overrides both.
 
 ### `asset_class` filter (v0.23.0)
 
