@@ -51,6 +51,11 @@
 // THE fix for the 2026-04-25 parallel-burst editor crash.
 #include "MonolithUIBulkFillAdapter.h"
 
+// Issue #173 -- UMG MVVM (ModelViewViewModel plugin) read/write actions.
+// The header is always included; FMVVMActions::Register is a no-op when
+// WITH_MVVM=0 (plugin not enabled in the .uproject, or release build).
+#include "MVVM/MonolithUIMVVMActions.h"
+
 #if WITH_COMMONUI
 #include "CommonUI/MonolithCommonUIActions.h"
 #include "Style/MonolithUIStyleService.h"   // Phase G: cache stats + shutdown
@@ -101,6 +106,9 @@ void FMonolithUIModule::StartupModule()
     // Phase H (2026-04-26) -- transactional spec builder + schema dump.
     // 2 actions: ui::build_ui_from_spec (the centerpiece) + ui::dump_ui_spec_schema.
     MonolithUI::FSpecActions::Register(Registry);
+
+    // Issue #173 -- ui::mvvm_* actions (registers nothing when WITH_MVVM=0).
+    MonolithUI::FMVVMActions::Register(Registry);
 
     // Phase 4 (2026-05-11) — bulk_fill / describe adapter registration.
     // H5 stub-adapter invariant: register call ALWAYS runs, regardless of

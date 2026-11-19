@@ -125,6 +125,11 @@
 			"Optional": true
 		},
 		{
+			"Name": "ModelViewViewModel",
+			"Enabled": true,
+			"Optional": true
+		},
+		{
 			"Name": "PythonScriptPlugin",
 			"Enabled": true
 		}

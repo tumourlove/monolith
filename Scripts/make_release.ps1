@@ -779,6 +779,8 @@ $LeakSentinels = @(
     "GeometryScriptingCore", "GeometryFramework", "GeometryCore",
     # MonolithUI -- CommonUI
     "CommonUI", "CommonInput",
+    # MonolithUI -- MVVM / UMG Viewmodel (issue #173; engine plugin, EnabledByDefault:false)
+    "ModelViewViewModel", "ModelViewViewModelBlueprint", "ModelViewViewModelEditor",
     # MonolithBABridge -- BlueprintAssist
     "BlueprintAssist",
     # MonolithAI -- GameplayBehaviors / MassEntity / ZoneGraph / StateTree / SmartObjects
@@ -813,6 +815,8 @@ $LeakSentinels = @(
 $OptionalModuleUnion = @(
     "GeometryScriptingCore", "GeometryFramework", "GeometryCore",   # MonolithMesh
     "CommonUI", "CommonInput",                                       # MonolithUI
+    "ModelViewViewModel", "ModelViewViewModelBlueprint",             # MonolithUI (MVVM)
+    "ModelViewViewModelEditor",                                      # MonolithUI (MVVM)
     "BlueprintAssist",                                               # MonolithBABridge
     "GameplayBehaviorsModule", "MassEntity", "MassSpawner",          # MonolithAI
     "MassGameplayEditor", "ZoneGraph",                              # MonolithAI
