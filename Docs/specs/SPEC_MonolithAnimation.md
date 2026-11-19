@@ -8,7 +8,7 @@
 
 ## MonolithAnimation
 
-**Dependencies:** Core, CoreUObject, Engine, MonolithCore, UnrealEd, AnimGraph, AnimGraphRuntime, BlueprintGraph, AnimationBlueprintLibrary, PoseSearch, BlendStackEditor, AnimationModifiers, EditorScriptingUtilities, Json, JsonUtilities
+**Dependencies:** Core, CoreUObject, Engine, MonolithCore, UnrealEd, AnimGraph, AnimGraphRuntime, BlueprintGraph, AnimationBlueprintLibrary, PoseSearch, BlendStackEditor, AnimationModifiers, EditorScriptingUtilities, Json, JsonUtilities, PhysicsUtilities, MeshUtilitiesEngine
 
 > **`BlendStackEditor` dep (2026-06-07)** added for the Motion Matching action pack — `build_motion_matching_node` spawns the bound-graph `UAnimGraphNode_MotionMatching` / BlendStack nodes.
 
@@ -63,6 +63,12 @@
 | `remove_curve` | Remove a curve from an animation sequence |
 | `set_curve_keys` | Set keys on a float curve (replaces existing keys) |
 | `get_curve_keys` | Get all keys from a float curve. **(2026-06-16):** also reports a `monotonic` flag (whether the key values are non-decreasing/non-increasing across the curve — e.g. a baked `Distance` curve) and a `sign` flag, so a curve's shape can be checked without re-deriving it from the keys. |
+
+**Sequence curve copy / audit (2 — `MonolithAnimationCurveAuditActions.cpp`, 2026-11-19)**
+| Action | Description |
+|--------|-------------|
+| `copy_sequence_curves` | Copy float curves (`ERawCurveTrackTypes::RCT_Float` only) from `source` to many AnimSequences. Source curves are snapshotted (name, curve type flags, `FloatCurve`, editor `Color`) before any write. Targets = `targets[]` plus every UAnimSequence (incl. subclasses) under `target_folder` (recursive, sorted); the source listed as a target is skipped. `curves[]` filters by name; names absent on the source are reported as `missing_on_source` (error only if none remain). Existing curves are `skipped_existing` unless `overwrite`. Writes run inside one outer `FScopedTransaction` and one `IAnimationDataController` bracket per target: `AddCurve(Id, Flags)` (new) or `SetCurveFlags` (overwrite), then `SetCurveKeys`, then `SetCurveColor`. `retime: scale` multiplies key times by target_len/source_len and divides tangents by the same factor (reported as `time_scale`). Keys outside `[0, play_length]` are kept and counted as `keys_outside_play_length`. `dry_run` skips the transaction and all writes but reports identically (`would_add` / `would_overwrite`). `save` saves each modified target via `SaveAssetPackage`. A missing target is reported per entry and in `errors[]` without aborting the others. |
+| `audit_sequence_curves` | Read-only. Sequences from `assets[]` and/or `folder` (`recursive`, default true). Required set = `required_curves[]` merged with the float curves of `reference`. Per sequence: `missing` (required, absent), `empty` (required, present, zero keys), `extra` (present, not required, sorted), `complete`. `only_failing` drops complete sequences from the list (counts still include them). Summary: `sequences_scanned`, `sequences_complete`, `sequences_failing`, `missing_summary: [{curve, missing_in}]`. String-list params also accept a JSON-encoded array string or a single string. |
 
 **BlendSpace Operations (7)**
 
@@ -132,6 +138,25 @@ Wraps `USkeleton::CompatibleSkeletons` — the canonical UE5 mechanism that lets
 | `get_compatible_skeletons` | Returns `{ asset_path, compatible_skeletons: [..], count }`. Lists the soft-pointer paths currently registered in `USkeleton::CompatibleSkeletons`. |
 | `add_compatible_skeleton` | Marks a target skeleton compatible with the source. Idempotent: returns disjoint `added` / `already_compatible` booleans + resulting `count`. Self-compat rejected with `"Cannot mark a skeleton compatible with itself"`. |
 | `remove_compatible_skeleton` | Removes a previously-registered compatible skeleton. Idempotent: returns disjoint `removed` / `was_compatible` booleans + resulting `count`. |
+
+**Skeleton authoring: slots, blend profiles, curve metadata (12 — `MonolithAnimationSkeletonActions.cpp`, 2026-11-19)**
+
+Edit data stored on a `USkeleton` asset. Every mutation runs in an `FScopedTransaction` (undoable), calls `Modify()` on the skeleton / profile, marks the package dirty, and saves only when `save: true` (default false). `skeleton_path` accepts the alias `skeleton`. No engine-version gate: the `Skeleton.h`, `BlendProfile.h` and `AnimCurveMetadata.h` declarations used are identical in 5.7 and 5.8.
+
+| Action | Description |
+|--------|-------------|
+| `get_skeleton_slots` | Slot groups and their slot names, plus the engine default group/slot names. |
+| `add_skeleton_slot` | Register `slot_name`, optionally in `group_name` (created if missing; an existing slot is moved when a group is given). Idempotent. Wraps `USkeleton::SetSlotGroupName`. |
+| `remove_skeleton_slot` | Remove one slot (`slot_name`) or a whole group and its slots (`group_name`); exactly one of the two. The engine `DefaultGroup` / `DefaultSlot` cannot be removed. The group's existence is validated first (the engine's `RemoveSlotGroup` dereferences without a null check). No reference scan: a montage or slot node that still uses a removed slot re-registers it on load (engine behaviour). |
+| `set_slot_group` | Move a registered slot to another group (created if missing). |
+| `get_blend_profiles` | Profiles (optionally one `profile`) with mode, default scale and entries `{bone, scale}`. |
+| `create_blend_profile` | New empty profile (`name`, alias `profile`); `mode` `time_factor` / `weight_factor` (default) / `blend_mask`. Refuses an existing name. |
+| `set_blend_profile_bones` | Per-bone scales through `UBlendProfile::SetBoneBlendScale(BoneIndex, Scale, bRecurse, bCreate=true)`: `bones: [{bone, scale, recurse?, remove?}]`, optional `clear` and `mode`. Bone names are validated against the reference skeleton before any change. Changing to or from `blend_mask` re-applies entries (default scale 1.0 <-> 0.0), mirroring `FEditableSkeleton::SetBlendProfileMode`; `UBlendProfile::Mode` is a public UPROPERTY and is set directly. Entries equal to the default scale are dropped by the engine. `time_factor` scales outside 0..1 produce a warning (runtime clamps). |
+| `remove_blend_profile` | Mirrors `FEditableSkeleton::RemoveBlendProfile` and renames the removed sub-object to a unique `<name>_REMOVED*` name so the name can be reused immediately. Referencing nodes lose the reference. |
+| `get_skeleton_curve_metadata` | Per curve `{name, material, morph_target, linked_bones[], max_lod}` (`max_lod` -1 when the engine sentinel 255, all LODs, is stored); `curve` / `curves` filter, `missing[]` lists filtered names not found. `get_skeleton_curves` stays as the names-only listing. |
+| `add_skeleton_curve` | Register curve names (`curve` or bulk `curves`) via `AddCurveMetaData` inside the action's transaction; `material` / `morph_target` flags apply to new names only. Returns `added[]`, `already_present[]`. |
+| `remove_skeleton_curve` | `RemoveCurveMetaData`; sequence curve data is untouched. Returns `removed[]`, `not_found[]`. |
+| `set_skeleton_curve_metadata` | Edit `material` / `morph_target` flags, `linked_bones` (replace; `[]` clears; validated against the skeleton) and `max_lod` (-1 = all) of `curve` (alias `curve_name`). Linked bones and max LOD go through `UAnimCurveMetaData::SetCurveMetaDataBoneLinks` (`USkeleton` has no wrapper), which also initialises the `FBoneReference`s. `create_if_missing` (default true) registers the curve first; a call with no fields to set is an error. |
 
 **Root Motion (1)**
 | Action | Description |
@@ -309,10 +334,31 @@ Wraps `USkeleton::CompatibleSkeletons` — the canonical UE5 mechanism that lets
 - `batch_retarget_animations` — no longer produces frozen (pass-through) output clips. The default retarget op stack is now seeded on the retargeter (see Retarget pack above), so retargeted sequences carry actual remapped motion.
 - `add_ik_solver` — fixed solver resolution that used a hardcoded reflected struct path (`/Script/IKRig.FullBodyIKSolver`) which does not resolve in UE 5.7, so adding solvers (Full Body IK in particular) failed. `solver_type` now resolves against the live `FIKRigSolverBase` struct table via alias → exact struct name → unique-substring (see the IK Rig section above).
 
-**ControlRig Write (3)**
+**ControlRig Write (`MonolithControlRigWriteActions.cpp`)**
 | Action | Description |
 |--------|-------------|
-| (3 actions in `MonolithControlRigWriteActions.cpp` — graph node creation, pin configuration, variable management) |
+| `add_control_rig_element`, `add_control_rig_node`, `connect_control_rig_pins` | Hierarchy element creation, graph node creation and pin wiring (pre-existing). |
+| `remove_control_rig_node` | **(2026-11-19)** Remove `node_name` and its links. |
+| `break_control_rig_link` | **(2026-11-19)** Break one link (`source_pin` + `target_pin`) or every link on `pin`; returns `broken_links[]`. A missing link is an error. |
+| `set_control_rig_pin_default` | **(2026-11-19)** Edit the default of `pin_path` on an existing node (`value`, `resize_arrays` default true). Returns `old_value`, `new_value`, `type`, `pin_is_linked`. |
+| `add_control_rig_variable` | **(2026-11-19)** Add a member variable (`name`, `type`, `default`?, `is_public`?, `is_read_only`?). The type is resolved before `AddMemberVariable` is called, because the engine's `RigVMTypeUtils::ExternalVariableFromCPPTypePath` executes `check(false)` (fatal) on an unrecognised type. Accepted: `bool`, `float`, `double`, `int32` (`int`), `FString`, `FName`, `FText`, aliases `vector`, `vector2d`, `rotator`, `quat`, `transform`, `linearcolor`, `rigelementkey`, any `/Script/...` or asset path that loads as a `UScriptStruct` or `UEnum`, and `TArray<T>` / `T[]` of those; maps, sets and nested arrays are refused. The engine uniquifies the name (`renamed: true`) and compiles the blueprint synchronously; the response reports the final `name` and resolved `cpp_type`. The fatal-check behaviour was read in the 5.7 engine source; the pre-validation covers both engines. |
+
+The four 2026-11-19 edits accept an optional `graph_name` (any model from the RigVM client; default the root graph) and go through `URigVMController` with `bSetupUndoRedo = true` inside an `FScopedTransaction`, then `RequestRigVMInit` + `MarkPackageDirty`. Pins and nodes are validated (`URigVMGraph::FindPin` / `FindNodeByName`, `URigVMPin::IsLinkedTo`) before the controller call so failures name the bad path. Aliases: `asset` for `asset_path`, `pin` for `pin_path` (and `pin_path` for `break_control_rig_link.pin`), `variable_name` for `name`, `cpp_type` for `type`, `default_value` for `default`.
+
+**Physics asset structure (6 — `MonolithAnimationPhysicsAssetActions.cpp`, 2026-11-19)**
+
+Built on `FPhysicsAssetUtils` (`PhysicsUtilities`) and `FMeshUtilitiesEngine::CalcBoneVertInfos` (`MeshUtilitiesEngine`); both are always-present engine Developer modules, so neither is gated. Tuning stays in `set_body_properties` / `set_constraint_properties`. All edits run in an `FScopedTransaction`, then `UpdateBodySetupIndexMap`, `UpdateBoundsBodiesArray`, `RefreshPhysicsAssetChange`, an `FPhysicsDelegates::OnPhysicsAssetChanged` broadcast and `MarkPackageDirty` (not saved).
+
+| Action | Description |
+|--------|-------------|
+| `create_physics_asset` | `skeletal_mesh`, `asset_path`, `body_params`?, `geom_type`?, `assign_to_mesh`? (false). Creates the package + `UPhysicsAsset`, runs `FPhysicsAssetUtils::CreateFromSkeletalMesh(..., bSetToMesh = assign_to_mesh, bShowProgress = false)`, sets the preview mesh and registers the asset. The engine retries once with `MinBoneSize = 1` before failing. Refuses an existing path and meshes without render data (the engine asserts on those); a failed generation discards the half-made object. Returns `body_count`, `constraint_count`, `bodies[]`, `assigned_to_mesh`. |
+| `add_physics_body` | `asset_path`, `bone`, `geom_type`?, `body_params`?, `skeletal_mesh`? (default the asset's preview mesh). Follows `FPhysicsAssetEditorSharedData::MakeNewBody`: resolves the nearest physical ancestor first, creates the body, fits it with `CreateCollisionFromBone` (dominant or any vertex weighting) and destroys it again if fitting fails, then re-points or creates the bone-named constraint of every physical descendant whose nearest physical ancestor is now the new body (re-enabling collision with the body it previously skipped to), and finally constrains the new body to its ancestor. With `disable_collisions_by_default` (engine default true) the new body starts with collision disabled against every other body. An existing body for the bone is refused (remove first). Returns `created_constraints[]`, `reparented_constraints[]`, `parent_body`, `shape_count`. |
+| `remove_physics_body` | Removes the bone's body and its constraints; returns `removed_constraints[]`. |
+| `add_physics_constraint` | `bone_a` (child), `bone_b` (parent), `constraint_name`?, `disable_collision`? (true). Mirrors `InitConstraintSetup`: Bone1 = child, Bone2 = parent, `SnapTransformsToDefault(All)`, `SetDefaultProfile`. Names default to the child bone name, uniquified with `_N`. Refuses a duplicate pair. |
+| `remove_physics_constraint` | By `constraint_index`, `constraint_name` or `bone_a` + `bone_b` (either order). Pair collision is left as-is; call `set_body_collision` to re-enable it. |
+| `set_body_collision` | `body_a`, `body_b`, `enabled`. Edits the pair collision table; returns `was_enabled`, `collision_enabled`. |
+
+`body_params` keys (engine `FPhysAssetCreateParams` defaults otherwise): `min_bone_size`, `min_weld_size`, `geom_type` (`capsule` / `sphere` / `box` / `single_convex_hull` / `multi_convex_hull`), `vertex_weighting` (`dominant` / `any`), `create_constraints`, `auto_orient_to_bone`, `walk_past_small`, `body_for_all`, `disable_collisions_by_default`, `angular_constraint_mode` (`limited` / `free` / `locked`), `lod_index`, `hull_count`, `max_hull_verts`. A top-level `geom_type` overrides it; it may be sent as an object or a JSON string. Engine-version note: `CreateCollisionFromBone` gained a required `const UPhysicsAsset*` parameter in 5.8 (gated on `ENGINE_MINOR_VERSION >= 8`); the 5.8-only `FPhysAssetCreateParams` fields `bAlwaysUseVertices` / `bIncludeChildBones` are left at engine defaults and not exposed.
 
 **Layout (1)**
 | Action | Description |

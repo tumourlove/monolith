@@ -8,7 +8,7 @@
 
 ## MonolithUI
 
-**Dependencies:** Core, CoreUObject, Engine, MonolithCore, UnrealEd, UMGEditor, UMG, Slate, SlateCore, Json, JsonUtilities, KismetCompiler, MovieScene, MovieSceneTracks, DeveloperSettings, AssetTools, ImageWrapper, ImageCore, Kismet, MaterialEditor, EditorSubsystem (Public — `UMonolithUIRegistrySubsystem` is exported), CommonUI (optional — `#if WITH_COMMONUI`)
+**Dependencies:** Core, CoreUObject, Engine, MonolithCore, UnrealEd, UMGEditor, UMG, Slate, SlateCore, Json, JsonUtilities, KismetCompiler, MovieScene, MovieSceneTracks, DeveloperSettings, AssetTools, ImageWrapper, ImageCore, Kismet, MaterialEditor, EditorSubsystem (Public — `UMonolithUIRegistrySubsystem` is exported), FieldNotification (stock engine Runtime module, unconditional), CommonUI (optional — `#if WITH_COMMONUI`), ModelViewViewModel + ModelViewViewModelBlueprint + ModelViewViewModelEditor (optional — `#if WITH_MVVM`, see § MVVM)
 
 **The optional EffectSurface provider is NOT a build-system dependency** (decoupled 2026-04-27). EffectSurface support is delivered via UClass-by-name reflection through `MonolithUI::GetEffectSurfaceClass()` — see § "Optional Dep Probe API" and § "Error Contract — Optional EffectSurface Provider Absence (-32010)". External providers may depend on MonolithUI for registry/spec structs, but MonolithUI must not depend on them.
 **Total actions in `ui::` namespace:** **130** when `WITH_COMMONUI=1` (72 always-on owned by this module + 57 CommonUI owned by this module conditional on `WITH_COMMONUI` + 1 inline diagnostic `dump_style_cache_stats` registered from `MonolithUIModule.cpp` under the same gate) + **4 GAS UI binding aliases owned by `MonolithGAS`** (also registered into `ui::`, conditional on `WITH_GBA`). Without `WITH_COMMONUI`, the namespace registers **72** actions; without `WITH_GBA` the four bridge aliases are absent. Phase 3 of the 2026-05-16 UI Gap Audit (2026-05-16) landed 4 actions: 3 CommonUI scaffolders (`scaffold_main_menu`, `scaffold_settings_panel_with_tabs`, `scaffold_pause_menu`) + 1 always-on multi-screen menu builder (`build_menu_from_spec`).
@@ -49,6 +49,7 @@
 | **CommonUI subtotal** | **62** | | conditional |
 | **MonolithUI total** | **134** | | full configuration |
 | GAS UI binding aliases | 4 | `MonolithGAS/Private/MonolithGASUIBindingActions.cpp` | `WITH_GBA` — registered cross-namespace into `ui::` |
+| UMG MVVM | 8 | `MVVM/MonolithUIMVVMActions.cpp` | `WITH_MVVM` — 2026-11-19 (#173); not included in the totals above. See § MVVM |
 
 Counts re-verified against `RegisterAction(TEXT("ui"), ...)` call sites on 2026-04-26 (Phase L). Phase 2 of the 2026-05-16 UI Gap Audit landed 8 additional actions (4 always-on + 4 CommonUI-gated) bringing the totals to 70 / 55 / 125. Phase 3 of the 2026-05-16 UI Gap Audit landed 4 more (1 always-on `build_menu_from_spec` + 3 CommonUI-gated scaffolders) bringing the totals to 71 / 58 / 129. Phase 3 of the 2026-05-22 UI Blueprint Gap Audit landed 4 more CommonUI-gated actions (`set_widget_navigation_bulk`, `dump_widget_navigation`, `convert_border_to_common`, `reparent_widget_root`) bringing the totals to 71 / 62 / 133. Phase 4 of the 2026-05-22 UI Blueprint Gap Audit (2026-05-23) landed 1 always-on action (`set_widget_is_variable`) bringing the totals to 72 / 62 / 134 (CommonUI subtotal unchanged). Production registration sites only — Tests/ excluded.
 
@@ -157,6 +158,57 @@ Counts re-verified against `RegisterAction(TEXT("ui"), ...)` call sites on 2026-
 | `audit_accessibility` | `asset_path` | Audit a Widget Blueprint for common accessibility issues (missing tooltips, low contrast, small text) |
 | `set_colorblind_mode` | `asset_path`, `mode` | Apply a colorblind-safe palette mode (deuteranopia, protanopia, tritanopia) |
 | `set_text_scale` | `asset_path`, `scale` | Apply a global text scale factor to all text widgets in the blueprint |
+
+---
+
+## MVVM
+
+**UMG MVVM actions (8 — namespace: "ui", conditional on `WITH_MVVM`; issue #173, requested by @Maxmystere).** Source: `Private/MVVM/MonolithUIMVVMActions.cpp`.
+
+### Gate
+
+Registered only when `WITH_MVVM=1`: the `ModelViewViewModel` ("UMG Viewmodel") plugin is enabled in the project's `.uproject` (Plugins[] entry, read with the same `IsPluginEnabled` enablement helper as MonolithAI, issue #71 — never disk presence, because the engine plugin is on disk in every install) and the build is not `MONOLITH_RELEASE_BUILD=1`. With the gate off the module links no MVVM DLL and no `mvvm_` action exists (`Register()` is a no-op), so **release binaries ship without MVVM actions**. `ModelViewViewModel` is an `Optional` plugin reference in `Monolith.uplugin`; `ModelViewViewModel`, `ModelViewViewModelBlueprint` and `ModelViewViewModelEditor` are in `make_release.ps1`'s `$LeakSentinels` and `$OptionalModuleUnion`. `get_widget_bindings` output is unchanged.
+
+### Actions
+
+| Action | Params | Description |
+|--------|--------|-------------|
+| `mvvm_get_view` | `asset_path`, `widget`? | Read-only. Viewmodels, bindings, events, conditions and view `settings` (fields below). |
+| `mvvm_add_viewmodel` | `asset_path`, `viewmodel_class`, `name`?, `creation_type`?, `global_identifier`?, `property_path`?, `compile`? (true) | Add a viewmodel; the class must implement `INotifyFieldValueChanged`. |
+| `mvvm_remove_viewmodel` | `asset_path`, `name`, `remove_bindings`? (false), `compile`? (true) | Refuses while bindings/events use it ("used by N binding(s) and M event(s)") unless `remove_bindings=true`. |
+| `mvvm_add_binding` | `asset_path`, `source`, `destination`, `mode`? (`OneWayToDestination`), `execution_mode`?, `conversion_function`?, `conversion_argument`?, `compile`? (true) | Add a binding, optionally with a forward conversion function. |
+| `mvvm_remove_binding` | `asset_path`, `binding_id`? or `binding_index`?, `compile`? (true) | Remove a binding. |
+| `mvvm_add_event` | `asset_path`, `event`, `destination`, `arguments`? (object: argument name -> path), `compile`? (true) | Widget multicast delegate -> viewmodel/self function. Needs the MVVM project setting "Allow Binding Event". |
+| `mvvm_remove_event` | `asset_path`, `event_name`? or `event_index`?, `compile`? (true) | Remove an event. |
+| `mvvm_set_field_notify` | `asset_path` (any Blueprint), `variable`, `enabled`? (true), `compile`? (true) | Toggle FieldNotify metadata on a Blueprint member variable. |
+
+### Path grammar
+
+All write actions take paths in this form, and `mvvm_get_view` returns every path in it (`path`): `viewmodel:<ViewmodelName>.<Field>[.<Field>...]`, `widget:<WidgetName>.<Field>...`, `self:<Field>...`; `vm:` is an alias for `viewmodel:`. Without a prefix the first segment is matched against viewmodel names, then widget names (the Blueprint's own name maps to self), else the whole string is a self path; `mvvm_add_event`'s `event` defaults to `widget:`. Each segment is a property or a function resolved on the class/struct reached by the previous segment (object and struct properties descend; function return types descend). Blueprint viewmodel variables must be compiled before they resolve.
+
+### Read (`mvvm_get_view`)
+
+- Per viewmodel: `name`, `id`, `class`, `creation_type`, `global_identifier`, `property_path`, `resolver_class`, `instanced`, `optional`, `create_setter` / `create_getter`, `expose_instance_in_editor`, `use_as_interface`, `can_rename` / `can_edit` / `can_remove`.
+- Per binding: `index`, `id`, `display_name`, `mode`, `enabled`, `compile`, `override_execution_mode` / `execution_mode`, `source` / `destination` (`kind` viewmodel|widget|self|none, `owner`, `fields`, `field_path`, `path`, `display`, `is_component`, `viewmodel_id`), `conversion_source_to_destination` / `conversion_destination_to_source` (`type`, `name`, `function`, `wrapper_graph`, `pins`: `id`, `names`, `split`, `status`, `uses_path`, `source_path`, `value`), and `messages` (errors / warnings / info from the last compile). With a conversion function the source moves into the conversion pin, so the binding's own `source` reads `valid: false`.
+- Events: `index`, `name`, `display_name`, `enabled`, `compile`, `event`, `destination`, `pins`, `messages`. Conditions: `index`, `name`, `enabled`, `compile`, `condition`, `destination`, `operation`, `value`, `max_value`, `pins`, `messages`.
+- Counts: `viewmodel_count`, `binding_count`, `event_count`, `condition_count` (after the `widget` filter) and `total_binding_count`, `total_event_count`, `total_condition_count` (whole view); `widget_filter` echoes the filter. A `widget` value not in the widget tree is an error listing the valid widget names. `has_view: false` when the Widget Blueprint has no MVVM view yet.
+
+### Write
+
+All writes are transacted (`FScopedTransaction`), refused during PIE, mark the Widget Blueprint modified (structurally for viewmodel add/remove) and compile by default (`compile=true`, which also fills binding `messages`). Nothing is saved to disk. Writes go through `UMVVMEditorSubsystem` (`RequestView`, `AddViewModel`, `AddBinding`, `SetBindingTypeForBinding`, `SetSourcePathForBinding`, `SetDestinationPathForBinding`, `SetSourceToDestinationConversionFunction`, `SetPathForConversionFunctionArgument`, `OverrideExecutionModeForBinding`, `AddEvent`, `SetEventPath`, `SetEventDestinationPath`, `SetEventArgumentPath`, `RemoveBinding`, `RemoveEvent`). All inputs (paths, enum names, `IsValidConversionFunction`, `UMVVMBlueprintViewEvent::Supports`) are resolved and validated before the asset is touched, so a rejected call leaves the asset unchanged.
+
+- **`mvvm_add_viewmodel`.** Custom names are validated with `VerifyViewModelRename` and applied via `UMVVMBlueprintView::RenameViewModel` (not the subsystem rename, which can open a modal "load referencers" dialog). `creation_type` is validated against `UE::MVVM::GetAllowedContextCreationType`; enum names are read by reflection, so the 5.8-only `Context` type works without a version gate. `Resolver` is refused (it needs a resolver instance). **Default creation type:** without `creation_type` the action uses `CreateInstance` when the class allows it, otherwise the engine default (first allowed type); the response's `creation_type_source` is `default` or `explicit`, and `allowed_creation_types` lists the options. This is a Monolith choice: the stock MVVM panel defaults to the first allowed type (`Manual`). Manual contexts (explicit or default) get `optional` + `create_setter`, the values the engine gives Manual contexts on load. The action also sets the context's private `bCreateSetterFunction_Deprecation` flag by reflection: contexts built in memory leave it false, so `FMVVMBlueprintViewModelContext::PostSerialize` would otherwise re-run its old-asset upgrade on the next load or transaction undo/redo and overwrite `optional` / `create_setter`. If the flag cannot be found the response carries a `warning`. The viewmodel in the response is read from the view after the compile.
+- **`mvvm_add_binding`.** Conversion functions are accepted only for modes that write to the destination; the source is assigned to `conversion_argument` (default: the first argument without a path). If the editor rejects the conversion, the new binding is removed again.
+- **`mvvm_set_field_notify`.** `FBlueprintEditorUtils::SetBlueprintVariableMetaData(..., FBlueprintMetadata::MD_FieldNotify, "")`, or `RemoveFieldNotifyFromAllMetadata` + `RemoveBlueprintVariableMetaData` to clear; requires the Blueprint's parent to implement `INotifyFieldValueChanged`. An unknown variable is an error listing the Blueprint's variables.
+
+### Not implemented
+
+- Condition authoring: `mvvm_add_condition` / `mvvm_remove_condition` (WISHLIST). The subsystem API exists in 5.7 and 5.8 (`AddCondition` + `SetConditionPath` / `SetConditionDestinationPath` / `SetConditionOperation*`); conditions are read-only today.
+- Panel-widget view extensions (`UMVVMBlueprintViewExtension_PanelWidget`; private fields need reflection) (WISHLIST).
+- Viewmodel rename / reparent after creation (WISHLIST).
+- Backward (destination-to-source) conversion functions (WISHLIST).
+- Split pins on conversion / event arguments (WISHLIST).
+- Setting conversion / event argument default values; only paths can be assigned (WISHLIST).
 
 ---
 

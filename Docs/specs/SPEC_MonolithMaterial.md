@@ -8,7 +8,7 @@
 
 ## MonolithMaterial
 
-**Dependencies:** Core, CoreUObject, Engine, MonolithCore, UnrealEd, MaterialEditor, EditorScriptingUtilities, RenderCore, RHI, Slate, SlateCore, Json, JsonUtilities
+**Dependencies:** Core, CoreUObject, Engine, MonolithCore, UnrealEd, MaterialEditor, EditorScriptingUtilities, RenderCore, RHI, Slate, SlateCore, GraphEditor, Json, JsonUtilities
 
 ### Classes
 
@@ -66,6 +66,11 @@
 | `layout_function_expressions` | Auto-arrange material function graph layout |
 | `rename_function_parameter_group` | Rename a parameter group across all parameters in a material function |
 | `auto_layout` | Auto-arrange expression nodes in a material graph. `formatter`: `"auto"` (default) — uses Blueprint Assist if available, falls back to built-in layout; `"blueprint_assist"` — requires BA; `"builtin"` — built-in only |
+
+**Layout measurement (1 — `MonolithMaterialMeasureActions.cpp`, 2026-11-19, #161)**
+| Action | Description |
+|--------|-------------|
+| `measure_graph_nodes` | Real node sizes and pin row centres for a material or material function graph. Params: `asset_path`, `node_ids`? (expression names as in `get_all_expressions`), `include_pins`? (true), `restore_view`? (true). Opens the asset in the material editor (`UAssetEditorSubsystem::OpenEditorForAsset` -> `FindEditorForAsset`, checked to be the `MaterialEditor`), takes the editor's transient preview material from `IMaterialEditor::GetMaterialInterface()` (also for material functions), finds its `MaterialGraph` widget with `SGraphEditor::FindGraphEditorForGraph`, then measures exactly as `blueprint measure_graph_nodes` does (zoom 1:1, `SGraphPanel::Update`, `SlatePrepass`, `ArrangeChildren` for pins; see SPEC_MonolithBlueprint § Measured node geometry). Node `kind`: `expression` / `comment` / `root` / `other`. Only the root graph is measured (not composite subgraphs). Material instances are refused ("has no node graph"). Refuses without a UI (commandlet, `-nullrhi`). The measurement core is a file-local copy, so MonolithMaterial does not depend on MonolithBlueprint. Build dep added: `GraphEditor`. `auto_layout` does not consume the measurements yet. |
 
 **Extended Actions (1)**
 | Action | Change |

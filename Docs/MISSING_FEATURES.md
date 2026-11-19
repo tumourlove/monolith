@@ -6,6 +6,30 @@
 
 ---
 
+## 2026-11-19 — OPEN: follow-ups from the post-0.24.0 cycle
+
+Scoped out while landing the MVVM, skeleton / physics / Control Rig, node-measurement, component-swap and property-path work. None block what shipped.
+
+1. **MVVM authoring gaps (#173).** `mvvm_get_view` reads conditions, but there is no write path yet.
+   - **Add:** `mvvm_add_condition` / `mvvm_remove_condition` (WISHLIST) over the subsystem's `AddCondition` + `SetConditionPath` / `SetConditionDestinationPath` / `SetConditionOperation*` (present in 5.7 and 5.8).
+   - **Add:** panel-widget view extensions (`UMVVMBlueprintViewExtension_PanelWidget`; private fields need reflection) (WISHLIST).
+   - **Add:** viewmodel rename / reparent after creation, backward (destination-to-source) conversion functions, split pins, and default values for conversion / event arguments (only paths can be assigned today) (WISHLIST).
+2. **No `remove_control_rig_variable`.** `add_control_rig_variable` shipped; the interface has `RemoveMemberVariable`, so the remove side is a small follow-up (WISHLIST).
+3. **Skeleton renames.** No rename for slots, skeleton curves or blend profiles, and `remove_skeleton_slot` does not scan for references before removing (WISHLIST).
+4. **Physics asset edits are remove-then-add.** `add_physics_body` refuses an existing body instead of replacing it in place (engine `RecreateBody`), and `remove_physics_constraint` leaves pair collision disabled; call `set_body_collision` explicitly.
+5. **`get_graph_data include_measured` is not implemented.** Suggested shape: optional boolean `include_measured` (default false). When true, call `MonolithBlueprintGraphMeasure::MeasureBlueprintGraph` once and add `w`, `h` and `pins_measured: [{name, x, y}]` to each serialized node; on failure add a top-level `measure_warning` and keep the normal output (WISHLIST).
+6. **`material auto_layout` does not use measured sizes.** `material measure_graph_nodes` only reports sizes, and only for the material's root graph (not composite subgraphs). Nested Blueprint graphs that `FindGraphByName` cannot reach (anim state-machine sub-graphs and similar) are not addressable by `blueprint measure_graph_nodes`, the same limit as `auto_layout` (WISHLIST).
+7. **`swap_component_class` covers Blueprint-added components only.** Native C++ components need the engine's component class override path (`USubobjectDataSubsystem::ChangeSubobjectClass`, gated by `GetAllowNativeComponentClassOverrides`) (WISHLIST). Separately, `dump_instance_component_values` reports the engine-generated `InstancingRandomSeed` on instanced static mesh components in every dump; consider skipping it.
+8. **Property-path grammar gaps.**
+   - `[@...]` selectors work on arrays of object references only, not arrays of structs (for example matching by a name field).
+   - `FGuid` map keys need the 32-hex-digit form; hyphenated GUIDs are rejected by the key grammar. A fallback through `FGuid::Parse` would accept them.
+   - Chained bracket segments (`Grid[2][3]`) are still rejected by `ResolvePath`, although the tokenizer emits them.
+   - The root cradle calls `PreEditChange` on the head property without a matching `PostEditChange` when the head is not an object reference. This predates the sub-object work and was left alone to keep `set_cdo_property`-equivalent behaviour.
+9. **Offline tools do not follow a relocated `ProjectIndex.db`.** Since #168 the editor writes the index to `<Project>/Saved/Monolith/` when the plugin is mounted outside the project, and honours `DatabasePathOverride`. `monolith_query.exe` still defaults to the plugin `Saved/` DB (pass `--project-db <path>`), and `monolith_offline.py` has no override at all.
+   - **Add:** a `--project-db` option in `monolith_offline.py`, and ideally automatic discovery of the per-project location in both tools.
+10. **Small ergonomics found while testing.** `blueprint create_blueprint` does not accept a Blueprint asset path as `parent_class` (`/Game/.../BP_Parent` fails; `.BP_Parent_C` works). `blueprint get_cdo_properties` warns "Unknown param" for `properties` instead of treating it as `property_names`. The "Keep BYTE-IDENTICAL with the copies in ..." comment on the `IsPluginEnabled` helper in the MonolithAI / Mesh / Index / Audio / Animation `Build.cs` files should also list MonolithUI, which now carries a copy.
+11. **Not yet exercised live.** The MVVM PIE refusal, the MVVM actions on UE 5.8, `measure_graph_nodes` under `-nullrhi` and on UE 5.8, `pie_inject_key` against Debug Keys and chorded Enhanced Input triggers, and the 5.8 runtime behaviour of the other new actions have no recorded live test run (5.8 was checked against headers and compiled; live tests ran on 5.7). `pie_inject_key` taps/holds/axis/modifier order and the `include_ui` PIE clip path (#171) were tested live on 5.7.
+
 ## 2026-10-18 — OPEN: carried out of 0.24.0
 
 1. **The Windows swap script prompts twice.** `monolith_swap.bat` asks `Install update? (Y/N)` (by design), but its `.git` / `.github` preserve steps call `xcopy` without `/y`, so when both the backup and the staged release contain `.github` the user also gets an `Overwrite ...FUNDING.yml (Yes/No/All)?` prompt mid-install. Found in the v0.24.0 end-to-end rehearsal. Harmless, but this is the auto-update path: any fix needs its own end-to-end rehearsal before it ships.
@@ -114,6 +138,8 @@ PR #102 arrived in two halves. Part 1 (the Inheritable Component Handler write t
 - Default `save` to **false**, matching the rest of the namespace.
 - Call `ReconstructNode()` after a write that changes node topology, then report the resulting pin set so the caller can see what the reconstruct did.
 - Read side (`get_graph_node_properties`) is uncontroversial and can land first.
+
+**Partly covered since 2026-11-19.** `blueprint set_property_at_path` now follows object references from the asset root into sub-objects (for example `Source.Nodes[@NodeName].SomeProp`), with `[@ObjectName]` / `[@class=Name]` selectors, the sub-object edit cradle, and writes confined to the asset's own package unless `allow_external` is passed. That covers writing a node UPROPERTY reachable from an asset UPROPERTY path. It does not cover nodes reachable only through a Blueprint's graph arrays by `graph_name` + `node_id`, and does not call `ReconstructNode()`, so the dedicated pair above is still wanted.
 
 ---
 

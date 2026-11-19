@@ -2,11 +2,11 @@
 
 **Version:** v0.24.0 · **Last updated:** 2026-10-18
 
-**In-tree action total is approximate: ~1,400+ actions across 27 in-tree namespaces** (public, in-tree only; all active by default, plus 45 experimental town-gen actions that register only when `bEnableProceduralTownGen=true`). v0.23.0 adds two namespaces — `input` (Enhanced Input, 13) and `localization` (read-only culture + StringTable, 4) — plus 6 read-only `chooser` actions and 5 `blueprint` User Defined Struct field actions. The surface is too large to track to the unit — **query `monolith_discover()` (its `total_actions` field) for the exact live figure.** The `ui` namespace re-exports 4 GAS UI binding actions as aliases. v0.19.0 adds an LLM C++ authoring ergonomics pack (`source`, 8 actions + `editor.get_build_errors` fix hints), live-PIE introspection + driving and stat-group readout (`editor`), anim-node binding read/write and time-series PIE sampling (`animation`), a Blueprint variable census + contract reconciliation (`blueprint`), and T3D asset-text export (`project`); plus two first-launch fixes (issue #70) and a ~40% smaller `tools/list` manifest. The `monolith_*` meta-tools (`discover`, `status`, `update`, `reindex`, `guide`) plus the `bulk_fill_query` and `describe_query` framework dispatchers round out the MCP tool count. This total EXCLUDES sibling-plugin actions — they ship in their own repos and are never in the public release zip.
+**In-tree action total is approximate: ~1,500+ actions across 27 in-tree namespaces** (public, in-tree only; all active by default, plus 45 experimental town-gen actions that register only when `bEnableProceduralTownGen=true`). v0.23.0 adds two namespaces — `input` (Enhanced Input, 13) and `localization` (read-only culture + StringTable, 4) — plus 6 read-only `chooser` actions and 5 `blueprint` User Defined Struct field actions. The surface is too large to track to the unit — **query `monolith_discover()` (its `total_actions` field) for the exact live figure.** The `ui` namespace re-exports 4 GAS UI binding actions as aliases. v0.19.0 adds an LLM C++ authoring ergonomics pack (`source`, 8 actions + `editor.get_build_errors` fix hints), live-PIE introspection + driving and stat-group readout (`editor`), anim-node binding read/write and time-series PIE sampling (`animation`), a Blueprint variable census + contract reconciliation (`blueprint`), and T3D asset-text export (`project`); plus two first-launch fixes (issue #70) and a ~40% smaller `tools/list` manifest. The `monolith_*` meta-tools (`discover`, `status`, `update`, `reindex`, `guide`) plus the `bulk_fill_query` and `describe_query` framework dispatchers round out the MCP tool count. This total EXCLUDES sibling-plugin actions — they ship in their own repos and are never in the public release zip.
 
 The per-namespace numbers in the Table of Contents and body sections below are kept for structure, not precision — they drift with every action added and are no longer maintained to the unit. Treat them as ballpark; the live figure always comes from `monolith_discover()`.
 
-> Auto-generated and hand-curated. Each action is dispatched via HTTP POST to `http://localhost:<port>` with JSON body `{ "namespace": "<ns>", "action": "<action>", "params": { ... } }`, or via the MCP `tools/list` surface that AI clients see at session start.
+> Auto-generated and hand-curated. Each action is dispatched via HTTP POST to `http://127.0.0.1:<port>` with JSON body `{ "namespace": "<ns>", "action": "<action>", "params": { ... } }`, or via the MCP `tools/list` surface that AI clients see at session start.
 >
 > `monolith_discover("<namespace>")` is terse by default — it lists each action's name plus a one-line description, NOT the full param schemas. For a single action's exhaustive live param schema, call `describe_query("action_schema", target_namespace="<ns>", target_action="<name>")`, or pass `detail=true` (alias `verbose=true`) to `monolith_discover` to inline all schemas. Discover also accepts `filter` (case-insensitive substring on name or description), `offset`, and `limit` (default 0 = full list). This document is a curated reference, not a source-of-truth substitute.
 >
@@ -187,6 +187,33 @@ Full read/write access to Blueprint graphs, variables, components, functions, no
 - **`add_node` places unpositioned nodes in clear space.** Omitting `position` used to default to `[0,0]`, stacking every MCP-authored node on the origin (#132). An explicit `position` is still authoritative and the first node in an empty graph still lands at `[0,0]`; the response now reports the chosen position plus `position_source` (`"explicit"` / `"auto"`).
 - **`auto_layout(layout_mode: "new_only")` unpins piles, not just the origin.** A node counts as new if it is at the origin *or* piled on another node (intersection area against the smaller node, 25% threshold), so edge contact in a hand-laid graph is left alone. The response gained `nodes_pinned`. **Consequence:** because `add_node` now lands unpositioned nodes in clear space, those nodes are *not* `new_only` candidates — use `layout_mode: "all"` to fold them into the flow.
 
+**New since v0.24.0 (unreleased):**
+
+| Action | Params | Description |
+|---|---|---|
+| `measure_graph_nodes` | `asset_path`, `graph_name?`, `node_ids?`, `include_pins?` (true), `restore_view?` (true) | Opens the graph in the Blueprint editor and returns real node sizes (`w`, `h`, plus the estimate `est_w`, `est_h`) and visible pin row centres (`x`, `y`, `w`, `h`) relative to the node, in graph units at zoom 1:1. Errors without a UI (`-nullrhi`, commandlets) (#161). |
+| `auto_layout` (changed) | + `measured?` (false) | Built-in formatter: lay out from measured sizes and align exec pins; falls back to the estimate with `warning`. Response adds `sizes_source` (#161). |
+| `remove_function_param` | `asset_path`, `function_name`, `param_name` (alias `param`), `direction?` (`input`/`output`/`any`) | Remove a function parameter; call sites refreshed, stale call-site pins dropped. Reports `call_sites_cleaned`, `dangling_parameter_nodes`, `linked_dangling_parameter_nodes` (the connected subset that blocks compile) (#162). |
+| `reorder_function_params` | `asset_path`, `function_name`, `order` (string array), `direction?` (`input`/`output`) | Reorder inputs or outputs; listed names first, others keep relative order (#162). |
+| `set_function_params` (changed) | unchanged | Now reconstructs entry/result nodes and every loaded call site after adding parameters (#162). |
+| `refresh_all_nodes` | `asset_path`, `compile?` | Refresh All Nodes, optional compile (#162). |
+| `split_pin` | `asset_path`, `node_id`, `pin_name`, `pin_direction?`, `graph_name?` | Split a struct pin; returns `sub_pins` (#162). |
+| `recombine_pin` | `asset_path`, `node_id`, `pin_name`, `pin_direction?`, `break_links?`, `graph_name?` | Recombine a split struct pin (parent or sub-pin name) (#162). |
+| `add_pin` | `asset_path`, `node_id`, `count?` (1-64), `graph_name?` | Add pins to an Add-Pin node or a Switch on Int/String/Name (#162). |
+| `remove_pin` | `asset_path`, `node_id`, `pin_name?`, `pin_direction?`, `graph_name?` | Remove an added pin (Select: last option) (#162). |
+| `add_custom_event_input` | `asset_path`, `pin_name`, `node_id` or `event_name`, `graph_name?`, `type` or `like_pin {node,pin,graph?}`, `is_reference?` | Add an input to a Custom Event (type token or copied pin type). Refuses delegate-bound events (#162). |
+| `add_event_for_delegate` | `asset_path`, `node_id`, `pin_name?`, `graph_name?`, `event_name?`, `position?`, `replace_existing?` | Custom Event matching a delegate signature, wired to the delegate pin (#162). |
+| `add_create_delegate_node` | `asset_path`, `function_name`, `graph_name?`, `delegate_pin? {node,pin,graph?}`, `target_object? {node,pin,graph?}`, `position?` | Create Event node bound to a function; binding read back (#162). |
+| `add_async_action_node` | `asset_path`, `factory_class`, `function_name`, `node_class?`, `graph_name?`, `position?` | Async action node from a static factory function (#162). |
+| `add_construct_object_node` | `asset_path`, `class`, `kind?` (`construct_object`/`create_widget`), `node_class?`, `node_id?`, `graph_name?`, `position?` | Construct Object / Create Widget node with class set and spawn pins rebuilt; `node_id` retargets an existing node (#162). |
+| `swap_component_class` | `asset_path`, `component_name`, `new_class`, `allow_unrelated?` (false), `include_child_blueprints?` (true), `preserve_level_instances?` (false) | Change an SCS component's class in place, keeping its variable name, GUID, children, attach socket and designer-changed properties. Child Blueprint ICH overrides are rebuilt for the new class; the Blueprint and its children are compiled. Returns per-child `override_status` (`migrated` / `pruned_identical_to_parent` / `class_mismatch`), compile reports and `level_instances[]` (#162). |
+| `dump_instance_component_values` | `actor` (label, object name or full path), `component_name?` | Read-only. A placed actor's per-instance component overrides as export text (`values` = `{component: {property: text}}`); unround-trippable values listed under `skipped` (#162). |
+| `restore_instance_component_values` | `actor`, `values` (object, or a whole dump response), `component_name?` | Re-apply per-instance values in one transaction; the construction script reruns once and each value is verified on the live component. Returns `applied[]`, `skipped[]`, `failed[]` (`did_not_persist`, ...) (#162). |
+| `create_curve_asset` | `asset_path`, `curve_type` (`float`/`vector`/`linear_color`), `keys?`, `channel?`, `save?` (true) | Create a CurveFloat / CurveVector / CurveLinearColor asset, optionally with keys. Refuses an existing asset. |
+| `get_curve_asset_keys` | `asset_path`, `channel?` | Per-channel keys, default value, extrapolation and ranges of a curve asset. |
+| `set_curve_asset_keys` | `asset_path`, `keys`, `channel?`, `replace?` (true), `save?` (false) | Write keys into one or more channels of a curve asset. Key object: `{time, value, channel?, interp?: linear\|constant\|cubic, tangent_mode?: auto\|smart_auto\|user\|break, arrive_tangent?, leave_tangent?}`. |
+| `set_property_at_path` | `asset_path`, `path`, `value`, `dry_run?`, `strict?`, `create_missing_keys?`, `new_element_value?`, `allow_external?`, `save?` | Writes one value at a dotted/bracket path (`.member`, `[N]`, `[MapKey]`, `[@ObjectName]`, `[@class=ClassName]`). Object references are followed; writes stay inside the asset's own package unless `allow_external` is set. A dry run reads the live value and honours `create_missing_keys`. A created map entry reports `defaulted_fields`. Grammar: [SPEC_CORE.md § Reflection path walker](SPEC_CORE.md#reflection-path-walker). |
+
 > For full param schemas, call `describe_query("action_schema", target_namespace="blueprint", target_action="<name>")` (or `monolith_discover("blueprint", detail=true)`). Plain `monolith_discover("blueprint")` is terse — action names + one-line descriptions only. The action surface is too broad to enumerate here without bloat — high-traffic actions are documented below; the rest are listed and discoverable.
 
 **Action categories:**
@@ -195,7 +222,7 @@ Full read/write access to Blueprint graphs, variables, components, functions, no
 |----------|---------|----------|
 | Graph inspection | 9 | `list_graphs`, `get_graph_data`, `get_graph_summary`, `get_execution_flow`, `search_nodes`, `get_node_details` |
 | Variables | 9 | `get_variables`, `add_variable`, `remove_variable`, `rename_variable`, `set_variable_type`, `set_variable_defaults`, `add_local_variable`, `remove_local_variable`, `add_replicated_variable` |
-| Components | 7 | `get_components`, `get_component_details`, `add_component`, `remove_component`, `rename_component`, `reparent_component`, `set_component_property`, `duplicate_component` |
+| Components | 11 | `get_components`, `get_component_details`, `add_component`, `remove_component`, `rename_component`, `reparent_component`, `set_component_property`, `duplicate_component`, `swap_component_class`, `dump_instance_component_values`, `restore_instance_component_values` |
 | Functions / Macros / Events | 14 | `get_functions`, `add_function`, `remove_function`, `rename_function` (preserves function flags + metadata), `set_function_flags` (pure / const / Call In Editor / access / category / description on an existing function), `add_event_graph` (new ubergraph page), `add_macro`, `remove_macro`, `rename_macro`, `add_event_dispatcher`, `remove_event_dispatcher`, `set_function_params` (inputs take `is_reference` / `is_const`), `set_event_dispatcher_params`, `get_function_signature` (per-parameter `is_reference` / `is_const`, also on `get_functions`). `add_function` can seed its signature from `prototype_class` + `prototype_function` |
 | Interfaces | 4 | `implement_interface`, `remove_interface`, `get_interfaces`, `scaffold_interface_implementation` |
 | Node ops | 11 | `add_node` (v0.21.0: `K2Node_SwitchEnum` user-enum resolution via `enum`/`enum_path`; `K2Node_CallFunction` resolves BP-defined funcs), `remove_node`, `connect_pins` (v0.21.0: cross-graph node-ID disambiguation, suggests `graph_name`), `disconnect_pins`, `set_pin_default`, `set_node_position`, `resolve_node` (shares both v0.21.0 resolvers), `add_event_node`, `add_comment_node`, `promote_pin_to_variable`, `add_nodes_bulk` |
@@ -206,13 +233,16 @@ Full read/write access to Blueprint graphs, variables, components, functions, no
 | Dataset — DataTable (0.15.0) | 8 | `read_data_table`, `describe_data_table_schema`, `set_data_table_rows`, `remove_data_table_row`, `rename_data_table_row`, `duplicate_data_table_row`, `export_data_table`, `import_data_table` |
 | Dataset — CurveTable (0.15.0) | 5 | `read_curve_table`, `set_curve_table_keys`, `add_curve_table_row`, `remove_curve_table_row`, `rename_curve_table_row` |
 | Dataset — CurveFloat | 2 | `get_curve_float_keys`, `set_curve_float_keys` (standalone `UCurveFloat` keys: time, value, interp, tangent mode / tangents; `replace?`, `save?`) |
+| Dataset — curve assets | 3 | `create_curve_asset`, `get_curve_asset_keys`, `set_curve_asset_keys` (CurveFloat / CurveVector / CurveLinearColor, per channel) |
 | Dataset — StringTable (0.15.0) | 3 | `read_string_table`, `set_string_table_entries`, `remove_string_table_entry` |
 | Dataset — DataAsset (0.15.0) | 1 | `seed_data_asset` (create + bulk-fill in one atomic call) |
 | Dataset — User Defined Struct (0.23.0) | 5 | `get_struct_fields`, `add_struct_field`, `remove_struct_field`, `rename_struct_field`, `set_struct_field_type` |
 | Cross-class / overrides (0.15.0) | 3 | `add_property_access`, `override_parent_function`, `save_dirty_assets` |
 | CDO | 2 | `get_cdo_properties` (filters include `property_names` exact list and `name_pattern` / `name_filter` substring), `set_cdo_property` |
 | Templates / spec | 4 | `build_blueprint_from_spec`, `apply_template`, `list_templates`, `compare_blueprints` |
-| Layout | 2 | `auto_layout`, `export_graph` |
+| Layout | 3 | `auto_layout` (`measured?`), `export_graph`, `measure_graph_nodes` |
+| Pin structure / params | 7 | `split_pin`, `recombine_pin`, `add_pin`, `remove_pin`, `refresh_all_nodes`, `remove_function_param`, `reorder_function_params` |
+| Event / delegate / async nodes | 5 | `add_custom_event_input`, `add_event_for_delegate`, `add_create_delegate_node`, `add_async_action_node`, `add_construct_object_node` |
 | Spawn | 2 | `spawn_blueprint_actor`, `batch_spawn_blueprint_actors` |
 
 **Header set most callers reach for first:**
@@ -436,6 +466,13 @@ Material graph editing, inspection, CRUD, material functions, instances, custom 
 | Layers | 1 | `get_layer_info` |
 | Batch | 2 | `batch_set_material_property`, `batch_recompile` |
 | Transactions | 2 | `begin_transaction`, `end_transaction` |
+| Layout measurement (new since v0.24.0) | 1 | `measure_graph_nodes` |
+
+**New since v0.24.0 (unreleased):**
+
+| Action | Params | Description |
+|---|---|---|
+| `measure_graph_nodes` | `asset_path`, `node_ids?` (expression names), `include_pins?` (true), `restore_view?` (true) | Real node sizes and pin row centres from the material editor's graph (materials and material functions; material instances are refused). Node `kind`: `expression` / `comment` / `root` / `other`. Errors without a UI (#161). |
 
 ### `build_material_graph` gotcha
 
@@ -480,6 +517,37 @@ Animation curves, bone tracks, sync markers, root motion, compression, blend spa
 - **Inspection (1):** `get_animated_bone_transform` (FK-composed bone transform at a frame/time, component or world space).
 - **Extensions (no new actions):** `get_retargeter_info` now emits an `ops[]` array (per-op type + settings); `apply_anim_modifier` now accepts a `properties` reflective field set + a `persist` flag (register into the `AnimationModifiers` stack); `get_blend_space_info` now reports per-sample authored root-motion speed + `triangulation_baked` / `interpolate_using_grid`; `get_anim_node_pin_bindings` now also emits wire-linked input pins (`type:"Link"` with source node/pin); `derive_foot_sync_markers` gains a `from_bones` mode (foot plants from per-frame foot-bone height + planar-speed minima); `get_curve_keys` now reports `monotonic` + `sign` flags; `set_anim_node_pin_binding` gains optional `array_index` (`FAnimGraphNodePropertyBinding::ArrayIndex`; omitted = keep the existing index, else derive it from an array-element pin name such as `BlendWeights_2`; `-1` = whole property) and reports `array_index` / `array_index_source`, and `get_anim_node_pin_bindings` reports `array_index` per binding; `set_anim_node_function_binding` now calls `RequestRefreshExtensions` so the recompile regenerates the anim-subsystem set (prevents a null `NodeRelevancy` subsystem at runtime).
 
+**New since v0.24.0 (unreleased) — skeleton authoring, curve copy/audit, physics asset structure, Control Rig graph edits:**
+
+| Action | Params | Description |
+|---|---|---|
+| `get_skeleton_slots` | `skeleton_path` | Slot groups and their slot names, plus the engine default group/slot names |
+| `add_skeleton_slot` | `skeleton_path`, `slot_name`, `group_name?`, `save?` | Register a slot (group created if missing; existing slot moved if `group_name` is given). Idempotent |
+| `remove_skeleton_slot` | `skeleton_path`, `slot_name?` \| `group_name?`, `save?` | Remove one slot, or a group and all its slots. Exactly one of the two. Default group/slot refused |
+| `set_slot_group` | `skeleton_path`, `slot_name`, `group_name`, `save?` | Move a registered slot to another group (created if missing) |
+| `get_blend_profiles` | `skeleton_path`, `profile?` | Profiles with mode, default scale, entries `{bone, scale}` |
+| `create_blend_profile` | `skeleton_path`, `name`, `mode?`, `save?` | New empty profile; mode `time_factor` / `weight_factor` (default) / `blend_mask` |
+| `set_blend_profile_bones` | `skeleton_path`, `profile`, `bones?: [{bone, scale, recurse?, remove?}]`, `clear?`, `mode?`, `save?` | Edit per-bone scales; entries equal to the default scale are dropped by the engine |
+| `remove_blend_profile` | `skeleton_path`, `profile`, `save?` | Remove a profile (referencing nodes lose the reference) |
+| `get_skeleton_curve_metadata` | `skeleton_path`, `curve?`, `curves?` | Per curve `{name, material, morph_target, linked_bones[], max_lod}`; `missing[]` for filtered names not found |
+| `add_skeleton_curve` | `skeleton_path`, `curve?` / `curves?`, `material?`, `morph_target?`, `save?` | Register curve names (flags applied to new ones only). Returns `added[]`, `already_present[]` |
+| `remove_skeleton_curve` | `skeleton_path`, `curve?` / `curves?`, `save?` | Remove curve metadata (sequence curve data untouched). Returns `removed[]`, `not_found[]` |
+| `set_skeleton_curve_metadata` | `skeleton_path`, `curve`, `material?`, `morph_target?`, `linked_bones?`, `max_lod?`, `create_if_missing?` (true), `save?` | Edit flags / linked bones (replace; `[]` clears) / max LOD (-1 = all) |
+| `copy_sequence_curves` | `source`, `targets?`, `target_folder?`, `curves?`, `overwrite?`, `retime?` (`none`/`scale`), `dry_run?`, `save?` | Copy float curves from one sequence to many; one undo transaction per call |
+| `audit_sequence_curves` | `assets?`, `folder?`, `recursive?`, `required_curves?`, `reference?`, `only_failing?` | Report missing / empty / extra float curves per sequence. Read-only |
+| `create_physics_asset` | `skeletal_mesh`, `asset_path`, `body_params?`, `geom_type?`, `assign_to_mesh?` (false) | New physics asset generated from the mesh. Returns `body_count`, `constraint_count`, `bodies[]`. Refuses an existing path |
+| `add_physics_body` | `asset_path`, `bone`, `geom_type?`, `body_params?`, `skeletal_mesh?` | Body fitted to the bone's vertices; returns `created_constraints[]`, `reparented_constraints[]`, `parent_body`, `shape_count` |
+| `remove_physics_body` | `asset_path`, `bone` | Removes the body and its constraints; returns `removed_constraints[]` |
+| `add_physics_constraint` | `asset_path`, `bone_a` (child), `bone_b` (parent), `constraint_name?`, `disable_collision?` (true) | Joint snapped to the child bone; refuses a duplicate pair |
+| `remove_physics_constraint` | `asset_path`, `constraint_index?` \| `constraint_name?` \| `bone_a?` + `bone_b?` | Removes one constraint. Pair collision is left as-is |
+| `set_body_collision` | `asset_path`, `body_a`, `body_b`, `enabled` | Pair collision table edit; returns `was_enabled`, `collision_enabled` |
+| `remove_control_rig_node` | `asset_path`, `node_name`, `graph_name?` | Removes the node and its links |
+| `break_control_rig_link` | `asset_path`, `source_pin?` + `target_pin?` \| `pin?`, `graph_name?` | Breaks one link, or all links on `pin`; returns `broken_links[]` |
+| `set_control_rig_pin_default` | `asset_path`, `pin_path`, `value`, `graph_name?`, `resize_arrays?` (true) | Returns `old_value`, `new_value`, `type`, `pin_is_linked` |
+| `add_control_rig_variable` | `asset_path`, `name`, `type`, `default?`, `is_public?`, `is_read_only?` | Adds a member variable (rig recompiles). Returns the final (possibly uniquified) `name` and resolved `cpp_type` |
+
+Aliases: skeleton actions accept `skeleton` for `skeleton_path`; `create_blend_profile.name` and `profile` alias each other; `set_skeleton_curve_metadata.curve` accepts `curve_name`; `save` defaults to false (package marked dirty). Physics / Control Rig actions accept `asset` for `asset_path` (except `create_physics_asset`, which accepts `path`), `mesh_path` for `skeletal_mesh`, `bone_name` for `bone`, `child_bone` / `bone_1` for `bone_a`, `parent_bone` / `bone_2` for `bone_b`, `bone_a` / `bone_b` for `body_a` / `body_b`, `pin` for `pin_path`, `variable_name` for `name`, `cpp_type` for `type`, `default_value` for `default`. `body_params` keys (engine `FPhysAssetCreateParams` defaults otherwise): `min_bone_size` (20), `min_weld_size`, `geom_type` (`capsule` \| `sphere` \| `box` \| `single_convex_hull` \| `multi_convex_hull`), `vertex_weighting` (`dominant` \| `any`), `create_constraints` (true), `auto_orient_to_bone` (true), `walk_past_small` (true), `body_for_all` (false), `disable_collisions_by_default` (true), `angular_constraint_mode` (`limited` \| `free` \| `locked`), `lod_index` (0), `hull_count` (4), `max_hull_verts` (16); a top-level `geom_type` overrides it, and it may be sent as an object or a JSON string.
+
 > For full param schemas, call `describe_query("action_schema", target_namespace="animation", target_action="<name>")` (or `monolith_discover("animation", detail=true)`). Plain `monolith_discover("animation")` is terse — names + one-line descriptions only.
 
 **Action categories:**
@@ -503,9 +571,11 @@ Animation curves, bone tracks, sync markers, root motion, compression, blend spa
 | IKRig / Retarget | 7 | `get_ikrig_info`, `add_ik_solver`, `remove_ik_solver`, `set_ik_rig_bone_settings`, `get_ik_rig_bone_settings`, `get_retargeter_info` (emits `ops[]`), `set_retarget_chain_mapping`, `add_retarget_chain`, `remove_retarget_chain`, `set_retarget_chain_bones` |
 | Retarget pose + ops (Unreleased) | 9 | `align_retarget_pose`, `get_retarget_pose`, `set_retarget_pose`, `get_retarget_chain_settings`, `set_retarget_chain_settings`, `set_retarget_root_settings`, `enable_foot_ground_lock`, `set_bone_translation_retargeting`, `get_bone_translation_retargeting` |
 | Locomotion / inspection (Unreleased) | 3 | `get_root_motion_speed`, `bind_threadsafe_update_function`, `get_animated_bone_transform` |
-| Control Rig | 7 | `get_control_rig_info`, `get_control_rig_variables`, `add_control_rig_element`, `get_control_rig_graph`, `add_control_rig_node`, `connect_control_rig_pins` |
+| Control Rig | 11 | `get_control_rig_info`, `get_control_rig_variables`, `add_control_rig_element`, `get_control_rig_graph`, `add_control_rig_node`, `connect_control_rig_pins`, `remove_control_rig_node`, `break_control_rig_link`, `set_control_rig_pin_default`, `add_control_rig_variable` |
 | Anim modifiers | 2 | `apply_anim_modifier` (accepts `properties` + `persist`), `list_anim_modifiers` |
-| Physics asset | 3 | `get_physics_asset_info`, `set_body_properties`, `set_constraint_properties` |
+| Physics asset | 9 | `get_physics_asset_info`, `set_body_properties`, `set_constraint_properties`, `create_physics_asset`, `add_physics_body`, `remove_physics_body`, `add_physics_constraint`, `remove_physics_constraint`, `set_body_collision` |
+| Skeleton authoring (new since v0.24.0) | 12 | `get_skeleton_slots`, `add_skeleton_slot`, `remove_skeleton_slot`, `set_slot_group`, `get_blend_profiles`, `create_blend_profile`, `set_blend_profile_bones`, `remove_blend_profile`, `get_skeleton_curve_metadata`, `add_skeleton_curve`, `remove_skeleton_curve`, `set_skeleton_curve_metadata` |
+| Sequence curve copy / audit (new since v0.24.0) | 2 | `copy_sequence_curves`, `audit_sequence_curves` |
 | PoseSearch | 13 | `get_pose_search_schema`, `get_pose_search_database`, `add_database_sequence`, `remove_database_sequence`, `get_database_stats`, `create_pose_search_schema`, `create_pose_search_database`, `set_database_sequence_properties`, `add_schema_channel`, `remove_schema_channel`, `set_channel_weight`, `rebuild_pose_search_index`, `set_database_search_mode` |
 | Layout / batch | 2 | `auto_layout`, `batch_execute` |
 
@@ -606,6 +676,12 @@ Live Coding builds, compile output capture, editor log capture, scene capture, t
 **New in v0.23.0 — `capture_pie_movement_clip` gained `include_ui`** (boolean, default `false`). The default capture path is `FViewport::ReadPixels`, which only ever sees the **scene render target** — Slate composites UMG into the backbuffer afterwards, so a UI capture came back as an empty scene. With `include_ui: true`, each frame is the PIE game viewport's own widget with the Slate UI composited into it (`FSlateApplication::TakeScreenshot` of `UGameViewportClient::GetGameViewportWidget()`, then the PNG is written in-process), so the PNG contains game + UMG and nothing else: the game viewport only, whether PIE is docked in the editor or in its own window. It is not a global `FScreenshotRequest`, which on a seated editor is serviced by whichever viewport draws first (the level editor's own viewport saves ITS picture under the frame's name). The frames have a pixel buffer, so the per-frame uniformity check applies like any other frame (`capture_validity.uniformity_checked` is `true`). A window Slate does not draw (minimized or hidden, a modal window active, zero size) is counted as a not-drawn frame instead of being captured. Thanks @whalemenace.
 - **Profiling / actor setup:** a declarative `actor_setup` block (spawn N actors, copy a DataAsset's reflected fields, AIController MoveToLocation) plus `csv_profile` / `trace_channels` brackets scoped to the PIE window. `get_build_errors` gained `since_marker` / `since_iso` / `clear_baseline` + compile-vs-other buckets.
 - **Map authoring:** `author_map_settings` (WorldSettings GameMode override + PlayerStarts + actor instances), `create_nav_harness_map` (now with `game_mode_override` + `player_starts`).
+
+**New since v0.24.0 (unreleased):**
+
+| Action | Params | Description |
+|---|---|---|
+| `pie_inject_key` | `key` (FKey name, required), `event?` (`pressed` \| `released` \| `tap` \| `axis`, default `tap`), `axis_value?` (1.0, axis only), `hold_seconds?` (tap: time held before release; axis: time to re-send before zeroing; default 0, max 60), `modifiers?` (array of digital key names held around the key; a comma-separated string also works), `player_index?` (0) | Inject a raw key event into a live PIE player controller via `APlayerController::InputKey`, carrying the primary input device of the controller's platform user, so Enhanced Input mappings, chords, legacy bindings and Debug Keys all see it. Ordered steps are at least 2 frames apart and run from a ticker cleared on PIE end. Returns `input_device_id`, `platform_user_id`, `total_steps`, `steps_sent_now`, `steps_scheduled`, `consumed_now`, `completed`, plus an optional `warning` (the platform-user filter would drop the event) and `note` (#162 item 9). |
 
 ### `editor.trigger_build` / `editor.live_compile`
 
@@ -768,7 +844,8 @@ Execute a Python command, statement, or file via `IPythonScriptPlugin::ExecPytho
 | `command` | string | **required** | Python source — inline code, single statement, or a file path with optional space-separated args (when `mode=execute_file`) |
 | `mode` | string | optional | `execute_file` (default), `execute_statement`, or `evaluate_statement` |
 | `unattended` | bool | optional | Set `GIsRunningUnattendedScript=true` to suppress UI dialogs. Default: `false` |
-| `file_scope` | string | optional | Scope for `execute_file`: `private` (isolated, default) or `public` (shared with REPL console) |
+| `file_scope` | string | optional | Scope for `execute_file`: `private` (isolated, default) or `public` (shared with REPL console). Applies only to a `.py` path; inline code always runs in the shared console globals |
+| `clean_globals` | bool | optional | Remove the top-level names this call created in the shared console globals afterwards, clear `builtins._` and run `gc.collect()`, so UObjects referenced only from those names can be collected. Default: `false` (globals persist across calls). `keep_globals=false` is an accepted alias, ignored when `clean_globals` is given (#166) |
 
 ### `editor.load_level` · NEW in v0.14.9
 
@@ -1139,6 +1216,21 @@ UMG widget Blueprint CRUD, templates, styling, animation (v1 + v2), the schema-d
 | Reload / diagnostics | 2 | `hot_reload_styles`, `dump_action_router_state` |
 | Reduce motion | 1 | `wrap_with_reduce_motion_gate` |
 
+**Action category (UMG MVVM, registered when `WITH_MVVM=1` — new since v0.24.0, #173):**
+
+Registered only in a source build of a project that enables the ModelViewViewModel plugin; release binaries are built with `MONOLITH_RELEASE_BUILD=1` and have none of these. Writes are transacted, refused during PIE, compile by default (`compile=true`) and do not save. Paths use `viewmodel:<Name>.<Field>...` (alias `vm:`), `widget:<Name>.<Field>...` or `self:<Field>...`; see [SPEC_MonolithUI.md § MVVM](specs/SPEC_MonolithUI.md#mvvm).
+
+| Action | Params | Description |
+|---|---|---|
+| `mvvm_get_view` | `asset_path`, `widget?` | Read viewmodels, bindings (with conversion pins and messages), events, conditions and view settings. Read-only. `widget` filters bindings/events/conditions; `*_count` are filtered, `total_*_count` are not; an unknown widget name is an error listing valid names. |
+| `mvvm_add_viewmodel` | `asset_path`, `viewmodel_class`, `name?`, `creation_type?`, `global_identifier?`, `property_path?`, `compile?` (true) | Add a viewmodel (the class must implement `INotifyFieldValueChanged`). Default creation type: `CreateInstance` if the class allows it, else the first allowed type; `creation_type_source` reports which. `Resolver` is refused. |
+| `mvvm_remove_viewmodel` | `asset_path`, `name`, `remove_bindings?` (false), `compile?` (true) | Remove a viewmodel; refuses while bindings/events use it unless `remove_bindings=true`. |
+| `mvvm_add_binding` | `asset_path`, `source`, `destination`, `mode?` (`OneWayToDestination`), `execution_mode?`, `conversion_function?`, `conversion_argument?`, `compile?` (true) | Add a binding; optional forward conversion function whose argument receives the source. |
+| `mvvm_remove_binding` | `asset_path`, `binding_id?` or `binding_index?`, `compile?` (true) | Remove a binding. |
+| `mvvm_add_event` | `asset_path`, `event`, `destination`, `arguments?` (object: argument name -> path), `compile?` (true) | Widget delegate -> viewmodel/self function. Needs the MVVM project setting "Allow Binding Event". |
+| `mvvm_remove_event` | `asset_path`, `event_name?` or `event_index?`, `compile?` (true) | Remove an event. |
+| `mvvm_set_field_notify` | `asset_path` (any Blueprint), `variable`, `enabled?` (true), `compile?` (true) | Toggle FieldNotify metadata on a Blueprint member variable; the parent must implement `INotifyFieldValueChanged`. |
+
 **GAS UI binding aliases (4 — same handlers as `gas::*` versions):**
 
 `bind_widget_to_attribute`, `unbind_widget_attribute`, `list_attribute_bindings`, `clear_widget_attribute_bindings`. These four are registered into `ui` from `MonolithGAS/Private/MonolithGASUIBindingActions.cpp`. Pick whichever namespace reads better in your call site — both dispatch to identical code.
@@ -1448,6 +1540,8 @@ Gameplay tags - references read from the Asset Registry SearchableName graph (no
 | `remove` | `tags`, `dry_run?` | Refused while assets, C++ or config use the tag |
 | `rename` | `old_tag`, `new_tag`, `rename_children?`, `dry_run?` | Redirect-based rename; lists what still spells the old name |
 | `move` | `tags`, `target_source` | Between ini sources |
+
+`update` returns an error naming the ini files that could not be written (read-only or not checked out). The overlapping `gas` actions (`add_gameplay_tags`, `remove_gameplay_tags`, `rename_tag`, `get_tag_hierarchy`) and their `gameplay_tags` counterparts cross-reference each other in their descriptions. Contributed in PR #170 by @yashabogdanoff.
 
 See `Plugins/Monolith/Docs/specs/SPEC_MonolithGameplayTags.md`.
 
