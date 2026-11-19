@@ -1,120 +1,38 @@
 # Monolith
 
-**One plugin. Every Unreal domain. Zero dependencies.**
-
 [![UE 5.7 / 5.8](https://img.shields.io/badge/Unreal-5.7%20%2F%205.8-blue)](https://unrealengine.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-purple)](https://modelcontextprotocol.io)
 
----
+Monolith is an Unreal Engine editor plugin that lets your AI assistant (Claude Code, Cursor, Cline, or anything else that speaks MCP) read and edit your project: Blueprints, materials, animation, Niagara, UI, AI, GAS, audio, meshes, engine source lookups and a lot more.
 
-## Why I built this
+I started it because every Unreal MCP setup I tried registered hundreds of separate tools, and the AI burned half its context just reading the list. Monolith puts everything behind a handful of `{namespace}_query` tools instead. The AI calls `monolith_discover()` when it needs to see what's there, and the rest of its context goes on your actual problem.
 
-Most MCP integrations for Unreal register every action as a separate tool. That floods the AI's context window with hundreds of tool names before you've asked a single question — and the actually useful stuff gets buried. I built Monolith because I wanted my AI to spend its context on my problem, not on memorising a tool catalogue.
+It's a solo hobby project that I use every day. There are roughly 1,500 actions across 27 namespaces, and `monolith_discover()` gives you the exact live count.
 
-One plugin. One MCP endpoint. A handful of namespace-dispatch tools instead of ~1,500+. The AI calls `monolith_discover()` and `monolith_guide()` when it needs to know what's available, and otherwise just hits `blueprint_query("create_blueprint", ...)`, `material_query("compile", ...)`, and so on. `monolith_discover()` is terse by default — each action returns just a name and a one-line description, so listing a namespace costs almost nothing; the full param schema is one `describe_query("action_schema", ...)` call (or `detail=true`) away when the AI actually needs it.
+## Install
 
-I use it every day. It does what I need.
+1. Grab the zip for your engine from [Releases](https://github.com/tumourlove/monolith/releases) (`-UE5.7` or `-UE5.8`) and extract it to `YourProject/Plugins/Monolith`. You can clone the repo there instead if you build from source, but a clone doesn't include the prebuilt proxy, so either build it with `Tools/MonolithProxy/build_proxy.bat` or point step 2 at `Plugins/Monolith/Scripts/monolith_proxy.bat` (needs Python 3.8+).
+2. Add a `.mcp.json` next to your `.uproject`:
+   ```json
+   {
+     "mcpServers": {
+       "monolith": { "command": "Plugins/Monolith/Binaries/monolith_proxy.exe", "args": [] }
+     }
+   }
+   ```
+3. Open the editor and wait for `Monolith MCP server listening on port 9316` in the Output Log. Then ask your AI "what Monolith tools do you have?"
 
----
+On macOS/Linux, or using Cursor/Cline? The [Installation](https://github.com/tumourlove/monolith/wiki/Installation) page covers the other setups.
 
-## What it does
+## Links
 
-Monolith exposes **~1,500+ actions across 27 in-tree namespaces** through a namespace-dispatch pattern: each domain registers a single `{namespace}_query(action, params)` tool, and a central `monolith_discover()` lists everything available. (Exact counts are intentionally approximate — query `monolith_discover()` for the live figure.)
-
-Covered domains: Blueprints, Materials, Animation, Niagara, Mesh, UI (incl. CommonUI), AI (Behavior Trees, State Trees, EQS, Smart Objects, Perception, Navigation), Gameplay Ability System, Logic Driver state machines, ComboGraph combo trees, Audio (Sound Cues + MetaSounds), Editor control (UBT builds, log capture, scene capture, asset preview & inspection), Engine source search (1M+ symbols, fully offline), Project asset search (SQLite FTS5), INI config, Level Sequences, Gameplay Tags (reference lookups, unused/broken audits, ini tag editing), a `bulk_fill` / `describe` reflection framework for deep property writes, a `monolith_guide` self-onboarding tool for your AI, plus the new v0.17.0 **Reflection Intelligence** layer: `decision` (architectural decision-record harvest), `risk` (repo-level hotspot + co-change + conditional-gate signals), `cppreflect` (UE 5.7 UHT reflection-edge queries cross-joined with the asset registry), `network` (replication inspection — replicated classes, RPCs, OnRep handlers, unbalanced-handler audits), `pipeline` (read-only composer actions for PR review + release pre-flight), and `reflect` (index maintenance — a project-only force-rebuild of the reflection tables). The `cppreflect` and `network` indexers scan your project plugins by default, so replicated classes and RPCs declared in plugins are in scope without extra setup; enabled marketplace plugins are gated behind a setting, and Epic engine built-ins stay excluded.
-
-**MCP LLM Ergonomics** (also new in v0.17.0): universal response shaping (`_fields` / `_omit` / `_compact_json`) on every action, schema-tagged param kinds with automatic `\` → `/` rewrite on asset paths, `did_you_mean` fuzzy match on dispatch errors, MCP `tools/list` annotations (read-only / destructive / idempotent hints), `source_query` cursor pagination, and a proxy-side JSONL call log. The whole point is to let your AI spend less context recovering from typos and trial-and-error.
-
-**New in v0.19.0:** an **LLM C++ authoring ergonomics pack** in the `source` namespace — eight read-only lookups so your AI resolves an include path, exact signature, deprecation status, Build.cs deps, header lint, or a UCLASS stub in one round-trip instead of reading raw source (`get_include_path`, `get_signature`, `check_deprecations`, `verify_symbols`, `find_example_usage`, `suggest_build_cs_deps`, `lint_header`, `generate_class_stub`), plus `fix_hints` on `editor.get_build_errors`. A parser fix that finally indexes allman-brace plain classes/structs **tripled the engine source index** (~300K → ~967K symbols), so lookups for `FCollisionShape`, `FScopeLock`, `FPaths` and ~40K other engine types now actually return. Plus **live-PIE introspection + driving** in the `editor` namespace (`pie_get_object_properties`, `pie_call_function`, `pie_set_control_rotation`, `pie_inject_input_action`, `pie_possess_spectator_free`), programmatic stat-group readout (`get_stat_group_values`), time-series PIE sampling and anim-node binding read/write (`animation`), a Blueprint variable-reference census (`blueprint.find_variable_references`) and contract reconciliation, and first-class T3D asset-text export (`project.export_asset_text`). The `tools/list` manifest is ~40% smaller (duplicated action lists dropped from dispatcher descriptions), and two first-launch fixes land (MonolithMesh now delay-loads GeometryScripting; the deep indexer no longer asserts on UserDefinedStruct fields with unresolved types — issue #70, thanks @aggitti).
-
-**New in v0.20.0:** an **AnimGraph-authoring pack** in the `animation` namespace — apply-additive / mesh-space-additive nodes, slot nodes (validated against the skeleton's slot groups), save/use cached pose, output-pose and state-result wiring, blend-by-int, sync groups, layered-blend-per-bone filters, Control Rig anim-graph nodes, linked anim layers, and state-machine conduits — plus blend-space baking + interpolation control, state-machine teardown (remove states / transitions / re-point entry), IK-solver removal, and a Blueprint-Assist-free `auto_layout` formatter that works in release builds.
-
-**New in v0.18.1:** a from-scratch **Motion Matching authoring pack** across the `animation`, `chooser`, and `blueprint` namespaces — Pose Search schema / database primitives, mirror data tables, chooser-table authoring, the AnimBP motion-matching graph + foot-IK, thread-safe AnimBP authoring (reflective Property Access, a thread-safe function flag, and an exec-driven chooser feeding the Motion Matching database), character/actor scaffolding, and a retarget create/run pack. Plus a **PIE / profiling harness** (async PIE-smoke sessions, CSV / Insights profiling brackets, clip + anim-frame capture, map authoring, nav rebuild/validate), **state-machine authoring + live anim-instance telemetry**, a generic **AI controller that runs a BehaviorTree on possess** with movement-driving BT task classes, inherited-native-component inspection, and live DataAsset field read-back.
-
-**New in v0.18.0:** Niagara HLSL direct-editing — read and overwrite the HLSL source on a `CustomHlsl` node (`get_custom_hlsl_text` / `set_custom_hlsl_text`), plus simulation-stage / event-handler selectors on the module-stack actions and a ParameterMap bridge for `create_module_from_hlsl` (PR #65, thanks @middle233). Niagara also gains a search & discovery pack (`search_by_parameter`, `search_by_data_interface`, `query_niagara`, `find_similar_systems`, `search_by_material`, `find_niagara_references`, `list_system_data_interfaces`).
-
-Full per-namespace breakdown: **[Tool Reference (wiki)](https://github.com/tumourlove/monolith/wiki/Tool-Reference)**.
-
-Works with **Claude Code**, **Cursor**, **Cline**, or any MCP-compatible client. Windows, macOS, Linux.
-
----
-
-## Quick install
-
-**1. Drop into Plugins/**
-
-```bash
-cd YourProject/Plugins
-git clone https://github.com/tumourlove/monolith.git Monolith
-```
-
-(Or grab the [latest release zip](https://github.com/tumourlove/monolith/releases) and extract to the same path. The release zip includes precompiled DLLs so Blueprint-only projects can open the editor immediately without rebuilding. Monolith builds on **UE 5.7 and 5.8** from a single source tree — but the precompiled DLLs are engine-locked, so Blueprint-only users grab the zip for their engine, `Monolith-vX.Y.Z-UE5.7.zip` or `-UE5.8.zip`. Building from source works on either.)
-
-**2. Create `.mcp.json`** in your project root (same directory as your `.uproject`):
-
-```json
-{
-  "mcpServers": {
-    "monolith": {
-      "command": "Plugins/Monolith/Binaries/monolith_proxy.exe",
-      "args": []
-    }
-  }
-}
-```
-
-The native C++ proxy keeps your AI session alive when the editor restarts. For **Cursor/Cline**, **macOS/Linux**, or the **Python fallback**, see the [Installation wiki page](https://github.com/tumourlove/monolith/wiki/Installation).
-
-**3. Open the editor.** Wait 30-60 seconds for the first-launch index. When you see `Monolith MCP server listening on port 9316` in the Output Log (filter `LogMonolith`), connect your AI client and ask *"what Monolith tools do you have?"* to verify.
-
-Project-instructions files (`CLAUDE.md`, `AGENTS.md`, `.cursorrules`, etc.) vary per assistant — just paste the namespace list into your AI and ask it to generate the right format for your toolchain. Full install variants, troubleshooting, and post-install setup live on the [Installation wiki](https://github.com/tumourlove/monolith/wiki/Installation).
-
----
-
-## Standalone tools
-
-Two zero-dependency C++ executables ship in `Binaries/` and work without the editor:
-
-- **`monolith_proxy.exe`** — MCP stdio↔HTTP proxy. Keeps your AI session alive across editor restarts. Used by the `.mcp.json` config above.
-- **`monolith_query.exe`** — Offline query tool. Serves the engine source index, project asset index, and the full Reflection Intelligence surface (`decision` / `risk` / `cppreflect` / `network`) without launching UE — byte-identical to the live server, verified by a ship-blocking parity guard. Instant startup; useful for terminal-side lookups and CI when the editor is down.
-
-Details: [wiki Tool Reference](https://github.com/tumourlove/monolith/wiki/Tool-Reference).
-
----
-
-## Auto-updater
-
-Off by default as of v0.14.6. Opt in via **Auto Update Enabled** in Project Settings > Plugins > Monolith — checks GitHub Releases on editor startup, verifies the downloaded zip's SHA256 against the release-notes marker, swaps the plugin on editor exit (after a Y/N prompt). See [Auto-Updater wiki](https://github.com/tumourlove/monolith/wiki/Auto-Updater).
-
----
-
-## Network exposure
-
-Monolith starts a local HTTP server on port 9316 to receive MCP traffic. UE's `FHttpServerModule` does **not** expose a bind-address parameter, so the listener is reachable on all network interfaces, not just `127.0.0.1`. CORS is restricted to localhost origins (which blocks browser-based cross-origin reads) but does **not** block direct HTTP requests from other devices on the same LAN.
-
-If you work on an untrusted network: either add a Windows Firewall rule blocking inbound TCP on port 9316 from non-loopback addresses, or untick **MCP Server Enabled** in Project Settings > Plugins > Monolith and restart the editor.
-
-See [SECURITY.md](SECURITY.md) for the full threat model and disclosure policy.
-
----
-
-## Documentation
-
-- **[Wiki](https://github.com/tumourlove/monolith/wiki)** — installation variants, tool reference, connecting your AI, configuration, auto-updater, FAQ, skills, optional modules, engine source index details, mesh module deep dive, horror level design, procedural geometry, genre presets, test status
-- **[API_REFERENCE.md](Docs/API_REFERENCE.md)** — full per-action parameter reference, regenerated from the live registry each release
-- **[SPEC_CORE.md](Docs/SPEC_CORE.md)** — technical specification and architecture; per-module specs at [`Docs/specs/`](Docs/specs/)
-- **[CHANGELOG.md](CHANGELOG.md)** — version history, contributor credits, breaking-change notes
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** — dev setup, coding conventions, how to add new actions, PR process
-
----
-
-## Contributing
-
-Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). Every release [CHANGELOG](CHANGELOG.md) names the PR authors and issue reporters whose work shipped — credit goes where it's due.
-
----
+- [Wiki](https://github.com/tumourlove/monolith/wiki): setup, configuration, FAQ and the full tool reference
+- [API reference](Docs/API_REFERENCE.md): every action and its params
+- [Changelog](CHANGELOG.md): what changed in each release
+- [Contributing](CONTRIBUTING.md): PRs and issues are welcome, and every release credits the people whose work shipped in it
+- [Security](SECURITY.md): the MCP server on port 9316 is reachable from your LAN, so read this if you're on a network you don't trust
 
 ## License
 
-[MIT](LICENSE) — see [ATTRIBUTION.md](ATTRIBUTION.md) for credits.
+[MIT](LICENSE). Credits are in [ATTRIBUTION.md](ATTRIBUTION.md).

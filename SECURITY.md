@@ -36,7 +36,7 @@ Only the latest tagged release is supported. Older versions do not receive backp
 - Do not run the editor on a machine where untrusted users have local accounts
 - The MCP server binds to all network interfaces (limitation of UE's `FHttpServerModule`). If your machine is on an untrusted LAN, either:
   - Add a Windows Firewall rule blocking inbound TCP on port 9316 from non-loopback addresses, OR
-  - Set `bMcpServerEnabled = false` in Editor Preferences > Plugins > Monolith when not actively using AI tooling
+  - Set `bMcpServerEnabled = false` in Project Settings > Plugins > Monolith when not actively using AI tooling
 
 ## Acknowledgements
 
