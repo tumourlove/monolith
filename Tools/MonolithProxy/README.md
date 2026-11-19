@@ -22,7 +22,7 @@ If the C++ proxy encounters issues, you can revert to the Python proxy by updati
 ```json
 {
   "command": "python",
-  "args": ["<project-root>/Scripts/monolith_proxy.py"]
+  "args": ["<project-root>/Plugins/Monolith/Scripts/monolith_proxy.py"]
 }
 ```
 
@@ -34,8 +34,8 @@ Then restart Claude Code.
 
 ## Proxy Details
 
-- **Python proxy:** `Scripts/monolith_proxy.py` — Stdio-to-HTTP proxy, survives editor restarts via background health polling
-- **C++ proxy:** `Plugins/Monolith/Binaries/monolith_proxy.exe` — Native executable, faster startup
+- **Python proxy:** `Plugins/Monolith/Scripts/monolith_proxy.py` — Stdio-to-HTTP proxy, survives editor restarts via background health polling
+- **C++ proxy:** `Plugins/Monolith/Binaries/monolith_proxy.exe` — Native executable, faster startup. Shipped in the release zips; a git clone has no `Binaries/`, so build it with `build_proxy.bat` in this folder
 - **Backend:** Both connect to the same Monolith HTTP server running in the Unreal Editor
 - **Editor-down startup:** Both proxies return a cached Monolith tool list when available, or a stable seed list of namespace/meta tools. This prevents MCP clients that do not fully refresh on `tools/list_changed` from starting with an empty Monolith catalog.
 
