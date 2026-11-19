@@ -6,15 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-11-20
+
 > **Action count is approximate.** **~1,500+ actions across 27 in-tree namespaces** - query `monolith_discover()` for the live figure.
 
-**Behaviour changes in this cycle** (details in the bullets below):
+**Behaviour changes in this release** (details in the bullets below):
 - `blueprint set_property_at_path` now refuses to write into an object outside the target asset's package unless `allow_external: true` is passed.
 - `editor run_python` keeps its top-level globals by default; the post-call cleanup is opt-in via `clean_globals: true`.
 - `blueprint set_function_params` now reconstructs the function's entry/result nodes and every loaded call site after adding parameters.
 - `DatabasePathOverride` is now honoured; anyone who had set it will see `ProjectIndex.db` open at that path.
 - `ui mvvm_add_viewmodel` defaults to the `CreateInstance` creation type when the class allows it (the stock MVVM panel defaults to the first allowed type, usually `Manual`).
 - New optional plugin reference `ModelViewViewModel` in `Monolith.uplugin`. The MVVM actions exist only in source builds of a project that enables that plugin; release binaries ship without them.
+- New plugin reference `GameplayTagsEditor` in `Monolith.uplugin` (for the `gameplay_tags` write actions). It is an engine plugin enabled by default, so nothing changes unless a project has turned it off.
 
 ### Added
 

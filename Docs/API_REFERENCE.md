@@ -1,6 +1,6 @@
 # Monolith API Reference
 
-**Version:** v0.24.0 · **Last updated:** 2026-10-18
+**Version:** v0.25.0 · **Last updated:** 2026-11-20
 
 **In-tree action total is approximate: ~1,500+ actions across 27 in-tree namespaces** (public, in-tree only; all active by default, plus 45 experimental town-gen actions that register only when `bEnableProceduralTownGen=true`). v0.23.0 adds two namespaces — `input` (Enhanced Input, 13) and `localization` (read-only culture + StringTable, 4) — plus 6 read-only `chooser` actions and 5 `blueprint` User Defined Struct field actions. The surface is too large to track to the unit — **query `monolith_discover()` (its `total_actions` field) for the exact live figure.** The `ui` namespace re-exports 4 GAS UI binding actions as aliases. v0.19.0 adds an LLM C++ authoring ergonomics pack (`source`, 8 actions + `editor.get_build_errors` fix hints), live-PIE introspection + driving and stat-group readout (`editor`), anim-node binding read/write and time-series PIE sampling (`animation`), a Blueprint variable census + contract reconciliation (`blueprint`), and T3D asset-text export (`project`); plus two first-launch fixes (issue #70) and a ~40% smaller `tools/list` manifest. The `monolith_*` meta-tools (`discover`, `status`, `update`, `reindex`, `guide`) plus the `bulk_fill_query` and `describe_query` framework dispatchers round out the MCP tool count. This total EXCLUDES sibling-plugin actions — they ship in their own repos and are never in the public release zip.
 
@@ -47,7 +47,7 @@ The per-namespace numbers in the Table of Contents and body sections below are k
 | [network](#network) | 4 | **New v0.17.0.** Reflection Intelligence — UE 5.7 replication inspection (replicated classes, RPCs, OnRep handlers, unbalanced-OnRep audit) |
 | [pipeline](#pipeline) | 2 | **New v0.17.0.** Reflection Intelligence — read-only composer actions (`pr_review`, `release_readiness`) |
 | [reflect](#reflect) | 1 | **New v0.19.0.** Reflection Intelligence — index maintenance (`rebuild_reflection_index`, project-only force-rebuild of the RI reflection tables; WRITE/maintenance) |
-| **In-tree subtotal** | **~1,400+** | (all default-active; +45 experimental town gen when registered). Rounded down by policy — query `monolith_discover()` for the exact live figure |
+| **In-tree subtotal** | **~1,500+** | (all default-active; +45 experimental town gen when registered). Rounded down by policy — query `monolith_discover()` for the exact live figure |
 | [Sibling plugins](#sibling-plugins) | varies | Separate plugins, separate distribution |
 
 ---
@@ -187,7 +187,7 @@ Full read/write access to Blueprint graphs, variables, components, functions, no
 - **`add_node` places unpositioned nodes in clear space.** Omitting `position` used to default to `[0,0]`, stacking every MCP-authored node on the origin (#132). An explicit `position` is still authoritative and the first node in an empty graph still lands at `[0,0]`; the response now reports the chosen position plus `position_source` (`"explicit"` / `"auto"`).
 - **`auto_layout(layout_mode: "new_only")` unpins piles, not just the origin.** A node counts as new if it is at the origin *or* piled on another node (intersection area against the smaller node, 25% threshold), so edge contact in a hand-laid graph is left alone. The response gained `nodes_pinned`. **Consequence:** because `add_node` now lands unpositioned nodes in clear space, those nodes are *not* `new_only` candidates — use `layout_mode: "all"` to fold them into the flow.
 
-**New since v0.24.0 (unreleased):**
+**New in v0.25.0:**
 
 | Action | Params | Description |
 |---|---|---|
@@ -466,9 +466,9 @@ Material graph editing, inspection, CRUD, material functions, instances, custom 
 | Layers | 1 | `get_layer_info` |
 | Batch | 2 | `batch_set_material_property`, `batch_recompile` |
 | Transactions | 2 | `begin_transaction`, `end_transaction` |
-| Layout measurement (new since v0.24.0) | 1 | `measure_graph_nodes` |
+| Layout measurement (new in v0.25.0) | 1 | `measure_graph_nodes` |
 
-**New since v0.24.0 (unreleased):**
+**New in v0.25.0:**
 
 | Action | Params | Description |
 |---|---|---|
@@ -517,7 +517,7 @@ Animation curves, bone tracks, sync markers, root motion, compression, blend spa
 - **Inspection (1):** `get_animated_bone_transform` (FK-composed bone transform at a frame/time, component or world space).
 - **Extensions (no new actions):** `get_retargeter_info` now emits an `ops[]` array (per-op type + settings); `apply_anim_modifier` now accepts a `properties` reflective field set + a `persist` flag (register into the `AnimationModifiers` stack); `get_blend_space_info` now reports per-sample authored root-motion speed + `triangulation_baked` / `interpolate_using_grid`; `get_anim_node_pin_bindings` now also emits wire-linked input pins (`type:"Link"` with source node/pin); `derive_foot_sync_markers` gains a `from_bones` mode (foot plants from per-frame foot-bone height + planar-speed minima); `get_curve_keys` now reports `monotonic` + `sign` flags; `set_anim_node_pin_binding` gains optional `array_index` (`FAnimGraphNodePropertyBinding::ArrayIndex`; omitted = keep the existing index, else derive it from an array-element pin name such as `BlendWeights_2`; `-1` = whole property) and reports `array_index` / `array_index_source`, and `get_anim_node_pin_bindings` reports `array_index` per binding; `set_anim_node_function_binding` now calls `RequestRefreshExtensions` so the recompile regenerates the anim-subsystem set (prevents a null `NodeRelevancy` subsystem at runtime).
 
-**New since v0.24.0 (unreleased) — skeleton authoring, curve copy/audit, physics asset structure, Control Rig graph edits:**
+**New in v0.25.0 — skeleton authoring, curve copy/audit, physics asset structure, Control Rig graph edits:**
 
 | Action | Params | Description |
 |---|---|---|
@@ -574,8 +574,8 @@ Aliases: skeleton actions accept `skeleton` for `skeleton_path`; `create_blend_p
 | Control Rig | 11 | `get_control_rig_info`, `get_control_rig_variables`, `add_control_rig_element`, `get_control_rig_graph`, `add_control_rig_node`, `connect_control_rig_pins`, `remove_control_rig_node`, `break_control_rig_link`, `set_control_rig_pin_default`, `add_control_rig_variable` |
 | Anim modifiers | 2 | `apply_anim_modifier` (accepts `properties` + `persist`), `list_anim_modifiers` |
 | Physics asset | 9 | `get_physics_asset_info`, `set_body_properties`, `set_constraint_properties`, `create_physics_asset`, `add_physics_body`, `remove_physics_body`, `add_physics_constraint`, `remove_physics_constraint`, `set_body_collision` |
-| Skeleton authoring (new since v0.24.0) | 12 | `get_skeleton_slots`, `add_skeleton_slot`, `remove_skeleton_slot`, `set_slot_group`, `get_blend_profiles`, `create_blend_profile`, `set_blend_profile_bones`, `remove_blend_profile`, `get_skeleton_curve_metadata`, `add_skeleton_curve`, `remove_skeleton_curve`, `set_skeleton_curve_metadata` |
-| Sequence curve copy / audit (new since v0.24.0) | 2 | `copy_sequence_curves`, `audit_sequence_curves` |
+| Skeleton authoring (new in v0.25.0) | 12 | `get_skeleton_slots`, `add_skeleton_slot`, `remove_skeleton_slot`, `set_slot_group`, `get_blend_profiles`, `create_blend_profile`, `set_blend_profile_bones`, `remove_blend_profile`, `get_skeleton_curve_metadata`, `add_skeleton_curve`, `remove_skeleton_curve`, `set_skeleton_curve_metadata` |
+| Sequence curve copy / audit (new in v0.25.0) | 2 | `copy_sequence_curves`, `audit_sequence_curves` |
 | PoseSearch | 13 | `get_pose_search_schema`, `get_pose_search_database`, `add_database_sequence`, `remove_database_sequence`, `get_database_stats`, `create_pose_search_schema`, `create_pose_search_database`, `set_database_sequence_properties`, `add_schema_channel`, `remove_schema_channel`, `set_channel_weight`, `rebuild_pose_search_index`, `set_database_search_mode` |
 | Layout / batch | 2 | `auto_layout`, `batch_execute` |
 
@@ -677,7 +677,7 @@ Live Coding builds, compile output capture, editor log capture, scene capture, t
 - **Profiling / actor setup:** a declarative `actor_setup` block (spawn N actors, copy a DataAsset's reflected fields, AIController MoveToLocation) plus `csv_profile` / `trace_channels` brackets scoped to the PIE window. `get_build_errors` gained `since_marker` / `since_iso` / `clear_baseline` + compile-vs-other buckets.
 - **Map authoring:** `author_map_settings` (WorldSettings GameMode override + PlayerStarts + actor instances), `create_nav_harness_map` (now with `game_mode_override` + `player_starts`).
 
-**New since v0.24.0 (unreleased):**
+**New in v0.25.0:**
 
 | Action | Params | Description |
 |---|---|---|
@@ -1216,7 +1216,7 @@ UMG widget Blueprint CRUD, templates, styling, animation (v1 + v2), the schema-d
 | Reload / diagnostics | 2 | `hot_reload_styles`, `dump_action_router_state` |
 | Reduce motion | 1 | `wrap_with_reduce_motion_gate` |
 
-**Action category (UMG MVVM, registered when `WITH_MVVM=1` — new since v0.24.0, #173):**
+**Action category (UMG MVVM, registered when `WITH_MVVM=1` — new in v0.25.0, #173):**
 
 Registered only in a source build of a project that enables the ModelViewViewModel plugin; release binaries are built with `MONOLITH_RELEASE_BUILD=1` and have none of these. Writes are transacted, refused during PIE, compile by default (`compile=true`) and do not save. Paths use `viewmodel:<Name>.<Field>...` (alias `vm:`), `widget:<Name>.<Field>...` or `self:<Field>...`; see [SPEC_MonolithUI.md § MVVM](specs/SPEC_MonolithUI.md#mvvm).
 
@@ -2019,7 +2019,7 @@ If you're building a sibling plugin yourself, read `Plugins/Monolith/Docs/SIBLIN
 |---|---|---|---|---|
 | External sibling plugin | Custom | Varies | Registers its own namespace at startup and ships through its own repo/channel. | Outside `Plugins/Monolith/` |
 
-**Why these aren't in the in-tree count:** the in-tree count (the approximate `~1,400+ / 25+` figure) counts only modules shipped inside the public `Monolith-vX.Y.Z.zip` release. Sibling plugins live in their own folders, ship via their own channels (or stay private), and may or may not be installed in any given consumer's project. Their absence is not a degraded state — Monolith is fully functional without them.
+**Why these aren't in the in-tree count:** the in-tree count (the approximate `~1,500+ / 27` figure) counts only modules shipped inside the public `Monolith-vX.Y.Z.zip` release. Sibling plugins live in their own folders, ship via their own channels (or stay private), and may or may not be installed in any given consumer's project. Their absence is not a degraded state — Monolith is fully functional without them.
 
 Private sibling bridges are intentionally omitted from the public API reference. Their action rosters, namespaces, and release notes belong in their own repos/channels; Monolith must not publish them as part of the public API surface.
 

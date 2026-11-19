@@ -2,7 +2,7 @@
 
 **Parent:** [SPEC_CORE.md](../SPEC_CORE.md)
 **Engine:** Unreal Engine 5.7+
-**Version:** 0.24.0 (Beta) — includes the 12 MetaSound document introspection actions
+**Version:** 0.25.0 (Beta) — includes the 12 MetaSound document introspection actions
 
 ---
 
