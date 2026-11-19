@@ -17,6 +17,7 @@ class FObjectProperty;
 class FSoftObjectProperty;
 class FEnumProperty;
 class UStruct;
+class UPackage;
 
 /**
  * Static helper library that walks a JSON tree against a UStruct's FProperty schema.
@@ -84,13 +85,81 @@ public:
 	 * write: nested arrays/maps along the path are addressed in place, NOT
 	 * cleared+rebuilt the way WriteArray/WriteMap do for a full tree.
 	 */
+	/**
+	 * Owned, default-initialised value of one FProperty. A no-mutation resolve
+	 * (FPathResolveOptions::bNoMutation) that meets a missing map key with
+	 * bCreateMissingKeys walks the rest of the path inside one of these instead of
+	 * adding a pair to the live map. The result keeps it alive.
+	 */
+	struct MONOLITHCORE_API FPathScratchValue
+	{
+		explicit FPathScratchValue(const FProperty* InProp);
+		~FPathScratchValue();
+		FPathScratchValue(const FPathScratchValue&) = delete;
+		FPathScratchValue& operator=(const FPathScratchValue&) = delete;
+
+		const FProperty* Prop = nullptr;
+		void* Memory = nullptr;
+	};
+
 	struct FPathResolveResult
 	{
 		bool bOk = false;
 		FString Error;                  // Human-readable failure reason (empty on success).
 		FProperty* LeafProp = nullptr;  // Terminal FProperty to write through.
-		void* LeafPtr = nullptr;        // Address of the terminal value inside Container.
+		void* LeafPtr = nullptr;        // Address of the terminal value inside Container (or inside a scratch value).
 		FString LeafTypeName;           // LeafProp->GetCPPType() — echoed back to the caller.
+
+		// UObject that directly holds the leaf: the deepest object the path dereferenced,
+		// or FPathResolveOptions::RootObject when the path never crosses an object ref.
+		UObject* LeafOwnerObject = nullptr;
+		// First member property resolved on LeafOwnerObject (the property to notify in
+		// PreEditChange / PostEditChange on that object).
+		FProperty* LeafOwnerHeadProp = nullptr;
+		// Path names of dereferenced objects whose package differs from
+		// FPathResolveOptions::HomePackage (only filled when HomePackage is set).
+		TArray<FString> ExternalObjects;
+
+		// A '[Key]' segment named a key that was absent and was created: added to the
+		// live map (normal resolve) or resolved against a scratch value (bNoMutation).
+		// Only the first (outermost) created entry is described below.
+		bool bCreatedMissingKey = false;
+		FString CreatedKeyPath;                   // Path prefix up to and including the created key's bracket.
+		FProperty* CreatedElementProp = nullptr;  // Map ValueProp of the created entry.
+		void* CreatedElementPtr = nullptr;        // Value of the created entry.
+		bool bLeafIsCreatedElement = false;       // The path ends at the created entry itself.
+		bool bLeafInScratch = false;              // LeafPtr points into a scratch value, not into Container.
+		bool bAppliedNewElementValue = false;     // FPathResolveOptions::NewElementValue initialised the created entry.
+
+		// Non-fatal notes (e.g. new_element_value ignored because the key already existed).
+		TArray<FString> Warnings;
+
+		// Keeps scratch values alive for as long as the result (and LeafPtr) is used.
+		TArray<TSharedPtr<FPathScratchValue>> ScratchValues;
+	};
+
+	/** Options for ResolvePathWithOptions. Defaults reproduce ResolvePath(..., false). */
+	struct FPathResolveOptions
+	{
+		// Add a default-initialised value when a '[Key]' segment's key is absent.
+		bool bCreateMissingKeys = false;
+		// Never mutate Container. A missing key with bCreateMissingKeys resolves the rest
+		// of the path against a scratch value (bLeafInScratch on the result). Use for dry runs.
+		bool bNoMutation = false;
+		// Optional value used to initialise the FIRST map entry the path creates, before
+		// the rest of the path is walked. Accepts what WriteLeaf accepts for the map's
+		// value type (ImportText text such as "(A=1,B=(C=2))", or a JSON object).
+		TSharedPtr<FJsonValue> NewElementValue;
+		// Object that owns Container (the asset / CDO). Seeds LeafOwnerObject.
+		UObject* RootObject = nullptr;
+		// When set, every dereferenced object outside this package is listed in
+		// ExternalObjects.
+		const UPackage* HomePackage = nullptr;
+		// With HomePackage set: fail the resolve on the first dereference into an
+		// object outside HomePackage. Writes use this so they cannot land in other assets.
+		bool bRefuseExternalObjects = false;
+		// Strict coercion when applying NewElementValue.
+		bool bStrict = false;
 	};
 
 	/**
@@ -104,6 +173,11 @@ public:
 	 *           so enum names ("Jog"), integers, FName/string keys all resolve.
 	 *           Missing key -> error UNLESS bCreateMissingKeys (then AddPair with a
 	 *           default-initialised value, then re-locate the value ptr).
+	 *   - "[@Name]" on an array of object refs selects the element whose object
+	 *           name matches (case-insensitive), e.g. "Nodes[@MyNode_0]".
+	 *   - "[@class=ClassName]" on an array of object refs selects the single element
+	 *           of exactly that class (with or without the U prefix). More than one
+	 *           match is an error; use [@Name] or [N] then.
 	 *   - a bare segment after an FObjectProperty descends into the pointed-at
 	 *     UObject's class (the ref must already be set / resolvable in memory).
 	 *
@@ -116,6 +190,35 @@ public:
 		void* Container,
 		const FString& Path,
 		bool bCreateMissingKeys);
+
+	/** ResolvePath with the full option set (no-mutation dry runs, new-entry init, object scope). */
+	static FPathResolveResult ResolvePathWithOptions(
+		UStruct* TopStruct,
+		void* Container,
+		const FString& Path,
+		const FPathResolveOptions& Options);
+
+	/**
+	 * Dry-run evaluation of a leaf write. Copies the CURRENT leaf value into a scratch
+	 * buffer and writes there, so CurrentValue reports the live value and the leaf is
+	 * not mutated. When the leaf already lives in a scratch value (bLeafInScratch) it is
+	 * written in place. Strict numeric text checks apply exactly as in a real write.
+	 */
+	static FBulkFillFieldWrite InspectLeaf(
+		const FPathResolveResult& Resolved,
+		const TSharedPtr<FJsonValue>& JsonVal,
+		UObject* Owner,
+		const FBulkFillSpec& Spec,
+		FDryRunReport& OutReport,
+		const FString& PathLabel);
+
+	/**
+	 * For a struct value (ElementProp an FStructProperty), list the fields that still
+	 * equal the struct's default, as dotted authored names. A field that differs from
+	 * its default and is itself a struct is searched recursively ("Value.Type").
+	 * Returns an empty array for non-struct values.
+	 */
+	static TArray<FString> ListDefaultedStructFields(const FProperty* ElementProp, const void* ElementPtr, int32 MaxDepth = 4);
 
 	/**
 	 * Coerce + write a single JSON value into a single resolved leaf (LeafProp +
@@ -175,7 +278,10 @@ private:
 
 	// Per-type ImportText grammar emitters. Each writes one value into one FProperty.
 	// Signature: returns bOk + Reason via the FBulkFillFieldWrite the caller passes in.
-	static void WriteScalar(FProperty* Prop, void* ValuePtr, const TSharedPtr<FJsonValue>& JsonVal, UObject* Owner, FBulkFillFieldWrite& OutWrite);
+	// Spec/OutReport are optional: with them, numeric text that ImportText would only
+	// partly parse ("abc" -> 0 on a float) is an error under Spec.bStrict, and a
+	// SilentDrops entry otherwise.
+	static void WriteScalar(FProperty* Prop, void* ValuePtr, const TSharedPtr<FJsonValue>& JsonVal, UObject* Owner, FBulkFillFieldWrite& OutWrite, const FBulkFillSpec* Spec = nullptr, FDryRunReport* OutReport = nullptr);
 	static void WriteStruct(FStructProperty* StructProp, void* ValuePtr, const TSharedPtr<FJsonValue>& JsonVal, UObject* Owner, const FBulkFillSpec& Spec, FDryRunReport& OutReport, const FString& PathPrefix, FBulkFillFieldWrite& OutWrite);
 	static void WriteArray(FArrayProperty* ArrayProp, void* ValuePtr, const TSharedPtr<FJsonValue>& JsonVal, UObject* Owner, const FBulkFillSpec& Spec, FDryRunReport& OutReport, const FString& PathPrefix, FBulkFillFieldWrite& OutWrite);
 	static void WriteMap(FMapProperty* MapProp, void* ValuePtr, const TSharedPtr<FJsonValue>& JsonVal, UObject* Owner, const FBulkFillSpec& Spec, FDryRunReport& OutReport, const FString& PathPrefix, FBulkFillFieldWrite& OutWrite);

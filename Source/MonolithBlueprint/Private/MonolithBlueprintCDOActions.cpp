@@ -79,16 +79,25 @@ void FMonolithBlueprintCDOActions::RegisterActions(FMonolithToolRegistry& Regist
 			 "enum names, ImportText struct literals, hard object refs and TSoftObjectPtr asset "
 			 "paths, identical to set_cdo_property. Surgical: sibling array elements / map keys are "
 			 "left untouched (unlike set_cdo_properties which rebuilds whole collections). Writes "
-			 "EditDefaultsOnly fields the editor blocks on saved instances."),
+			 "EditDefaultsOnly fields the editor blocks on saved instances. Object references are "
+			 "followed, so paths can reach sub-objects such as editor graph nodes "
+			 "('Source.Nodes[3].Prop'); on arrays of object refs '[@ObjectName]' selects an element by "
+			 "object name and '[@class=ClassName]' by exact class (must be unique). Writes refuse objects "
+			 "outside the target asset's package unless allow_external=true; dry runs follow them and "
+			 "report external_objects. Creating a map entry by writing one leaf leaves the entry's other "
+			 "fields at defaults: the result lists them in defaulted_fields with a warning; pass "
+			 "new_element_value to initialise the entry first."),
 		FMonolithActionHandler::CreateStatic(&HandleSetPropertyAtPath),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint or UObject asset path (e.g. /Game/Data/DA_MyData)"))
-			.Required(TEXT("path"), TEXT("string"), TEXT("Dotted+bracket property path, e.g. 'Standing.Gaits[Jog].Starts.Forward'. '.'=struct member, '[N]'=array index, '[Key]'=map key."))
+			.Required(TEXT("path"), TEXT("string"), TEXT("Dotted+bracket property path, e.g. 'Standing.Gaits[Jog].Starts.Forward'. '.'=struct member (or member of the object a reference points at), '[N]'=array index, '[Key]'=map key, '[@ObjectName]' / '[@class=ClassName]'=element of an array of object refs."))
 			.Required(TEXT("value"), TEXT("any"), TEXT("New leaf value — string / number / bool, an enum name, a soft/hard object asset path, or ImportText / JSON for a struct leaf."))
-			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("If true, resolve the path and validate the leaf write but do not persist."), TEXT("false"))
-			.Optional(TEXT("strict"), TEXT("boolean"), TEXT("If true, promote silent drops / clamps to hard errors."), TEXT("false"))
-			.Optional(TEXT("create_missing_keys"), TEXT("boolean"), TEXT("If true, a '[Key]' segment whose map key is absent is added with a default-initialised value before writing the leaf. Default: error on a missing key."), TEXT("false"))
-			.Optional(TEXT("save"), TEXT("boolean"), TEXT("If true, save the asset package to disk after the write (UPackage::SavePackage). Default: MarkPackageDirty only."), TEXT("false"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("If true, resolve the path and validate the leaf write against a copy of the live value (field_writes[0].current is the live value) but do not persist. Honours create_missing_keys and new_element_value without touching the asset."), TEXT("false"))
+			.Optional(TEXT("strict"), TEXT("boolean"), TEXT("If true, promote silent drops / clamps to hard errors, including numeric text the engine would only partly parse (e.g. 'abc' for a float). A strict dry run that would fail returns an error."), TEXT("false"))
+			.Optional(TEXT("create_missing_keys"), TEXT("boolean"), TEXT("If true, a '[Key]' segment whose map key is absent is added with a default-initialised value (or new_element_value) before writing the leaf. Default: error on a missing key."), TEXT("false"))
+			.Optional(TEXT("new_element_value"), TEXT("any"), TEXT("Initial value for the first map entry the path creates, applied before the leaf write: ImportText for the map's value type (e.g. '(bEnable=True,Value=(Type=Float))') or a JSON object. Ignored, with a warning, when the key already exists."))
+			.Optional(TEXT("allow_external"), TEXT("boolean"), TEXT("If true, a write may follow object references into objects outside the target asset's package (that package is marked dirty but not saved). Default: such writes are refused."), TEXT("false"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("If true, save the asset package to disk after the write through the editor check-out-and-save path; on failure the write stays in memory and the result carries saved=false plus save_error. Default: MarkPackageDirty only."), TEXT("false"))
 			.Build());
 
 	// --- Phase 1: bulk_fill plural sibling to set_cdo_property.
@@ -617,40 +626,152 @@ FMonolithActionResult FMonolithBlueprintCDOActions::HandleSetPropertyAtPath(cons
 	Spec.bDryRun = DryRunGuard.IsDryRun();
 	Spec.bStrict = DryRunGuard.IsStrict();
 
-	// --- Dry run: resolve the path against the LIVE object (read-only navigation;
-	// create_missing_keys is forced OFF so a dry run never mutates map storage),
-	// then validate the leaf write through a scratch buffer so nothing is touched.
+	bool bAllowExternal = false;
+	Params->TryGetBoolField(TEXT("allow_external"), bAllowExternal);
+
+	// Optional initial value for a map entry the path creates (issue #172).
+	TSharedPtr<FJsonValue> NewElementValue;
+	if (Params->HasField(TEXT("new_element_value")))
+	{
+		NewElementValue = Params->TryGetField(TEXT("new_element_value"));
+		if (NewElementValue.IsValid() && NewElementValue->Type == EJson::Null)
+		{
+			NewElementValue.Reset();
+		}
+	}
+
+	FMonolithReflectionWalker::FPathResolveOptions ResolveOptions;
+	ResolveOptions.bCreateMissingKeys = bCreateMissingKeys;
+	ResolveOptions.NewElementValue = NewElementValue;
+	ResolveOptions.RootObject = TargetObject;
+	ResolveOptions.HomePackage = TargetObject->GetPackage();
+	ResolveOptions.bStrict = Spec.bStrict;
+
+	// Shared result annotations: what the path created, which fields of a created
+	// entry stayed at their defaults, and the leaf-only-create warning.
+	auto AnnotateCreatedEntry = [&Path](const FMonolithReflectionWalker::FPathResolveResult& Resolved, bool bDry,
+		TSharedPtr<FJsonObject>& Out, TArray<FString>& Warnings)
+	{
+		Out->SetBoolField(bDry ? TEXT("would_create_key") : TEXT("created_missing_key"), Resolved.bCreatedMissingKey);
+		if (!Resolved.bCreatedMissingKey)
+		{
+			return;
+		}
+		Out->SetStringField(TEXT("created_key_path"), Resolved.CreatedKeyPath);
+		Out->SetBoolField(TEXT("new_element_value_applied"), Resolved.bAppliedNewElementValue);
+		if (Resolved.bLeafIsCreatedElement)
+		{
+			return;
+		}
+		const TArray<FString> Defaulted = FMonolithReflectionWalker::ListDefaultedStructFields(
+			Resolved.CreatedElementProp, Resolved.CreatedElementPtr);
+		TArray<TSharedPtr<FJsonValue>> DefaultedJson;
+		for (const FString& Field : Defaulted)
+		{
+			DefaultedJson.Add(MakeShared<FJsonValueString>(Field));
+		}
+		Out->SetArrayField(TEXT("defaulted_fields"), DefaultedJson);
+		if (!Resolved.bAppliedNewElementValue)
+		{
+			Warnings.Add(FString::Printf(
+				TEXT("%s a new entry at '%s' from defaults and wrote only '%s'. %d field(s) of the entry %s at their defaults (see defaulted_fields). "
+					 "If the entry's fields must be set together (e.g. a type tag next to a value), pass new_element_value with the full entry, "
+					 "or write the whole entry at path '%s'."),
+				bDry ? TEXT("A real write would create") : TEXT("Created"),
+				*Resolved.CreatedKeyPath, *Path, Defaulted.Num(), bDry ? TEXT("would stay") : TEXT("are still"),
+				*Resolved.CreatedKeyPath));
+		}
+	};
+
+	auto SetStringArray = [](TSharedPtr<FJsonObject>& Out, const TCHAR* Field, const TArray<FString>& Values)
+	{
+		TArray<TSharedPtr<FJsonValue>> Json;
+		for (const FString& V : Values)
+		{
+			Json.Add(MakeShared<FJsonValueString>(V));
+		}
+		Out->SetArrayField(Field, Json);
+	};
+
+	// --- Dry run: resolve against the LIVE object without mutating it. A missing
+	// key with create_missing_keys resolves the rest of the path inside a scratch
+	// entry; an existing leaf is copied to scratch before the trial write, so
+	// `current` is the live value. Reads follow references into other packages;
+	// the result says when a real write would refuse them.
 	if (DryRunGuard.IsDryRun())
 	{
+		ResolveOptions.bNoMutation = true;
+		ResolveOptions.bRefuseExternalObjects = false;
 		FMonolithReflectionWalker::FPathResolveResult Resolved =
-			FMonolithReflectionWalker::ResolvePath(TargetClass, TargetObject, Path, /*bCreateMissingKeys=*/false);
+			FMonolithReflectionWalker::ResolvePathWithOptions(TargetClass, TargetObject, Path, ResolveOptions);
 		if (!Resolved.bOk)
 		{
 			return FMonolithActionResult::Error(FString::Printf(
 				TEXT("path '%s' did not resolve: %s"), *Path, *Resolved.Error));
 		}
 
-		// Validate the leaf grammar against a scratch copy of the leaf property so
-		// the live value is never mutated.
 		FDryRunReport Report;
 		Report.bWouldApply = false;
-		void* Scratch = FMemory::Malloc(Resolved.LeafProp->GetSize(), Resolved.LeafProp->GetMinAlignment());
-		Resolved.LeafProp->InitializeValue(Scratch);
-		const FBulkFillFieldWrite W = FMonolithReflectionWalker::WriteLeaf(
-			Resolved.LeafProp, Scratch, JsonVal, nullptr, Spec, Report, Path);
-		Resolved.LeafProp->DestroyValue(Scratch);
-		FMemory::Free(Scratch);
-
+		const FBulkFillFieldWrite W = FMonolithReflectionWalker::InspectLeaf(
+			Resolved, JsonVal, Resolved.LeafOwnerObject, Spec, Report, Path);
 		Report.FieldWrites.Add(W);
 		Report.Errors = W.bOk ? 0 : 1;
 
+		if (Spec.bStrict && !W.bOk)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("dry run (strict): write to '%s' (leaf type %s) would fail: %s"),
+				*Path, *Resolved.LeafTypeName, *W.Reason));
+		}
+
 		FMonolithActionResult Result = DryRunGuard.MakeDryRunResponse(Report);
-		// Annotate the resolved leaf type so the caller can confirm what was targeted.
 		if (Result.Result.IsValid())
 		{
+			TArray<FString> Warnings = Resolved.Warnings;
+			for (const FBulkFillFieldWrite& Drop : Report.SilentDrops)
+			{
+				Warnings.Add(FString::Printf(TEXT("%s: %s"), *Drop.Path, *Drop.Reason));
+			}
+			// Annotate the resolved leaf type so the caller can confirm what was targeted.
 			Result.Result->SetStringField(TEXT("resolved_leaf_type"), Resolved.LeafTypeName);
+			if (Resolved.LeafOwnerObject)
+			{
+				Result.Result->SetStringField(TEXT("leaf_owner"), Resolved.LeafOwnerObject->GetPathName());
+			}
+			AnnotateCreatedEntry(Resolved, /*bDry=*/true, Result.Result, Warnings);
+			if (Resolved.ExternalObjects.Num() > 0)
+			{
+				SetStringArray(Result.Result, TEXT("external_objects"), Resolved.ExternalObjects);
+				Result.Result->SetBoolField(TEXT("would_refuse_external"), !bAllowExternal);
+				if (!bAllowExternal)
+				{
+					Warnings.Add(TEXT("The path crosses into objects outside the target asset's package (external_objects); a real write is refused unless allow_external=true."));
+				}
+			}
+			if (Warnings.Num() > 0)
+			{
+				SetStringArray(Result.Result, TEXT("warnings"), Warnings);
+			}
 		}
 		return Result;
+	}
+
+	// --- Pre-flight: resolve without mutating, so a bad path / refused external
+	// object / rejected new_element_value fails before anything is touched, and so
+	// we know which object owns the leaf before the transaction records it.
+	ResolveOptions.bRefuseExternalObjects = !bAllowExternal;
+	UObject* LeafOwner = nullptr;
+	{
+		FMonolithReflectionWalker::FPathResolveOptions PreflightOptions = ResolveOptions;
+		PreflightOptions.bNoMutation = true;
+		const FMonolithReflectionWalker::FPathResolveResult Preflight =
+			FMonolithReflectionWalker::ResolvePathWithOptions(TargetClass, TargetObject, Path, PreflightOptions);
+		if (!Preflight.bOk)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("path '%s' did not resolve: %s"), *Path, *Preflight.Error));
+		}
+		LeafOwner = Preflight.LeafOwnerObject;
 	}
 
 	// --- Engine edit cradle (matches set_cdo_property / Details-panel write path).
@@ -658,9 +779,18 @@ FMonolithActionResult FMonolithBlueprintCDOActions::HandleSetPropertyAtPath(cons
 	FScopedTransaction Transaction(NSLOCTEXT("MonolithBlueprintCDOActions", "SetPropertyAtPath", "Monolith Set Property At Path"));
 	TargetObject->Modify();
 
+	// A leaf on a sub-object reached through an object reference (e.g. a graph node
+	// inside the asset) is recorded on that object too, before anything is mutated.
+	const bool bOwnerIsSubObject = LeafOwner && LeafOwner != TargetObject;
+	if (bOwnerIsSubObject)
+	{
+		LeafOwner->SetFlags(RF_Transactional);
+		LeafOwner->Modify();
+	}
+
 	// Resolve the path on the live object (may mutate map storage if create_missing_keys).
 	FMonolithReflectionWalker::FPathResolveResult Resolved =
-		FMonolithReflectionWalker::ResolvePath(TargetClass, TargetObject, Path, bCreateMissingKeys);
+		FMonolithReflectionWalker::ResolvePathWithOptions(TargetClass, TargetObject, Path, ResolveOptions);
 	if (!Resolved.bOk)
 	{
 		Transaction.Cancel();
@@ -693,6 +823,24 @@ FMonolithActionResult FMonolithBlueprintCDOActions::HandleSetPropertyAtPath(cons
 		TargetObject->PreEditChange(nullptr);
 	}
 
+	// When the leaf lives on a sub-object reached through an object reference (e.g. a
+	// graph node inside the asset), that object gets its own Pre/PostEditChange pair
+	// on the member the path entered it through.
+	UObject* OwnerObject = (Resolved.LeafOwnerObject && Resolved.LeafOwnerObject != TargetObject) ? Resolved.LeafOwnerObject : nullptr;
+	if (OwnerObject && OwnerObject != LeafOwner)
+	{
+		OwnerObject->SetFlags(RF_Transactional);
+		OwnerObject->Modify();
+	}
+	FProperty* OwnerHeadProp = OwnerObject ? Resolved.LeafOwnerHeadProp : nullptr;
+	FEditPropertyChain OwnerChain;
+	if (OwnerObject && OwnerHeadProp)
+	{
+		OwnerChain.AddHead(OwnerHeadProp);
+		OwnerChain.SetActivePropertyNode(OwnerHeadProp);
+		OwnerObject->PreEditChange(OwnerChain);
+	}
+
 	// Snapshot old leaf value for the response.
 	FString OldValue;
 	Resolved.LeafProp->ExportText_Direct(OldValue, Resolved.LeafPtr, Resolved.LeafPtr, TargetObject, PPF_None);
@@ -701,7 +849,7 @@ FMonolithActionResult FMonolithBlueprintCDOActions::HandleSetPropertyAtPath(cons
 	FDryRunReport Report;
 	Report.bWouldApply = true;
 	const FBulkFillFieldWrite W = FMonolithReflectionWalker::WriteLeaf(
-		Resolved.LeafProp, Resolved.LeafPtr, JsonVal, TargetObject, Spec, Report, Path);
+		Resolved.LeafProp, Resolved.LeafPtr, JsonVal, OwnerObject ? OwnerObject : TargetObject, Spec, Report, Path);
 
 	if (!W.bOk)
 	{
@@ -718,12 +866,23 @@ FMonolithActionResult FMonolithBlueprintCDOActions::HandleSetPropertyAtPath(cons
 		MonolithEditCradle::ReparentTransientInstancedSubobjects(TargetObject, HeadProp);
 		MonolithEditCradle::FireFullCradle(TargetObject, HeadProp);
 	}
+	if (OwnerObject && OwnerHeadProp)
+	{
+		MonolithEditCradle::ReparentTransientInstancedSubobjects(OwnerObject, OwnerHeadProp);
+		FPropertyChangedEvent ChangedEvent(OwnerHeadProp, EPropertyChangeType::ValueSet);
+		FPropertyChangedChainEvent ChainEvent(OwnerChain, ChangedEvent);
+		OwnerObject->PostEditChangeChainProperty(ChainEvent);
+	}
 
 	// Read back the new leaf value for confirmation.
 	FString NewValue;
 	Resolved.LeafProp->ExportText_Direct(NewValue, Resolved.LeafPtr, Resolved.LeafPtr, TargetObject, PPF_None);
 
 	// --- Mark dirty.
+	if (OwnerObject)
+	{
+		OwnerObject->MarkPackageDirty();
+	}
 	if (BP)
 	{
 		FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
@@ -762,7 +921,26 @@ FMonolithActionResult FMonolithBlueprintCDOActions::HandleSetPropertyAtPath(cons
 	Root->SetStringField(TEXT("resolved_leaf_type"), Resolved.LeafTypeName);
 	Root->SetStringField(TEXT("old_value"), OldValue);
 	Root->SetStringField(TEXT("new_value"), NewValue);
-	Root->SetBoolField(TEXT("created_missing_key"), bCreateMissingKeys);
+	if (OwnerObject)
+	{
+		Root->SetStringField(TEXT("leaf_owner"), OwnerObject->GetPathName());
+	}
+	TArray<FString> Warnings = Resolved.Warnings;
+	for (const FBulkFillFieldWrite& Drop : Report.SilentDrops)
+	{
+		Warnings.Add(FString::Printf(TEXT("%s: %s"), *Drop.Path, *Drop.Reason));
+	}
+	AnnotateCreatedEntry(Resolved, /*bDry=*/false, Root, Warnings);
+	if (Resolved.ExternalObjects.Num() > 0)
+	{
+		// Only reachable with allow_external=true.
+		SetStringArray(Root, TEXT("external_objects"), Resolved.ExternalObjects);
+		Warnings.Add(TEXT("The write landed in an object outside the target asset's package (external_objects); that package was marked dirty, and save=true saves only the target asset's package."));
+	}
+	if (Warnings.Num() > 0)
+	{
+		SetStringArray(Root, TEXT("warnings"), Warnings);
+	}
 	Root->SetBoolField(TEXT("saved"), bSaved);
 	if (!SaveError.IsEmpty())
 	{

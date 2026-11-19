@@ -126,6 +126,148 @@ namespace
 
 		return TEXT("...");
 	}
+
+	// -----------------------------------------------------------------------
+	// Strict numeric text check. FNumericProperty::ImportText_Internal for a
+	// floating-point property consumes only [+-.0-9] and then stores
+	// Atof(text), so "abc" imports as 0 and reports success; integer import
+	// stops at the first non-digit ("12abc" -> 12). This check runs BEFORE the
+	// import so a strict caller can refuse the text without touching the value.
+	//
+	// Accepted float grammar:  ws [+-] (digits [. digits] | . digits) [(e|E) [+-] digits] [f|F] ws
+	// Accepted integer grammar: ws [+-] digits ws  |  ws 0x hexdigits ws
+	// Integer text that starts with a letter is left to ImportText (enum-name
+	// path, which already rejects unknown names).
+	// -----------------------------------------------------------------------
+	bool MonolithPathWalker_IsCompleteNumericLiteral(const FNumericProperty* NumProp, const FString& InText)
+	{
+		const FString Text = InText.TrimStartAndEnd();
+		const int32 Len = Text.Len();
+		if (Len == 0)
+		{
+			return false;
+		}
+		int32 i = 0;
+
+		if (NumProp->IsInteger())
+		{
+			if (FChar::IsAlpha(Text[0]))
+			{
+				return true; // enum-name import path; ImportText decides.
+			}
+			if (Len > 2 && Text[0] == TEXT('0') && (Text[1] == TEXT('x') || Text[1] == TEXT('X')))
+			{
+				for (i = 2; i < Len; ++i)
+				{
+					if (!FChar::IsHexDigit(Text[i]))
+					{
+						return false;
+					}
+				}
+				return true;
+			}
+			if (Text[i] == TEXT('+') || Text[i] == TEXT('-'))
+			{
+				++i;
+			}
+			const int32 DigitStart = i;
+			while (i < Len && FChar::IsDigit(Text[i]))
+			{
+				++i;
+			}
+			return i > DigitStart && i == Len;
+		}
+
+		// Floating point.
+		if (Text[i] == TEXT('+') || Text[i] == TEXT('-'))
+		{
+			++i;
+		}
+		int32 MantissaDigits = 0;
+		while (i < Len && FChar::IsDigit(Text[i]))
+		{
+			++i;
+			++MantissaDigits;
+		}
+		if (i < Len && Text[i] == TEXT('.'))
+		{
+			++i;
+			while (i < Len && FChar::IsDigit(Text[i]))
+			{
+				++i;
+				++MantissaDigits;
+			}
+		}
+		if (MantissaDigits == 0)
+		{
+			return false;
+		}
+		if (i < Len && (Text[i] == TEXT('e') || Text[i] == TEXT('E')))
+		{
+			++i;
+			if (i < Len && (Text[i] == TEXT('+') || Text[i] == TEXT('-')))
+			{
+				++i;
+			}
+			const int32 ExpStart = i;
+			while (i < Len && FChar::IsDigit(Text[i]))
+			{
+				++i;
+			}
+			if (i == ExpStart)
+			{
+				return false;
+			}
+		}
+		if (i < Len && (Text[i] == TEXT('f') || Text[i] == TEXT('F')))
+		{
+			++i;
+		}
+		return i == Len;
+	}
+
+	// Recursive worker for ListDefaultedStructFields.
+	void MonolithPathWalker_CollectDefaultedFields(const UStruct* Struct, const void* ValuePtr, const void* DefaultPtr,
+		const FString& Prefix, int32 Depth, TArray<FString>& Out)
+	{
+		for (TFieldIterator<FProperty> It(Struct); It; ++It)
+		{
+			const FProperty* Field = *It;
+			const FString Name = Prefix.IsEmpty() ? Field->GetAuthoredName() : Prefix + TEXT(".") + Field->GetAuthoredName();
+			if (Field->Identical_InContainer(ValuePtr, DefaultPtr, 0, PPF_None))
+			{
+				Out.Add(Name);
+				continue;
+			}
+			const FStructProperty* InnerStruct = CastField<FStructProperty>(Field);
+			if (InnerStruct && InnerStruct->Struct && Depth > 1)
+			{
+				MonolithPathWalker_CollectDefaultedFields(InnerStruct->Struct,
+					Field->ContainerPtrToValuePtr<void>(ValuePtr), Field->ContainerPtrToValuePtr<void>(DefaultPtr),
+					Name, Depth - 1, Out);
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scratch value used by no-mutation path resolves.
+// ---------------------------------------------------------------------------
+FMonolithReflectionWalker::FPathScratchValue::FPathScratchValue(const FProperty* InProp)
+	: Prop(InProp)
+{
+	check(Prop);
+	Memory = FMemory::Malloc(Prop->GetSize(), Prop->GetMinAlignment());
+	Prop->InitializeValue(Memory);
+}
+
+FMonolithReflectionWalker::FPathScratchValue::~FPathScratchValue()
+{
+	if (Prop && Memory)
+	{
+		Prop->DestroyValue(Memory);
+		FMemory::Free(Memory);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +458,17 @@ FMonolithReflectionWalker::FPathResolveResult FMonolithReflectionWalker::Resolve
 	const FString& Path,
 	bool bCreateMissingKeys)
 {
+	FPathResolveOptions Options;
+	Options.bCreateMissingKeys = bCreateMissingKeys;
+	return ResolvePathWithOptions(TopStruct, Container, Path, Options);
+}
+
+FMonolithReflectionWalker::FPathResolveResult FMonolithReflectionWalker::ResolvePathWithOptions(
+	UStruct* TopStruct,
+	void* Container,
+	const FString& Path,
+	const FPathResolveOptions& Options)
+{
 	check(IsInGameThread());
 
 	FPathResolveResult Result;
@@ -335,6 +488,14 @@ FMonolithReflectionWalker::FPathResolveResult FMonolithReflectionWalker::Resolve
 	// to the live instance of that struct (or the UObject container at the root).
 	UStruct* CurStruct = TopStruct;
 	void* CurPtr = Container;
+	bool bInScratch = false;
+
+	// Object that holds the cursor, and whether its head property is still to be recorded.
+	Result.LeafOwnerObject = Options.RootObject;
+	bool bOwnerHeadPending = true;
+
+	// Rebuilt path prefix, used to label the created key.
+	FString ConsumedPath;
 
 	for (int32 SegIdx = 0; SegIdx < Segments.Num(); ++SegIdx)
 	{
@@ -364,6 +525,12 @@ FMonolithReflectionWalker::FPathResolveResult FMonolithReflectionWalker::Resolve
 				return Result;
 			}
 			MemberPtr = MemberProp->ContainerPtrToValuePtr<void>(CurPtr);
+			if (bOwnerHeadPending)
+			{
+				Result.LeafOwnerHeadProp = MemberProp;
+				bOwnerHeadPending = false;
+			}
+			ConsumedPath += (ConsumedPath.IsEmpty() ? TEXT("") : TEXT(".")) + Seg.Member;
 		}
 		else
 		{
@@ -378,24 +545,122 @@ FMonolithReflectionWalker::FPathResolveResult FMonolithReflectionWalker::Resolve
 
 		if (Seg.bHasBracket)
 		{
+			ConsumedPath += FString::Printf(TEXT("[%s]"), *Seg.Bracket);
+
 			if (FArrayProperty* ArrayProp = CastField<FArrayProperty>(MemberProp))
 			{
-				if (!Seg.Bracket.IsNumeric())
-				{
-					Result.Error = FString::Printf(TEXT("array '%s' requires an integer index, got '[%s]'"),
-						*Seg.Member, *Seg.Bracket);
-					return Result;
-				}
-				const int32 Index = FCString::Atoi(*Seg.Bracket);
 				FScriptArrayHelper Helper(ArrayProp, MemberPtr);
-				if (Index < 0 || Index >= Helper.Num())
+				const FString Token = Seg.Bracket.TrimStartAndEnd();
+
+				if (Token.StartsWith(TEXT("@")))
 				{
-					Result.Error = FString::Printf(TEXT("array index %d out of range on '%s' (size %d)"),
-						Index, *Seg.Member, Helper.Num());
-					return Result;
+					// Object selector: [@Name] or [@class=ClassName].
+					FObjectPropertyBase* InnerObjProp = CastField<FObjectPropertyBase>(ArrayProp->Inner);
+					if (!InnerObjProp)
+					{
+						Result.Error = FString::Printf(TEXT("selector '[%s]' is only valid on arrays of object references; '%s' holds %s"),
+							*Token, *Seg.Member, *ArrayProp->Inner->GetCPPType());
+						return Result;
+					}
+					FString Selector = Token.Mid(1).TrimStartAndEnd();
+					const bool bByClass = Selector.StartsWith(TEXT("class="), ESearchCase::IgnoreCase);
+					if (bByClass)
+					{
+						Selector = Selector.Mid(6).TrimStartAndEnd();
+					}
+					if (Selector.IsEmpty())
+					{
+						Result.Error = FString::Printf(TEXT("empty selector '[%s]' on '%s'"), *Token, *Seg.Member);
+						return Result;
+					}
+
+					TArray<int32> Matches;
+					int32 ExactCaseMatch = INDEX_NONE;
+					for (int32 ElemIdx = 0; ElemIdx < Helper.Num(); ++ElemIdx)
+					{
+						const UObject* Elem = InnerObjProp->GetObjectPropertyValue(Helper.GetRawPtr(ElemIdx));
+						if (!Elem)
+						{
+							continue;
+						}
+						if (bByClass)
+						{
+							const FString ClassName = Elem->GetClass()->GetName();
+							if (ClassName.Equals(Selector, ESearchCase::IgnoreCase)
+								|| (TEXT("U") + ClassName).Equals(Selector, ESearchCase::IgnoreCase))
+							{
+								Matches.Add(ElemIdx);
+							}
+						}
+						else if (Elem->GetName().Equals(Selector, ESearchCase::IgnoreCase))
+						{
+							Matches.Add(ElemIdx);
+							if (ExactCaseMatch == INDEX_NONE && Elem->GetName().Equals(Selector, ESearchCase::CaseSensitive))
+							{
+								ExactCaseMatch = ElemIdx;
+							}
+						}
+					}
+
+					// Name list for error messages (first 10 elements).
+					auto DescribeElements = [&Helper, InnerObjProp]()
+					{
+						TArray<FString> Names;
+						for (int32 ElemIdx = 0; ElemIdx < Helper.Num() && Names.Num() < 10; ++ElemIdx)
+						{
+							const UObject* Elem = InnerObjProp->GetObjectPropertyValue(Helper.GetRawPtr(ElemIdx));
+							Names.Add(Elem ? FString::Printf(TEXT("[%d] %s (%s)"), ElemIdx, *Elem->GetName(), *Elem->GetClass()->GetName())
+								: FString::Printf(TEXT("[%d] None"), ElemIdx));
+						}
+						if (Helper.Num() > Names.Num())
+						{
+							Names.Add(FString::Printf(TEXT("... %d more"), Helper.Num() - Names.Num()));
+						}
+						return FString::Join(Names, TEXT(", "));
+					};
+
+					int32 Chosen = INDEX_NONE;
+					if (Matches.Num() == 1)
+					{
+						Chosen = Matches[0];
+					}
+					else if (Matches.Num() > 1 && !bByClass && ExactCaseMatch != INDEX_NONE)
+					{
+						Chosen = ExactCaseMatch;
+					}
+					else if (Matches.Num() > 1)
+					{
+						Result.Error = FString::Printf(TEXT("selector '[%s]' on '%s' matched %d elements; use '[@ObjectName]' or an index. Elements: %s"),
+							*Token, *Seg.Member, Matches.Num(), *DescribeElements());
+						return Result;
+					}
+					else
+					{
+						Result.Error = FString::Printf(TEXT("selector '[%s]' matched no element of '%s' (size %d). Elements: %s"),
+							*Token, *Seg.Member, Helper.Num(), *DescribeElements());
+						return Result;
+					}
+					ResolvedProp = ArrayProp->Inner;
+					ResolvedPtr = Helper.GetRawPtr(Chosen);
 				}
-				ResolvedProp = ArrayProp->Inner;
-				ResolvedPtr = Helper.GetRawPtr(Index);
+				else
+				{
+					if (!Token.IsNumeric())
+					{
+						Result.Error = FString::Printf(TEXT("array '%s' requires an integer index, got '[%s]' (arrays of object references also accept '[@ObjectName]' or '[@class=ClassName]')"),
+							*Seg.Member, *Seg.Bracket);
+						return Result;
+					}
+					const int32 Index = FCString::Atoi(*Token);
+					if (Index < 0 || Index >= Helper.Num())
+					{
+						Result.Error = FString::Printf(TEXT("array index %d out of range on '%s' (size %d)"),
+							Index, *Seg.Member, Helper.Num());
+						return Result;
+					}
+					ResolvedProp = ArrayProp->Inner;
+					ResolvedPtr = Helper.GetRawPtr(Index);
+				}
 			}
 			else if (FMapProperty* MapProp = CastField<FMapProperty>(MemberProp))
 			{
@@ -417,9 +682,11 @@ FMonolithReflectionWalker::FPathResolveResult FMonolithReflectionWalker::Resolve
 				}
 
 				int32 InternalIndex = Helper.FindMapIndexWithKey(KeyTemp);
+				bool bCreatedHere = false;
+				void* CreatedValuePtr = nullptr;
 				if (InternalIndex == INDEX_NONE)
 				{
-					if (!bCreateMissingKeys)
+					if (!Options.bCreateMissingKeys)
 					{
 						MapProp->KeyProp->DestroyValue(KeyTemp);
 						FMemory::Free(KeyTemp);
@@ -427,27 +694,83 @@ FMonolithReflectionWalker::FPathResolveResult FMonolithReflectionWalker::Resolve
 							*Seg.Bracket, *Seg.Member);
 						return Result;
 					}
-					// Add a default-initialised value under the new key, then re-locate.
-					void* ValTemp = FMemory::Malloc(MapProp->ValueProp->GetSize(), MapProp->ValueProp->GetMinAlignment());
-					MapProp->ValueProp->InitializeValue(ValTemp);
-					Helper.AddPair(KeyTemp, ValTemp);  // clones key + value
-					Helper.Rehash();
-					MapProp->ValueProp->DestroyValue(ValTemp);
-					FMemory::Free(ValTemp);
-					InternalIndex = Helper.FindMapIndexWithKey(KeyTemp);
+
+					// Default-initialised value for the new entry, optionally seeded from
+					// NewElementValue (first created entry only).
+					TSharedPtr<FPathScratchValue> NewValue = MakeShared<FPathScratchValue>(MapProp->ValueProp);
+					if (!Result.bCreatedMissingKey && Options.NewElementValue.IsValid())
+					{
+						FBulkFillSpec SeedSpec;
+						SeedSpec.bStrict = Options.bStrict;
+						FDryRunReport SeedReport;
+						const FBulkFillFieldWrite Seed = WriteLeaf(MapProp->ValueProp, NewValue->Memory,
+							Options.NewElementValue, Options.RootObject, SeedSpec, SeedReport, ConsumedPath);
+						if (!Seed.bOk)
+						{
+							MapProp->KeyProp->DestroyValue(KeyTemp);
+							FMemory::Free(KeyTemp);
+							Result.Error = FString::Printf(TEXT("new_element_value rejected for map value type %s at '%s': %s"),
+								*MapProp->ValueProp->GetCPPType(), *ConsumedPath, *Seed.Reason);
+							return Result;
+						}
+						for (const FBulkFillFieldWrite& Drop : SeedReport.SilentDrops)
+						{
+							Result.Warnings.Add(FString::Printf(TEXT("new_element_value: %s"), *Drop.Reason));
+						}
+						Result.bAppliedNewElementValue = true;
+					}
+
+					if (Options.bNoMutation || bInScratch)
+					{
+						// Dry run (or already inside a scratch value): walk on in the scratch value.
+						CreatedValuePtr = NewValue->Memory;
+						Result.ScratchValues.Add(NewValue);
+						bInScratch = true;
+					}
+					else
+					{
+						Helper.AddPair(KeyTemp, NewValue->Memory);  // clones key + value
+						Helper.Rehash();
+						InternalIndex = Helper.FindMapIndexWithKey(KeyTemp);
+						if (InternalIndex != INDEX_NONE)
+						{
+							CreatedValuePtr = Helper.GetValuePtr(InternalIndex);
+						}
+					}
+					bCreatedHere = true;
+				}
+				else if (!Result.bCreatedMissingKey && Options.NewElementValue.IsValid() && Options.bCreateMissingKeys)
+				{
+					Result.Warnings.Add(FString::Printf(TEXT("new_element_value ignored: key '[%s]' already exists on '%s'"),
+						*Seg.Bracket, *Seg.Member));
 				}
 
 				MapProp->KeyProp->DestroyValue(KeyTemp);
 				FMemory::Free(KeyTemp);
 
-				if (InternalIndex == INDEX_NONE)
+				if (bCreatedHere)
 				{
-					Result.Error = FString::Printf(TEXT("internal error: map key '[%s]' on '%s' could not be located after insert"),
-						*Seg.Bracket, *Seg.Member);
-					return Result;
+					if (!CreatedValuePtr)
+					{
+						Result.Error = FString::Printf(TEXT("internal error: map key '[%s]' on '%s' could not be located after insert"),
+							*Seg.Bracket, *Seg.Member);
+						return Result;
+					}
+					if (!Result.bCreatedMissingKey)
+					{
+						Result.bCreatedMissingKey = true;
+						Result.CreatedKeyPath = ConsumedPath;
+						Result.CreatedElementProp = MapProp->ValueProp;
+						Result.CreatedElementPtr = CreatedValuePtr;
+						Result.bLeafIsCreatedElement = (SegIdx == Segments.Num() - 1);
+					}
+					ResolvedPtr = CreatedValuePtr;
+				}
+				else
+				{
+					ResolvedPtr = Helper.GetValuePtr(InternalIndex);
 				}
 				ResolvedProp = MapProp->ValueProp;
-				ResolvedPtr = Helper.GetValuePtr(InternalIndex);
 			}
 			else
 			{
@@ -464,6 +787,7 @@ FMonolithReflectionWalker::FPathResolveResult FMonolithReflectionWalker::Resolve
 			Result.LeafProp = ResolvedProp;
 			Result.LeafPtr = ResolvedPtr;
 			Result.LeafTypeName = ResolvedProp->GetCPPType();
+			Result.bLeafInScratch = bInScratch;
 			return Result;
 		}
 
@@ -481,11 +805,28 @@ FMonolithReflectionWalker::FPathResolveResult FMonolithReflectionWalker::Resolve
 			if (!Pointee)
 			{
 				Result.Error = FString::Printf(TEXT("cannot descend through '%s': object reference is null"),
-					*Seg.Member);
+					*ConsumedPath);
 				return Result;
+			}
+			if (Options.HomePackage && Pointee->GetPackage() != Options.HomePackage)
+			{
+				Result.ExternalObjects.Add(Pointee->GetPathName());
+				if (Options.bRefuseExternalObjects)
+				{
+					Result.Error = FString::Printf(
+						TEXT("'%s' refers to '%s', which lives in package '%s', outside the target asset's package '%s'. "
+							 "Writes do not follow references into other packages; pass allow_external=true to write there anyway."),
+						*ConsumedPath, *Pointee->GetPathName(), *Pointee->GetPackage()->GetName(), *Options.HomePackage->GetName());
+					return Result;
+				}
 			}
 			CurStruct = Pointee->GetClass();
 			CurPtr = Pointee;
+			// Leaving scratch memory: an object reached from a scratch value is a live object.
+			bInScratch = false;
+			Result.LeafOwnerObject = Pointee;
+			Result.LeafOwnerHeadProp = nullptr;
+			bOwnerHeadPending = true;
 			continue;
 		}
 
@@ -497,6 +838,54 @@ FMonolithReflectionWalker::FPathResolveResult FMonolithReflectionWalker::Resolve
 	// Unreachable: the leaf return inside the loop always fires on the last segment.
 	Result.Error = TEXT("internal error: path produced no leaf");
 	return Result;
+}
+
+// ---------------------------------------------------------------------------
+// InspectLeaf — dry-run leaf evaluation against a copy of the live value.
+// ---------------------------------------------------------------------------
+FBulkFillFieldWrite FMonolithReflectionWalker::InspectLeaf(
+	const FPathResolveResult& Resolved,
+	const TSharedPtr<FJsonValue>& JsonVal,
+	UObject* Owner,
+	const FBulkFillSpec& Spec,
+	FDryRunReport& OutReport,
+	const FString& PathLabel)
+{
+	if (!Resolved.bOk || !Resolved.LeafProp || !Resolved.LeafPtr)
+	{
+		FBulkFillFieldWrite Write;
+		Write.Path = PathLabel;
+		Write.bOk = false;
+		Write.Reason = TEXT("path not resolved");
+		return Write;
+	}
+
+	if (Resolved.bLeafInScratch)
+	{
+		// The leaf is inside a scratch value the resolve created; writing it is side-effect free.
+		return WriteLeaf(Resolved.LeafProp, Resolved.LeafPtr, JsonVal, Owner, Spec, OutReport, PathLabel);
+	}
+
+	FPathScratchValue Scratch(Resolved.LeafProp);
+	Resolved.LeafProp->CopyCompleteValue(Scratch.Memory, Resolved.LeafPtr);
+	return WriteLeaf(Resolved.LeafProp, Scratch.Memory, JsonVal, Owner, Spec, OutReport, PathLabel);
+}
+
+// ---------------------------------------------------------------------------
+// ListDefaultedStructFields — which fields of a struct value still equal the
+// struct default. Used to report what a leaf-only map-entry create left unset.
+// ---------------------------------------------------------------------------
+TArray<FString> FMonolithReflectionWalker::ListDefaultedStructFields(const FProperty* ElementProp, const void* ElementPtr, int32 MaxDepth)
+{
+	TArray<FString> Out;
+	const FStructProperty* StructProp = CastField<FStructProperty>(ElementProp);
+	if (!StructProp || !StructProp->Struct || !ElementPtr || MaxDepth <= 0)
+	{
+		return Out;
+	}
+	FPathScratchValue Defaults(StructProp);
+	MonolithPathWalker_CollectDefaultedFields(StructProp->Struct, ElementPtr, Defaults.Memory, FString(), MaxDepth, Out);
+	return Out;
 }
 
 // ---------------------------------------------------------------------------
@@ -713,14 +1102,14 @@ void FMonolithReflectionWalker::DispatchByPropertyType(
 		return;
 	}
 	// Fall-through: scalar (int, float, bool, FName, FString, FText, byte, enum-as-byte).
-	WriteScalar(Prop, ValuePtr, JsonVal, Owner, OutWrite);
+	WriteScalar(Prop, ValuePtr, JsonVal, Owner, OutWrite, &Spec, &OutReport);
 }
 
 // ---------------------------------------------------------------------------
 // Scalar write — stringify JSON then ImportText_Direct (matches existing
 // MonolithBlueprintCDOActions.cpp:451-475 path so behaviour matches set_cdo_property).
 // ---------------------------------------------------------------------------
-void FMonolithReflectionWalker::WriteScalar(FProperty* Prop, void* ValuePtr, const TSharedPtr<FJsonValue>& JsonVal, UObject* Owner, FBulkFillFieldWrite& OutWrite)
+void FMonolithReflectionWalker::WriteScalar(FProperty* Prop, void* ValuePtr, const TSharedPtr<FJsonValue>& JsonVal, UObject* Owner, FBulkFillFieldWrite& OutWrite, const FBulkFillSpec* Spec, FDryRunReport* OutReport)
 {
 	FString ValStr;
 	if (JsonVal->Type == EJson::Number)
@@ -758,6 +1147,31 @@ void FMonolithReflectionWalker::WriteScalar(FProperty* Prop, void* ValuePtr, con
 			NumProp->SetIntPropertyValue(ValuePtr, ResolvedEnumValue);
 			OutWrite.bOk = true;
 			return;
+		}
+	}
+
+	// Numeric text the engine import would only partly parse ("abc" -> 0 on a float,
+	// "12abc" -> 12 on an int) reports success from ImportText. Check it first so a
+	// strict caller refuses it before the value is touched (issue #172).
+	if (const FNumericProperty* NumProp = CastField<FNumericProperty>(Prop))
+	{
+		if (!MonolithPathWalker_IsCompleteNumericLiteral(NumProp, ValStr))
+		{
+			const FString Why = FString::Printf(TEXT("'%s' is not a valid %s literal; the engine import would read it as a partial or zero value"),
+				*ValStr, *Prop->GetCPPType());
+			if (Spec && Spec->bStrict)
+			{
+				OutWrite.bOk = false;
+				OutWrite.Reason = Why + TEXT(" (strict)");
+				return;
+			}
+			if (OutReport)
+			{
+				FBulkFillFieldWrite Drop = OutWrite;
+				Drop.bOk = true;
+				Drop.Reason = Why;
+				OutReport->SilentDrops.Add(Drop);
+			}
 		}
 	}
 
@@ -1099,7 +1513,7 @@ void FMonolithReflectionWalker::WriteStruct(FStructProperty* StructProp, void* V
 	}
 
 	// String form -> ImportText literal grammar ("(X=1,Y=2,Z=3)").
-	WriteScalar(StructProp, ValuePtr, JsonVal, Owner, OutWrite);
+	WriteScalar(StructProp, ValuePtr, JsonVal, Owner, OutWrite, &Spec, &OutReport);
 }
 
 // ---------------------------------------------------------------------------
@@ -1172,7 +1586,7 @@ FDryRunReport FMonolithReflectionWalker::WriteTree(
 FDryRunReport FMonolithReflectionWalker::InspectTree(
 	const TSharedPtr<FJsonObject>& Tree,
 	UStruct* TopStruct,
-	const void* /*Container*/,
+	const void* Container,
 	const FBulkFillSpec& Spec)
 {
 	check(IsInGameThread());
@@ -1205,10 +1619,15 @@ FDryRunReport FMonolithReflectionWalker::InspectTree(
 			continue;
 		}
 
-		// Allocate a scratch buffer the size of the property; init it; dispatch
-		// against the scratch; destroy. The real container is never touched.
+		// Allocate a scratch buffer the size of the property; init it from the live
+		// value (so the report's `current` is the real value, not the default);
+		// dispatch against the scratch; destroy. The real container is never touched.
 		void* Scratch = FMemory::Malloc(Prop->GetSize(), Prop->GetMinAlignment());
 		Prop->InitializeValue(Scratch);
+		if (Container)
+		{
+			Prop->CopyCompleteValue(Scratch, Prop->ContainerPtrToValuePtr<void>(Container));
+		}
 		DispatchByPropertyType(Prop, Scratch, Pair.Value, nullptr, Spec, Report, PairKeyStr, W);
 		Prop->DestroyValue(Scratch);
 		FMemory::Free(Scratch);
