@@ -1,0 +1,31 @@
+# Publishes wiki/ to the GitHub wiki on every push to master that touches it.
+# Edit the pages in wiki/ here, not in the wiki tab: edits made on the wiki
+# itself get overwritten the next time this runs.
+name: Publish wiki
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - wiki/**
+      - .github/workflows/publish-wiki.yml
+  workflow_dispatch:
+
+concurrency:
+  group: publish-wiki
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish-wiki:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Andrew-Chen-Wang/github-wiki-action@v5
+        with:
+          path: wiki/
+          # Pages are already in wiki form (Home.md, [[links]]), so publish them as-is.
+          preprocess: false
+          disable-empty-commits: true
