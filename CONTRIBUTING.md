@@ -268,7 +268,7 @@ Configure your `.mcp.json` (see `Templates/.mcp.json.example`):
   "mcpServers": {
     "monolith": {
       "type": "streamableHttp",
-      "url": "http://localhost:9316/mcp"
+      "url": "http://127.0.0.1:9316/mcp"
     }
   }
 }

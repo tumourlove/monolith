@@ -8,7 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+<<<<<<< HEAD
 - **The level indexer no longer crashes the editor on Linux and macOS.** `FMonolithMemoryHelper::GetCurrentMemoryUsageMB` called `FPlatformProcess::GetApplicationMemoryUsage`, which only Windows implements; on every other platform the generic version is a fatal error (`not implemented on this platform`), so the first memory snapshot of the level pass took the editor down. Non-Windows platforms now read the process's resident memory from `FPlatformMemory::GetStats().UsedPhysical`, the same figure `ShouldThrottle` already uses.
+=======
+- **The MCP proxies default to `http://127.0.0.1:9316/mcp` instead of `http://localhost:9316/mcp`.** On Windows `localhost` resolves to `::1` first, and the editor's listener does not accept on `::1`, so each connection waited about two seconds for the refused IPv6 attempt before falling back to `127.0.0.1`. `Scripts/monolith_proxy.py` (urllib) paid that on every request, including the health check; `Tools/MonolithProxy` (WinHTTP) at least on the first request of each process. `Templates/.mcp.json.example` and the docs use the same address. `MONOLITH_URL` still overrides the default.
+>>>>>>> pr163
 
 ## [0.24.0] - 2026-10-18
 

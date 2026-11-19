@@ -1329,7 +1329,7 @@ int main()
     _setmode(_fileno(stdout), _O_BINARY);
 
     // Parse configuration from environment
-    std::string url = get_env("MONOLITH_URL", "http://localhost:9316/mcp");
+    std::string url = get_env("MONOLITH_URL", "http://127.0.0.1:9316/mcp");
     parse_monolith_url(url);
 
     {

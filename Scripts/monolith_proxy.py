@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from io import TextIOWrapper
 from pathlib import Path
 
-MONOLITH_URL = os.environ.get("MONOLITH_URL", "http://localhost:9316/mcp")
+MONOLITH_URL = os.environ.get("MONOLITH_URL", "http://127.0.0.1:9316/mcp")
 MONOLITH_HEALTH = MONOLITH_URL.replace("/mcp", "/health")
 PROXY_NAME = "monolith-proxy"
 PROXY_VERSION = "1.2.0"
