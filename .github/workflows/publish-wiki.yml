@@ -23,6 +23,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Refuse to publish an empty or half-missing wiki: the sync below
+      # mirrors wiki/ exactly, so a missing folder would wipe every page.
+      - name: Check wiki/ has its pages
+        run: |
+          test -f wiki/Home.md || { echo "wiki/Home.md missing, refusing to publish"; exit 1; }
+          n=$(find wiki -maxdepth 1 -name '*.md' | wc -l)
+          echo "$n pages"
+          [ "$n" -ge 10 ] || { echo "Only $n pages in wiki/, refusing to publish"; exit 1; }
       - uses: Andrew-Chen-Wang/github-wiki-action@v5
         with:
           path: wiki/
