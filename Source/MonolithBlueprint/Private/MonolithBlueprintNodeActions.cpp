@@ -36,6 +36,8 @@
 #include "K2Node_CallDelegate.h"
 #include "K2Node_Self.h"
 #include "K2Node_FunctionResult.h"
+#include "K2Node_FunctionEntry.h"
+#include "K2Node_AddPinInterface.h"
 #include "K2Node_MakeStruct.h"
 #include "K2Node_BreakStruct.h"
 #include "K2Node_SwitchEnum.h"
@@ -44,6 +46,7 @@
 #include "K2Node_FormatText.h"
 #include "K2Node_MakeArray.h"
 #include "K2Node_Select.h"
+#include "K2Node_Switch.h"
 #include "EdGraphNode_Comment.h"
 #include "EdGraphSchema_K2.h"
 #include "K2Node.h"
@@ -558,8 +561,119 @@ static void BindVariableNodeReference(UK2Node_Variable* VarNode, UBlueprint* BP,
 			VarNode->VariableReference.SetLocalMember(VarFName, TopGraph->GetName(), LocalVarGuid);
 			return;
 		}
+
+		// Function input parameters (issue #159) are user-defined pins on the
+		// function entry node. The editor's My Blueprint drag of a parameter binds
+		// them as a local member scoped to the function with an invalid guid
+		// (BlueprintVariableNodeSpawner::Invoke). A SetSelfMember bind resolves to
+		// nothing and the node is created with no pins.
+		for (UEdGraphNode* Node : TopGraph->Nodes)
+		{
+			const UK2Node_FunctionEntry* Entry = Cast<UK2Node_FunctionEntry>(Node);
+			if (!Entry) continue;
+			for (const TSharedPtr<FUserPinInfo>& PinInfo : Entry->UserDefinedPins)
+			{
+				if (PinInfo.IsValid() && PinInfo->PinName == VarFName)
+				{
+					VarNode->VariableReference.SetLocalMember(PinInfo->PinName, TopGraph->GetName(), FGuid());
+					return;
+				}
+			}
+		}
 	}
 	VarNode->VariableReference.SetSelfMember(VarFName);
+}
+
+namespace
+{
+	// Explain where a node-id lookup searched so a not-found error tells the
+	// caller which graph_name to pass. FindNodeById with an empty graph_name only
+	// walks the event/function/macro arrays; interface-implementation graphs and
+	// collapsed/nested graphs need an explicit graph_name.
+	FString BPNodeActionsDescribeNodeMiss(UBlueprint* BP, const FString& GraphName, const FString& NodeId)
+	{
+		TArray<UEdGraph*> AllGraphs;
+		BP->GetAllGraphs(AllGraphs);
+
+		TArray<FString> ContainingGraphs;
+		TArray<FString> AllGraphNames;
+		for (UEdGraph* G : AllGraphs)
+		{
+			if (!G) continue;
+			AllGraphNames.AddUnique(G->GetName());
+			for (const UEdGraphNode* N : G->Nodes)
+			{
+				if (N && N->GetName() == NodeId)
+				{
+					ContainingGraphs.AddUnique(G->GetName());
+					break;
+				}
+			}
+		}
+
+		FString Where;
+		if (GraphName.IsEmpty())
+		{
+			Where = TEXT("graph_name was omitted, so only event, function and macro graphs were searched.");
+		}
+		else if (!MonolithBlueprintInternal::FindGraphByName(BP, GraphName))
+		{
+			return FString::Printf(TEXT("graph_name '%s' does not match any graph. Graphs: %s."),
+				*GraphName, AllGraphNames.Num() > 0 ? *FString::Join(AllGraphNames, TEXT(", ")) : TEXT("(none)"));
+		}
+		else
+		{
+			Where = FString::Printf(TEXT("Searched graph_name '%s' only."), *GraphName);
+		}
+
+		if (ContainingGraphs.Num() > 0)
+		{
+			return FString::Printf(TEXT("%s That node ID exists in graph(s): %s -- pass graph_name accordingly."),
+				*Where, *FString::Join(ContainingGraphs, TEXT(", ")));
+		}
+		return FString::Printf(TEXT("%s No graph in this Blueprint contains that ID; use get_graph_data to list node IDs."), *Where);
+	}
+
+	// List a node's visible pins split by direction, for pin-not-found errors.
+	FString BPNodeActionsDescribePins(UEdGraphNode* Node)
+	{
+		return FString::Printf(TEXT("Input pins: %s. Output pins: %s."),
+			*MonolithBlueprintInternal::GetAvailablePinNames(Node, EGPD_Input),
+			*MonolithBlueprintInternal::GetAvailablePinNames(Node, EGPD_Output));
+	}
+
+	// Resolve a node for the pin-structure actions (split/recombine/add/remove pin).
+	UEdGraphNode* BPNodeActionsFindNodeOrError(UBlueprint* BP, const FString& GraphName, const FString& NodeId, FString& OutError)
+	{
+		TArray<FString> MatchGraphs;
+		UEdGraphNode* Node = MonolithBlueprintInternal::FindNodeById(BP, GraphName, NodeId, &MatchGraphs);
+		if (!Node)
+		{
+			OutError = FString::Printf(TEXT("Node not found: %s. %s"), *NodeId, *BPNodeActionsDescribeNodeMiss(BP, GraphName, NodeId));
+			return nullptr;
+		}
+		if (GraphName.IsEmpty() && MatchGraphs.Num() > 1)
+		{
+			OutError = FString::Printf(TEXT("Node ID '%s' exists in %d graphs (%s); pass graph_name to disambiguate."),
+				*NodeId, MatchGraphs.Num(), *FString::Join(MatchGraphs, TEXT(", ")));
+			return nullptr;
+		}
+		return Node;
+	}
+
+	// Serialize the node's current pins after a structural pin change.
+	TArray<TSharedPtr<FJsonValue>> BPNodeActionsPinArray(UEdGraphNode* Node)
+	{
+		TArray<TSharedPtr<FJsonValue>> Out;
+		for (const UEdGraphPin* Pin : Node->Pins)
+		{
+			if (Pin && !Pin->bHidden)
+			{
+				Out.Add(MakeShared<FJsonValueObject>(MonolithBlueprintInternal::SerializePin(Pin)));
+			}
+		}
+		return Out;
+	}
 }
 
 // ============================================================
@@ -626,8 +740,60 @@ void FMonolithBlueprintNodeActions::RegisterActions(FMonolithToolRegistry& Regis
 			.Optional(TEXT("graph_name"),  TEXT("string"), TEXT("Graph name (searches all graphs if omitted)"))
 			.Build());
 
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("split_pin"),
+		TEXT("Split a struct pin into its member pins (right-click > Split Struct Pin). Uses UEdGraphSchema_K2::SplitPin; sub-pins are named <Pin>_<Member> (e.g. ReturnValue_X). Returns sub_pins and the node's visible pins."),
+		FMonolithActionHandler::CreateStatic(&HandleSplitPin),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint asset path"))
+			.Required(TEXT("node_id"), TEXT("string"), TEXT("Node ID"))
+			.Required(TEXT("pin_name"), TEXT("string"), TEXT("Struct pin to split"))
+			.Optional(TEXT("pin_direction"), TEXT("string"), TEXT("'input' or 'output' when the node has same-named pins"))
+			.Optional(TEXT("graph_name"), TEXT("string"), TEXT("Graph name (searches event/function/macro graphs if omitted)"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("recombine_pin"),
+		TEXT("Recombine a split struct pin (right-click > Recombine Struct Pin). pin_name may be the split parent or any of its sub-pins. Refuses while sub-pins are linked unless break_links=true."),
+		FMonolithActionHandler::CreateStatic(&HandleRecombinePin),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint asset path"))
+			.Required(TEXT("node_id"), TEXT("string"), TEXT("Node ID"))
+			.Required(TEXT("pin_name"), TEXT("string"), TEXT("Split parent pin or one of its sub-pins"))
+			.Optional(TEXT("pin_direction"), TEXT("string"), TEXT("'input' or 'output' when the node has same-named pins"))
+			.Optional(TEXT("break_links"), TEXT("bool"), TEXT("Break links on the sub-pins first instead of refusing"), TEXT("false"))
+			.Optional(TEXT("graph_name"), TEXT("string"), TEXT("Graph name (searches event/function/macro graphs if omitted)"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("add_pin"),
+		TEXT("Add input pins to a node with an Add Pin button: any IK2Node_AddPinInterface node (commutative operators such as Multiply/Add/AND/OR, Append, Sequence, Select, Make Array/Set/Map, MultiGate) and Switch on Int/String/Name (adds a case). So A * B * C can be one Multiply node. Returns the node's pins."),
+		FMonolithActionHandler::CreateStatic(&HandleAddPin),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint asset path"))
+			.Required(TEXT("node_id"), TEXT("string"), TEXT("Node ID"))
+			.Optional(TEXT("count"), TEXT("integer"), TEXT("Number of pins to add (1-64)"), TEXT("1"))
+			.Optional(TEXT("graph_name"), TEXT("string"), TEXT("Graph name (searches event/function/macro graphs if omitted)"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("remove_pin"),
+		TEXT("Remove an added pin from an IK2Node_AddPinInterface node, a Sequence output, or a Switch case. Select nodes remove their last option pin (pin_name ignored). Fails if the node is at its minimum pin count."),
+		FMonolithActionHandler::CreateStatic(&HandleRemovePin),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint asset path"))
+			.Required(TEXT("node_id"), TEXT("string"), TEXT("Node ID"))
+			.Optional(TEXT("pin_name"), TEXT("string"), TEXT("Pin to remove (required except for Select nodes)"))
+			.Optional(TEXT("pin_direction"), TEXT("string"), TEXT("'input' or 'output' when the node has same-named pins"))
+			.Optional(TEXT("graph_name"), TEXT("string"), TEXT("Graph name (searches event/function/macro graphs if omitted)"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("refresh_all_nodes"),
+		TEXT("Refresh every node in a Blueprint (File > Refresh All Nodes, FBlueprintEditorUtils::RefreshAllNodes). Use after a class pin, component type, struct or called function signature changed. Optionally compiles afterwards."),
+		FMonolithActionHandler::CreateStatic(&HandleRefreshAllNodes),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint asset path"))
+			.Optional(TEXT("compile"), TEXT("bool"), TEXT("Compile after refreshing and report compile_result"), TEXT("false"))
+			.Build());
+
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("connect_pins"),
-		TEXT("Connect two pins in a Blueprint graph. Source pin must be an output, target pin must be an input (or vice versa — the schema will sort it out)."),
+		TEXT("Connect two pins in a Blueprint graph. source_pin is looked up among the source node's OUTPUT pins and target_pin among the target node's INPUT pins, so a node with a same-named input and output resolves correctly. If that fails but the reversed pairing resolves, the ends are treated as swapped (response carries a note). Not-found errors name the graph searched and list input/output pins."),
 		FMonolithActionHandler::CreateStatic(&HandleConnectPins),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"),   TEXT("Blueprint asset path"))
@@ -695,7 +861,7 @@ void FMonolithBlueprintNodeActions::RegisterActions(FMonolithToolRegistry& Regis
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("batch_execute"),
-		TEXT("Execute multiple Blueprint write operations on a single asset in one transaction. Each operation is { \"op\": \"action_name\", ...action_params_minus_asset_path }. Supported ops: add_node, remove_node, connect_pins, disconnect_pins, set_pin_default, set_node_position, add_variable, remove_variable, rename_variable, set_variable_type, set_variable_defaults, add_local_variable, remove_local_variable, add_component, remove_component, rename_component, reparent_component, set_component_property, duplicate_component, add_function, remove_function, rename_function, set_function_flags, add_macro, remove_macro, rename_macro, add_event_dispatcher, set_function_params, implement_interface, remove_interface, scaffold_interface_implementation, add_timeline, add_event_node, add_comment_node, promote_pin_to_variable, add_replicated_variable, save_asset."),
+		TEXT("Execute multiple Blueprint write operations on a single asset in one transaction. Each operation is { \"op\": \"action_name\", ...action_params_minus_asset_path }. Supported ops: add_node, remove_node, connect_pins, disconnect_pins, set_pin_default, set_node_position, split_pin, recombine_pin, add_pin, remove_pin, refresh_all_nodes, add_variable, remove_variable, rename_variable, set_variable_type, set_variable_defaults, add_local_variable, remove_local_variable, add_component, remove_component, rename_component, reparent_component, set_component_property, duplicate_component, add_function, remove_function, rename_function, set_function_flags, add_macro, remove_macro, rename_macro, add_event_dispatcher, set_function_params, remove_function_param, reorder_function_params, implement_interface, remove_interface, scaffold_interface_implementation, add_timeline, add_event_node, add_comment_node, promote_pin_to_variable, add_replicated_variable, save_asset."),
 		FMonolithActionHandler::CreateStatic(&HandleBatchExecute),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"),         TEXT("Blueprint asset path"))
@@ -2240,7 +2406,8 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleConnectPins(const TSh
 	UEdGraphNode* SrcNode = MonolithBlueprintInternal::FindNodeById(BP, GraphName, SourceNodeId, &SrcMatchGraphs);
 	if (!SrcNode)
 	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Source node not found: %s"), *SourceNodeId));
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Source node not found: %s. %s"),
+			*SourceNodeId, *BPNodeActionsDescribeNodeMiss(BP, GraphName, SourceNodeId)));
 	}
 	if (GraphName.IsEmpty() && SrcMatchGraphs.Num() > 1)
 	{
@@ -2253,7 +2420,8 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleConnectPins(const TSh
 	UEdGraphNode* TgtNode = MonolithBlueprintInternal::FindNodeById(BP, GraphName, TargetNodeId, &TgtMatchGraphs);
 	if (!TgtNode)
 	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Target node not found: %s"), *TargetNodeId));
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Target node not found: %s. %s"),
+			*TargetNodeId, *BPNodeActionsDescribeNodeMiss(BP, GraphName, TargetNodeId)));
 	}
 	if (GraphName.IsEmpty() && TgtMatchGraphs.Num() > 1)
 	{
@@ -2262,20 +2430,44 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleConnectPins(const TSh
 			*TargetNodeId, TgtMatchGraphs.Num(), *FString::Join(TgtMatchGraphs, TEXT(", "))));
 	}
 
-	FString SrcAvailPins;
-	UEdGraphPin* SrcPin = MonolithBlueprintInternal::FindPinOnNode(SrcNode, SourcePinName, EGPD_MAX, &SrcAvailPins);
+	// Resolve by direction (issue #160): a node can carry an input and an output
+	// with the same name (e.g. an async action's 'Stream' in and out), so a
+	// direction-blind lookup can land on the wrong pin. Source is looked up among
+	// outputs and target among inputs; if that fails but the reversed pairing
+	// resolves, the caller passed the ends swapped and the schema links them in
+	// either order. Direction-blind lookup is the last resort so the schema can
+	// report a precise incompatibility.
+	bool bReversed = false;
+	UEdGraphPin* SrcPin = MonolithBlueprintInternal::FindPinOnNode(SrcNode, SourcePinName, EGPD_Output);
+	UEdGraphPin* TgtPin = MonolithBlueprintInternal::FindPinOnNode(TgtNode, TargetPinName, EGPD_Input);
+	if (!SrcPin || !TgtPin)
+	{
+		UEdGraphPin* SrcAsInput = MonolithBlueprintInternal::FindPinOnNode(SrcNode, SourcePinName, EGPD_Input);
+		UEdGraphPin* TgtAsOutput = MonolithBlueprintInternal::FindPinOnNode(TgtNode, TargetPinName, EGPD_Output);
+		if (SrcAsInput && TgtAsOutput)
+		{
+			SrcPin = SrcAsInput;
+			TgtPin = TgtAsOutput;
+			bReversed = true;
+		}
+		else
+		{
+			if (!SrcPin) SrcPin = MonolithBlueprintInternal::FindPinOnNode(SrcNode, SourcePinName, EGPD_MAX);
+			if (!TgtPin) TgtPin = MonolithBlueprintInternal::FindPinOnNode(TgtNode, TargetPinName, EGPD_MAX);
+		}
+	}
+
 	if (!SrcPin)
 	{
 		return FMonolithActionResult::Error(FString::Printf(
-			TEXT("Source pin '%s' not found on node '%s'. Available pins: %s.%s"), *SourcePinName, *SourceNodeId, *SrcAvailPins, GraphNameHint));
+			TEXT("Source pin '%s' not found on node '%s' (graph '%s'). %s%s"), *SourcePinName, *SourceNodeId,
+			*SrcNode->GetGraph()->GetName(), *BPNodeActionsDescribePins(SrcNode), GraphNameHint));
 	}
-
-	FString TgtAvailPins;
-	UEdGraphPin* TgtPin = MonolithBlueprintInternal::FindPinOnNode(TgtNode, TargetPinName, EGPD_MAX, &TgtAvailPins);
 	if (!TgtPin)
 	{
 		return FMonolithActionResult::Error(FString::Printf(
-			TEXT("Target pin '%s' not found on node '%s'. Available pins: %s.%s"), *TargetPinName, *TargetNodeId, *TgtAvailPins, GraphNameHint));
+			TEXT("Target pin '%s' not found on node '%s' (graph '%s'). %s%s"), *TargetPinName, *TargetNodeId,
+			*TgtNode->GetGraph()->GetName(), *BPNodeActionsDescribePins(TgtNode), GraphNameHint));
 	}
 
 	const UEdGraphSchema_K2* Schema = GetDefault<UEdGraphSchema_K2>();
@@ -2307,7 +2499,13 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleConnectPins(const TSh
 	Root->SetStringField(TEXT("source_pin"), SourcePinName);
 	Root->SetStringField(TEXT("target_node"), TargetNodeId);
 	Root->SetStringField(TEXT("target_pin"), TargetPinName);
+	Root->SetStringField(TEXT("source_pin_direction"), SrcPin->Direction == EGPD_Output ? TEXT("output") : TEXT("input"));
+	Root->SetStringField(TEXT("target_pin_direction"), TgtPin->Direction == EGPD_Output ? TEXT("output") : TEXT("input"));
 	Root->SetBoolField(TEXT("success"), true);
+	if (bReversed)
+	{
+		Root->SetStringField(TEXT("note"), TEXT("source_pin resolved as an input and target_pin as an output; the ends were swapped and linked in the correct direction"));
+	}
 	if (bAutoConversion)
 	{
 		Root->SetStringField(TEXT("warning"), TEXT("Connection required an auto-conversion node (types were not directly compatible)"));
@@ -2345,15 +2543,16 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleDisconnectPins(const 
 	UEdGraphNode* Node = MonolithBlueprintInternal::FindNodeById(BP, GraphName, NodeId);
 	if (!Node)
 	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found: %s"), *NodeId));
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found: %s. %s"),
+			*NodeId, *BPNodeActionsDescribeNodeMiss(BP, GraphName, NodeId)));
 	}
 
-	FString AvailPins;
-	UEdGraphPin* Pin = MonolithBlueprintInternal::FindPinOnNode(Node, PinName, EGPD_MAX, &AvailPins);
+	UEdGraphPin* Pin = MonolithBlueprintInternal::FindPinOnNode(Node, PinName, EGPD_MAX);
 	if (!Pin)
 	{
 		return FMonolithActionResult::Error(FString::Printf(
-			TEXT("Pin '%s' not found on node '%s'. Available pins: %s"), *PinName, *NodeId, *AvailPins));
+			TEXT("Pin '%s' not found on node '%s' (graph '%s'). %s"), *PinName, *NodeId,
+			*Node->GetGraph()->GetName(), *BPNodeActionsDescribePins(Node)));
 	}
 
 	FString TargetNodeId = Params->GetStringField(TEXT("target_node"));
@@ -2383,15 +2582,36 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleDisconnectPins(const 
 		UEdGraphNode* TargetNode = MonolithBlueprintInternal::FindNodeById(BP, GraphName, TargetNodeId);
 		if (!TargetNode)
 		{
-			return FMonolithActionResult::Error(FString::Printf(TEXT("Target node not found: %s"), *TargetNodeId));
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Target node not found: %s. %s"),
+				*TargetNodeId, *BPNodeActionsDescribeNodeMiss(BP, GraphName, TargetNodeId)));
 		}
 
-		FString TgtAvailPins2;
-		UEdGraphPin* TargetPin = MonolithBlueprintInternal::FindPinOnNode(TargetNode, TargetPinName, EGPD_MAX, &TgtAvailPins2);
+		// Prefer the pin actually linked to Pin (handles same-named input/output
+		// pairs, issue #160), then the opposite direction, then any direction.
+		UEdGraphPin* TargetPin = nullptr;
+		for (UEdGraphPin* Linked : Pin->LinkedTo)
+		{
+			if (Linked && Linked->GetOwningNode() == TargetNode &&
+				Linked->PinName.ToString().Equals(TargetPinName, ESearchCase::IgnoreCase))
+			{
+				TargetPin = Linked;
+				break;
+			}
+		}
+		if (!TargetPin)
+		{
+			const EEdGraphPinDirection Opposite = (Pin->Direction == EGPD_Output) ? EGPD_Input : EGPD_Output;
+			TargetPin = MonolithBlueprintInternal::FindPinOnNode(TargetNode, TargetPinName, Opposite);
+		}
+		if (!TargetPin)
+		{
+			TargetPin = MonolithBlueprintInternal::FindPinOnNode(TargetNode, TargetPinName, EGPD_MAX);
+		}
 		if (!TargetPin)
 		{
 			return FMonolithActionResult::Error(FString::Printf(
-				TEXT("Target pin '%s' not found on node '%s'. Available pins: %s"), *TargetPinName, *TargetNodeId, *TgtAvailPins2));
+				TEXT("Target pin '%s' not found on node '%s' (graph '%s'). %s"), *TargetPinName, *TargetNodeId,
+				*TargetNode->GetGraph()->GetName(), *BPNodeActionsDescribePins(TargetNode)));
 		}
 
 		Schema->BreakSinglePinLink(Pin, TargetPin);
@@ -2456,15 +2676,21 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleSetPinDefault(const T
 	UEdGraphNode* Node = MonolithBlueprintInternal::FindNodeById(BP, GraphName, NodeId);
 	if (!Node)
 	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found: %s"), *NodeId));
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found: %s. %s"),
+			*NodeId, *BPNodeActionsDescribeNodeMiss(BP, GraphName, NodeId)));
 	}
 
-	FString SetPinAvailPins;
-	UEdGraphPin* Pin = MonolithBlueprintInternal::FindPinOnNode(Node, PinName, EGPD_MAX, &SetPinAvailPins);
+	// Defaults live on input pins; prefer an input when an output shares the name.
+	UEdGraphPin* Pin = MonolithBlueprintInternal::FindPinOnNode(Node, PinName, EGPD_Input);
+	if (!Pin)
+	{
+		Pin = MonolithBlueprintInternal::FindPinOnNode(Node, PinName, EGPD_MAX);
+	}
 	if (!Pin)
 	{
 		return FMonolithActionResult::Error(FString::Printf(
-			TEXT("Pin '%s' not found on node '%s'. Available pins: %s"), *PinName, *NodeId, *SetPinAvailPins));
+			TEXT("Pin '%s' not found on node '%s' (graph '%s'). %s"), *PinName, *NodeId,
+			*Node->GetGraph()->GetName(), *BPNodeActionsDescribePins(Node)));
 	}
 
 	if (Pin->Direction != EGPD_Input)
@@ -2747,6 +2973,11 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleBatchExecute(const TS
 		else if (OpName == TEXT("disconnect_pins"))        SubResult = HandleDisconnectPins(SubParams);
 		else if (OpName == TEXT("set_pin_default"))        SubResult = HandleSetPinDefault(SubParams);
 		else if (OpName == TEXT("set_node_position"))      SubResult = HandleSetNodePosition(SubParams);
+		else if (OpName == TEXT("split_pin"))              SubResult = HandleSplitPin(SubParams);
+		else if (OpName == TEXT("recombine_pin"))          SubResult = HandleRecombinePin(SubParams);
+		else if (OpName == TEXT("add_pin"))                SubResult = HandleAddPin(SubParams);
+		else if (OpName == TEXT("remove_pin"))             SubResult = HandleRemovePin(SubParams);
+		else if (OpName == TEXT("refresh_all_nodes"))      SubResult = HandleRefreshAllNodes(SubParams);
 		// Variable ops
 		else if (OpName == TEXT("add_variable"))           SubResult = FMonolithBlueprintVariableActions::HandleAddVariable(SubParams);
 		else if (OpName == TEXT("remove_variable"))        SubResult = FMonolithBlueprintVariableActions::HandleRemoveVariable(SubParams);
@@ -2770,6 +3001,8 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleBatchExecute(const TS
 		else if (OpName == TEXT("add_macro"))              SubResult = FMonolithBlueprintGraphActions::HandleAddMacro(SubParams);
 		else if (OpName == TEXT("add_event_dispatcher"))   SubResult = FMonolithBlueprintGraphActions::HandleAddEventDispatcher(SubParams);
 		else if (OpName == TEXT("set_function_params"))    SubResult = FMonolithBlueprintGraphActions::HandleSetFunctionParams(SubParams);
+		else if (OpName == TEXT("remove_function_param"))  SubResult = FMonolithBlueprintGraphActions::HandleRemoveFunctionParam(SubParams);
+		else if (OpName == TEXT("reorder_function_params")) SubResult = FMonolithBlueprintGraphActions::HandleReorderFunctionParams(SubParams);
 		else if (OpName == TEXT("implement_interface"))        SubResult = FMonolithBlueprintGraphActions::HandleImplementInterface(SubParams);
 		else if (OpName == TEXT("remove_interface"))           SubResult = FMonolithBlueprintGraphActions::HandleRemoveInterface(SubParams);
 		// Wave 5 scaffolding ops
@@ -4918,5 +5151,405 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleSetTimelineKeys(const
 	Root->SetStringField(TEXT("timeline_name"), TimelineName);
 	Root->SetStringField(TEXT("track_name"), TrackNameStr);
 	Root->SetNumberField(TEXT("keys_set"), KeyCount);
+	return FMonolithActionResult::Success(Root);
+}
+
+// ============================================================
+//  Pin structure editing (issue #162): split_pin, recombine_pin,
+//  add_pin, remove_pin, refresh_all_nodes
+// ============================================================
+
+namespace
+{
+	// Resolve a pin for the structure actions, honouring an optional
+	// pin_direction ('input' / 'output') for nodes with same-named pins.
+	UEdGraphPin* BPNodeActionsFindPinForEdit(UEdGraphNode* Node, const TSharedPtr<FJsonObject>& Params,
+		const FString& PinName, FString& OutError)
+	{
+		FString DirStr;
+		Params->TryGetStringField(TEXT("pin_direction"), DirStr);
+		DirStr = DirStr.ToLower();
+		EEdGraphPinDirection Dir = EGPD_MAX;
+		if (DirStr == TEXT("input"))       Dir = EGPD_Input;
+		else if (DirStr == TEXT("output")) Dir = EGPD_Output;
+		else if (!DirStr.IsEmpty())
+		{
+			OutError = FString::Printf(TEXT("Invalid pin_direction '%s'. Use 'input' or 'output'."), *DirStr);
+			return nullptr;
+		}
+
+		UEdGraphPin* Pin = MonolithBlueprintInternal::FindPinOnNode(Node, PinName, Dir);
+		if (!Pin)
+		{
+			OutError = FString::Printf(TEXT("Pin '%s' not found on node '%s' (graph '%s'). %s"),
+				*PinName, *Node->GetName(), *Node->GetGraph()->GetName(), *BPNodeActionsDescribePins(Node));
+		}
+		return Pin;
+	}
+
+	FMonolithActionResult BPNodeActionsLoadNode(const TSharedPtr<FJsonObject>& Params, UBlueprint*& OutBP,
+		UEdGraphNode*& OutNode, FString& OutAssetPath)
+	{
+		OutBP = MonolithBlueprintInternal::LoadBlueprintFromParams(Params, OutAssetPath);
+		if (!OutBP)
+		{
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *OutAssetPath));
+		}
+		const FString NodeId = Params->GetStringField(TEXT("node_id"));
+		if (NodeId.IsEmpty())
+		{
+			return FMonolithActionResult::Error(TEXT("Missing required parameter: node_id"));
+		}
+		FString Error;
+		OutNode = BPNodeActionsFindNodeOrError(OutBP, Params->GetStringField(TEXT("graph_name")), NodeId, Error);
+		if (!OutNode)
+		{
+			return FMonolithActionResult::Error(Error);
+		}
+		return FMonolithActionResult::Success(MakeShared<FJsonObject>());
+	}
+
+	TSharedPtr<FJsonObject> BPNodeActionsNodeResult(const FString& AssetPath, UEdGraphNode* Node)
+	{
+		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+		Root->SetStringField(TEXT("asset_path"), AssetPath);
+		Root->SetStringField(TEXT("node_id"), Node->GetName());
+		Root->SetStringField(TEXT("graph_name"), Node->GetGraph()->GetName());
+		Root->SetArrayField(TEXT("pins"), BPNodeActionsPinArray(Node));
+		return Root;
+	}
+}
+
+// ---- split_pin ----
+
+FMonolithActionResult FMonolithBlueprintNodeActions::HandleSplitPin(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	UBlueprint* BP = nullptr;
+	UEdGraphNode* Node = nullptr;
+	FMonolithActionResult Load = BPNodeActionsLoadNode(Params, BP, Node, AssetPath);
+	if (!Load.bSuccess) return Load;
+
+	const FString PinName = Params->GetStringField(TEXT("pin_name"));
+	if (PinName.IsEmpty()) return FMonolithActionResult::Error(TEXT("Missing required parameter: pin_name"));
+
+	FString Error;
+	UEdGraphPin* Pin = BPNodeActionsFindPinForEdit(Node, Params, PinName, Error);
+	if (!Pin) return FMonolithActionResult::Error(Error);
+
+	if (Pin->SubPins.Num() > 0)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Pin '%s' is already split. Use recombine_pin to undo."), *Pin->PinName.ToString()));
+	}
+
+	const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
+	if (!K2Schema->CanSplitStructPin(*Pin))
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Pin '%s' (type %s) cannot be split. Only non-container struct pins can be split, and the struct and node must allow it (UEdGraphSchema_K2::CanSplitStructPin)."),
+			*Pin->PinName.ToString(), *MonolithBlueprintInternal::PinTypeToString(Pin->PinType)));
+	}
+
+	const FName ParentName = Pin->PinName;
+	K2Schema->SplitPin(Pin);
+	FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
+
+	// SplitPin keeps the parent pin (hidden) and appends its sub-pins.
+	TArray<TSharedPtr<FJsonValue>> SubPinNames;
+	for (const UEdGraphPin* Sub : Pin->SubPins)
+	{
+		if (Sub) SubPinNames.Add(MakeShared<FJsonValueString>(Sub->PinName.ToString()));
+	}
+
+	TSharedPtr<FJsonObject> Root = BPNodeActionsNodeResult(AssetPath, Node);
+	Root->SetStringField(TEXT("split_pin"), ParentName.ToString());
+	Root->SetArrayField(TEXT("sub_pins"), SubPinNames);
+	return FMonolithActionResult::Success(Root);
+}
+
+// ---- recombine_pin ----
+
+FMonolithActionResult FMonolithBlueprintNodeActions::HandleRecombinePin(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	UBlueprint* BP = nullptr;
+	UEdGraphNode* Node = nullptr;
+	FMonolithActionResult Load = BPNodeActionsLoadNode(Params, BP, Node, AssetPath);
+	if (!Load.bSuccess) return Load;
+
+	const FString PinName = Params->GetStringField(TEXT("pin_name"));
+	if (PinName.IsEmpty()) return FMonolithActionResult::Error(TEXT("Missing required parameter: pin_name"));
+
+	bool bBreakLinks = false;
+	Params->TryGetBoolField(TEXT("break_links"), bBreakLinks);
+
+	FString Error;
+	UEdGraphPin* Pin = BPNodeActionsFindPinForEdit(Node, Params, PinName, Error);
+	if (!Pin) return FMonolithActionResult::Error(Error);
+
+	// Accept the split parent (hidden after a split) or any of its sub-pins.
+	UEdGraphPin* Parent = Pin->SubPins.Num() > 0 ? Pin : Pin->ParentPin;
+	if (!Parent || Parent->SubPins.Num() == 0)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Pin '%s' is not a split struct pin or one of its sub-pins."), *Pin->PinName.ToString()));
+	}
+	const FName ParentName = Parent->PinName;
+	const EEdGraphPinDirection ParentDir = Parent->Direction;
+
+	// Recombining discards the sub-pins; the editor only offers it when none of
+	// them is linked. break_links=true breaks those links first.
+	TArray<UEdGraphPin*> Linked;
+	TArray<UEdGraphPin*> ToExamine = Parent->SubPins;
+	for (int32 i = 0; i < ToExamine.Num(); ++i)
+	{
+		UEdGraphPin* Sub = ToExamine[i];
+		if (!Sub) continue;
+		if (Sub->LinkedTo.Num() > 0) Linked.Add(Sub);
+		ToExamine.Append(Sub->SubPins);
+	}
+	const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
+	if (Linked.Num() > 0)
+	{
+		if (!bBreakLinks)
+		{
+			TArray<FString> Names;
+			for (const UEdGraphPin* L : Linked) Names.Add(L->PinName.ToString());
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Cannot recombine '%s': sub-pins still linked (%s). Disconnect them or pass break_links=true."),
+				*ParentName.ToString(), *FString::Join(Names, TEXT(", "))));
+		}
+		for (UEdGraphPin* L : Linked)
+		{
+			K2Schema->BreakPinLinks(*L, /*bSendsNodeNotification=*/true);
+		}
+	}
+
+	UEdGraphPin* First = Parent->SubPins[0];
+	if (!K2Schema->CanRecombineStructPin(*First))
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Pin '%s' cannot be recombined."), *ParentName.ToString()));
+	}
+	K2Schema->RecombinePin(First);
+	FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
+
+	TSharedPtr<FJsonObject> Root = BPNodeActionsNodeResult(AssetPath, Node);
+	Root->SetStringField(TEXT("recombined_pin"), ParentName.ToString());
+	const UEdGraphPin* Restored = Node->FindPin(ParentName, ParentDir);
+	Root->SetBoolField(TEXT("pin_visible"), Restored && !Restored->bHidden);
+	Root->SetNumberField(TEXT("links_broken"), Linked.Num());
+	return FMonolithActionResult::Success(Root);
+}
+
+// ---- add_pin ----
+
+FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddPin(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	UBlueprint* BP = nullptr;
+	UEdGraphNode* Node = nullptr;
+	FMonolithActionResult Load = BPNodeActionsLoadNode(Params, BP, Node, AssetPath);
+	if (!Load.bSuccess) return Load;
+
+	int32 Count = 1;
+	if (Params->HasField(TEXT("count")))
+	{
+		Count = static_cast<int32>(Params->GetNumberField(TEXT("count")));
+	}
+	if (Count < 1 || Count > 64)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("count must be between 1 and 64 (got %d)"), Count));
+	}
+
+	const int32 PinsBefore = Node->Pins.Num();
+	int32 Added = 0;
+	FString StopReason;
+
+	if (UK2Node_Switch* SwitchNode = Cast<UK2Node_Switch>(Node))
+	{
+		if (!SwitchNode->SupportsAddPinButton())
+		{
+			return FMonolithActionResult::Error(TEXT("This switch node does not support adding pins (its cases come from its type, e.g. an enum)."));
+		}
+		SwitchNode->Modify();
+		for (int32 i = 0; i < Count; ++i)
+		{
+			const int32 Before = SwitchNode->Pins.Num();
+			SwitchNode->AddPinToSwitchNode();
+			if (SwitchNode->Pins.Num() == Before)
+			{
+				StopReason = TEXT("switch node produced no new case pin");
+				break;
+			}
+			++Added;
+		}
+		// The editor reconstructs a switch after adding a case (FBlueprintEditor::OnAddExecutionPin).
+		SwitchNode->GetSchema()->ReconstructNode(*SwitchNode);
+	}
+	else if (IK2Node_AddPinInterface* AddPinNode = Cast<IK2Node_AddPinInterface>(Node))
+	{
+		Node->Modify();
+		for (int32 i = 0; i < Count; ++i)
+		{
+			if (!AddPinNode->CanAddPin())
+			{
+				StopReason = TEXT("node reports it cannot take more pins");
+				break;
+			}
+			AddPinNode->AddInputPin();
+			++Added;
+		}
+		Node->GetGraph()->NotifyNodeChanged(Node);
+	}
+	else
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Node '%s' (%s) does not support adding pins. Supported: nodes implementing IK2Node_AddPinInterface (commutative math/boolean operators such as Multiply/Add/AND/OR, Append, Sequence, Select, Make Array/Set/Map, MultiGate/DoOnce MultiInput) and Switch on Int/String/Name."),
+			*Node->GetName(), *Node->GetClass()->GetName()));
+	}
+
+	if (Added == 0)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("No pin was added to '%s': %s"), *Node->GetName(), *StopReason));
+	}
+
+	FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
+
+	TSharedPtr<FJsonObject> Root = BPNodeActionsNodeResult(AssetPath, Node);
+	Root->SetNumberField(TEXT("pins_added"), Added);
+	Root->SetNumberField(TEXT("pin_count_delta"), Node->Pins.Num() - PinsBefore);
+	if (!StopReason.IsEmpty())
+	{
+		Root->SetStringField(TEXT("warning"), FString::Printf(TEXT("Stopped after %d of %d: %s"), Added, Count, *StopReason));
+	}
+	return FMonolithActionResult::Success(Root);
+}
+
+// ---- remove_pin ----
+
+FMonolithActionResult FMonolithBlueprintNodeActions::HandleRemovePin(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	UBlueprint* BP = nullptr;
+	UEdGraphNode* Node = nullptr;
+	FMonolithActionResult Load = BPNodeActionsLoadNode(Params, BP, Node, AssetPath);
+	if (!Load.bSuccess) return Load;
+
+	const FString PinName = Params->GetStringField(TEXT("pin_name"));
+	const int32 PinsBefore = Node->Pins.Num();
+	FString RemovedName;
+
+	// Select removes its highest option pin; the editor offers no per-pin removal.
+	if (UK2Node_Select* SelectNode = Cast<UK2Node_Select>(Node))
+	{
+		if (!SelectNode->CanRemoveOptionPinToNode())
+		{
+			return FMonolithActionResult::Error(TEXT("Select node cannot lose more option pins (minimum reached, or options are driven by an enum/bool index)."));
+		}
+		SelectNode->Modify();
+		SelectNode->RemoveOptionPinToNode();
+		RemovedName = TEXT("(last option)");
+	}
+	else
+	{
+		if (PinName.IsEmpty()) return FMonolithActionResult::Error(TEXT("Missing required parameter: pin_name"));
+
+		FString Error;
+		UEdGraphPin* Pin = BPNodeActionsFindPinForEdit(Node, Params, PinName, Error);
+		if (!Pin) return FMonolithActionResult::Error(Error);
+		RemovedName = Pin->PinName.ToString();
+
+		if (UK2Node_ExecutionSequence* SeqNode = Cast<UK2Node_ExecutionSequence>(Node))
+		{
+			if (!SeqNode->CanRemoveExecutionPin())
+			{
+				return FMonolithActionResult::Error(TEXT("Sequence node must keep at least one output pin."));
+			}
+			SeqNode->Modify();
+			Pin->Modify();
+			SeqNode->RemovePinFromExecutionNode(Pin);
+		}
+		else if (UK2Node_Switch* SwitchNode = Cast<UK2Node_Switch>(Node))
+		{
+			if (!SwitchNode->CanRemoveExecutionPin(Pin))
+			{
+				return FMonolithActionResult::Error(FString::Printf(TEXT("Switch node cannot remove pin '%s' (default pin, last case, or type-driven case)."), *RemovedName));
+			}
+			SwitchNode->Modify();
+			Pin->Modify();
+			SwitchNode->RemovePinFromSwitchNode(Pin);
+		}
+		else if (IK2Node_AddPinInterface* AddPinNode = Cast<IK2Node_AddPinInterface>(Node))
+		{
+			if (!AddPinNode->CanRemovePin(Pin))
+			{
+				return FMonolithActionResult::Error(FString::Printf(TEXT("Node refuses to remove pin '%s' (minimum pin count reached, or it is not an added pin)."), *RemovedName));
+			}
+			Node->Modify();
+			Pin->Modify();
+			AddPinNode->RemoveInputPin(Pin);
+		}
+		else
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Node '%s' (%s) does not support removing pins. Supported: IK2Node_AddPinInterface nodes, Sequence, Select and Switch nodes."),
+				*Node->GetName(), *Node->GetClass()->GetName()));
+		}
+	}
+
+	if (Node->Pins.Num() >= PinsBefore)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Node '%s' (%s) did not remove pin %s; this node type has no pin removal."),
+			*Node->GetName(), *Node->GetClass()->GetName(), *RemovedName));
+	}
+
+	Node->GetGraph()->NotifyNodeChanged(Node);
+	FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
+
+	TSharedPtr<FJsonObject> Root = BPNodeActionsNodeResult(AssetPath, Node);
+	Root->SetStringField(TEXT("removed_pin"), RemovedName);
+	return FMonolithActionResult::Success(Root);
+}
+
+// ---- refresh_all_nodes ----
+
+FMonolithActionResult FMonolithBlueprintNodeActions::HandleRefreshAllNodes(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	UBlueprint* BP = MonolithBlueprintInternal::LoadBlueprintFromParams(Params, AssetPath);
+	if (!BP)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	}
+
+	bool bCompile = false;
+	Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+	TArray<UK2Node*> AllNodes;
+	FBlueprintEditorUtils::GetAllNodesOfClass(BP, AllNodes);
+
+	// Same as the editor's File > Refresh All Nodes: reconstructs every K2 node,
+	// recompiling the skeleton between structural and non-structural nodes.
+	FBlueprintEditorUtils::RefreshAllNodes(BP);
+	FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+	Root->SetNumberField(TEXT("nodes_refreshed"), AllNodes.Num());
+
+	if (bCompile)
+	{
+		TSharedRef<FJsonObject> CompileParams = MakeShared<FJsonObject>();
+		CompileParams->SetStringField(TEXT("asset_path"), AssetPath);
+		FMonolithActionResult CompileResult = FMonolithBlueprintCompileActions::HandleCompileBlueprint(CompileParams);
+		Root->SetBoolField(TEXT("compile_success"), CompileResult.bSuccess);
+		if (CompileResult.bSuccess && CompileResult.Result.IsValid())
+		{
+			Root->SetObjectField(TEXT("compile_result"), CompileResult.Result);
+		}
+		else if (!CompileResult.bSuccess)
+		{
+			Root->SetStringField(TEXT("compile_error"), CompileResult.ErrorMessage);
+		}
+	}
 	return FMonolithActionResult::Success(Root);
 }

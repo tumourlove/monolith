@@ -13,4 +13,7 @@ public:
 	static FMonolithActionResult HandleReparentComponent(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleSetComponentProperty(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleDuplicateComponent(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSwapComponentClass(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleDumpInstanceComponentValues(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleRestoreInstanceComponentValues(const TSharedPtr<FJsonObject>& Params);
 };

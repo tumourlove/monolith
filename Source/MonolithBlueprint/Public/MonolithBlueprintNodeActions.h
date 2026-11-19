@@ -49,4 +49,11 @@ public:
 	// set_property_access_path -- re-points an existing UK2Node_PropertyAccess node's path
 	// (same reflective Path write as add_property_access_node), then reconstructs the node.
 	static FMonolithActionResult HandleSetPropertyAccessPath(const TSharedPtr<FJsonObject>& Params);
+
+	// Pin structure editing (issue #162)
+	static FMonolithActionResult HandleSplitPin(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleRecombinePin(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleAddPin(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleRemovePin(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleRefreshAllNodes(const TSharedPtr<FJsonObject>& Params);
 };

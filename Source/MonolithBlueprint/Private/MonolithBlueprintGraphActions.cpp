@@ -11,6 +11,7 @@
 #include "K2Node_Event.h"
 #include "K2Node_CreateDelegate.h"
 #include "K2Node_CallFunction.h"
+#include "K2Node_Variable.h"
 #include "Kismet2/Kismet2NameValidators.h"
 #include "EdGraphSchema_K2.h"
 #include "UObject/UObjectIterator.h"
@@ -128,13 +129,33 @@ void FMonolithBlueprintGraphActions::RegisterActions(FMonolithToolRegistry& Regi
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("set_function_params"),
-		TEXT("Add input/output parameters to a Blueprint function. Inputs accept optional is_reference / is_const for by-reference and const-reference parameters."),
+		TEXT("Add input/output parameters to a Blueprint function (appends; use remove_function_param / reorder_function_params to remove or reorder). Inputs accept optional is_reference / is_const for by-reference and const-reference parameters. Call sites are refreshed so they show the new pins."),
 		FMonolithActionHandler::CreateStatic(&HandleSetFunctionParams),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint asset path"))
 			.Required(TEXT("function_name"), TEXT("string"), TEXT("Function graph name"))
 			.Optional(TEXT("inputs"), TEXT("array"), TEXT("Array of {name, type, is_reference?, is_const?} objects for inputs. is_reference=true makes the parameter pass-by-reference; is_const=true (requires is_reference) makes it a const reference, e.g. 'const FAnimUpdateContext&'"))
 			.Optional(TEXT("outputs"), TEXT("array"), TEXT("Array of {name, type} objects for outputs (is_reference / is_const are rejected on outputs)"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("remove_function_param"),
+		TEXT("Remove one input or output parameter from a Blueprint function. Mirrors the details panel: entry/result nodes are rebuilt, call sites in every loaded Blueprint are reconstructed, and call-site pins left orphaned by the removal (including linked ones that would fail compilation) are dropped. Outputs are removed from every return node. Returns call_sites_cleaned and, for inputs, dangling_parameter_nodes (Get/Set nodes of the removed parameter inside the function) plus linked_dangling_parameter_nodes (the connected subset, which blocks compilation; unconnected ones are ignored by the compiler)."),
+		FMonolithActionHandler::CreateStatic(&HandleRemoveFunctionParam),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint asset path"))
+			.Required(TEXT("function_name"), TEXT("string"), TEXT("Function graph name"))
+			.Required(TEXT("param_name"), TEXT("string"), TEXT("Parameter name (case-insensitive)"), {TEXT("param")})
+			.Optional(TEXT("direction"), TEXT("string"), TEXT("'input', 'output' or 'any' (inputs searched first)"), TEXT("any"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("reorder_function_params"),
+		TEXT("Reorder a Blueprint function's inputs or outputs. Names in 'order' move to the front in that order; unlisted parameters keep their relative order after them. Entry/result nodes and all call sites are rebuilt so the pin order matches. Returns the final order."),
+		FMonolithActionHandler::CreateStatic(&HandleReorderFunctionParams),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint asset path"))
+			.Required(TEXT("function_name"), TEXT("string"), TEXT("Function graph name"))
+			.Required(TEXT("order"), TEXT("array"), TEXT("Parameter names (strings) in the desired order"))
+			.Optional(TEXT("direction"), TEXT("string"), TEXT("'input' (default) or 'output'"), TEXT("input"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("implement_interface"),
@@ -1253,6 +1274,133 @@ FMonolithActionResult FMonolithBlueprintGraphActions::HandleAddEventDispatcher(c
 	return FMonolithActionResult::Success(Root);
 }
 
+// --- function signature helpers (set_function_params, remove_function_param, reorder_function_params) ---
+
+namespace
+{
+	UEdGraph* MonolithGraphActionsFindFunctionGraph(UBlueprint* BP, const FString& FuncName)
+	{
+		for (UEdGraph* G : BP->FunctionGraphs)
+		{
+			if (G && G->GetName() == FuncName)
+			{
+				return G;
+			}
+		}
+		return nullptr;
+	}
+
+	FString MonolithGraphActionsListFunctionGraphs(UBlueprint* BP)
+	{
+		TArray<FString> Names;
+		for (UEdGraph* G : BP->FunctionGraphs)
+		{
+			if (G) Names.Add(G->GetName());
+		}
+		return Names.Num() > 0 ? FString::Join(Names, TEXT(", ")) : TEXT("(none)");
+	}
+
+	FString MonolithGraphActionsListUserPins(const UK2Node_EditablePinBase* Node)
+	{
+		TArray<FString> Names;
+		if (Node)
+		{
+			for (const TSharedPtr<FUserPinInfo>& Info : Node->UserDefinedPins)
+			{
+				if (Info.IsValid()) Names.Add(Info->PinName.ToString());
+			}
+		}
+		return Names.Num() > 0 ? FString::Join(Names, TEXT(", ")) : TEXT("(none)");
+	}
+
+	// Push a user-defined pin edit through the same path as the My Blueprint
+	// details panel (FBaseBlueprintGraphActionDetails::OnParamsChanged): rebuild
+	// the entry/result node without keeping orphans, then let the schema mark the
+	// Blueprint structurally modified and reconstruct every call site, macro
+	// instance and delegate node that uses the signature (FParamsChangedHelper).
+	void MonolithGraphActionsApplySignatureChange(UK2Node_EditablePinBase* Node)
+	{
+		if (!Node)
+		{
+			return;
+		}
+		const bool bPrevDisableOrphanSaving = Node->bDisableOrphanPinSaving;
+		Node->bDisableOrphanPinSaving = true;
+		Node->ReconstructNode();
+		Node->bDisableOrphanPinSaving = bPrevDisableOrphanSaving;
+
+		GetDefault<UEdGraphSchema_K2>()->HandleParameterDefaultValueChanged(Node);
+	}
+
+	// After a parameter is removed, the call-site reconstruct keeps the old pin as
+	// an orphan. A linked orphan is a compile error ("In use pin ... no longer
+	// exists"), so call sites of this function that carry an orphan for the removed
+	// parameter are rebuilt once more with orphan saving disabled. Covers every
+	// loaded Blueprint, matching FParamsChangedHelper's scope. Returns the number
+	// of call nodes cleaned.
+	int32 MonolithGraphActionsDropStaleCallSitePins(UBlueprint* BP, FName FuncName, FName ParamName,
+		TArray<TSharedPtr<FJsonValue>>& OutCallSites)
+	{
+		TArray<UK2Node_CallFunction*> ToRebuild;
+		for (TObjectIterator<UK2Node_CallFunction> It(RF_Transient | RF_ClassDefaultObject); It; ++It)
+		{
+			UK2Node_CallFunction* Call = *It;
+			if (!IsValid(Call) || !Call->GetOuter() || !Call->GetOuter()->IsA<UEdGraph>() || Call->FunctionReference.GetMemberName() != FuncName)
+			{
+				continue;
+			}
+
+			UBlueprint* OwnerBP = nullptr;
+			if (const UFunction* Target = Call->GetTargetFunction())
+			{
+				OwnerBP = UBlueprint::GetBlueprintFromClass(Target->GetOwnerClass());
+			}
+			else
+			{
+				OwnerBP = FBlueprintEditorUtils::FindBlueprintForNode(Call);
+			}
+			if (OwnerBP != BP)
+			{
+				continue;
+			}
+
+			for (const UEdGraphPin* Pin : Call->Pins)
+			{
+				if (!Pin || !Pin->bOrphanedPin) continue;
+				const UEdGraphPin* RootPin = Pin;
+				while (RootPin->ParentPin) RootPin = RootPin->ParentPin;
+				if (RootPin->PinName == ParamName)
+				{
+					ToRebuild.Add(Call);
+					break;
+				}
+			}
+		}
+
+		for (UK2Node_CallFunction* Call : ToRebuild)
+		{
+			Call->Modify();
+			const bool bPrev = Call->bDisableOrphanPinSaving;
+			Call->bDisableOrphanPinSaving = true;
+			Call->ReconstructNode();
+			Call->bDisableOrphanPinSaving = bPrev;
+
+			UBlueprint* CallerBP = FBlueprintEditorUtils::FindBlueprintForNode(Call);
+			if (CallerBP)
+			{
+				FBlueprintEditorUtils::MarkBlueprintAsModified(CallerBP);
+			}
+
+			TSharedPtr<FJsonObject> Site = MakeShared<FJsonObject>();
+			Site->SetStringField(TEXT("node_id"), Call->GetName());
+			Site->SetStringField(TEXT("graph"), Call->GetGraph()->GetName());
+			Site->SetStringField(TEXT("blueprint"), CallerBP ? CallerBP->GetPathName() : FString());
+			OutCallSites.Add(MakeShared<FJsonValueObject>(Site));
+		}
+		return ToRebuild.Num();
+	}
+}
+
 // --- set_function_params ---
 
 FMonolithActionResult FMonolithBlueprintGraphActions::HandleSetFunctionParams(const TSharedPtr<FJsonObject>& Params)
@@ -1407,12 +1555,327 @@ FMonolithActionResult FMonolithBlueprintGraphActions::HandleSetFunctionParams(co
 		return FMonolithActionResult::Error(TEXT("No valid inputs or outputs provided"));
 	}
 
+	// Rebuild the signature nodes and refresh every call site (issue #162), the
+	// same path the details panel takes when a parameter is added.
+	if (InputsAdded > 0)
+	{
+		MonolithGraphActionsApplySignatureChange(EntryNode);
+	}
+	if (OutputsAdded > 0 && ResultNode)
+	{
+		MonolithGraphActionsApplySignatureChange(ResultNode);
+	}
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
 
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetStringField(TEXT("function_name"), FuncName);
 	Root->SetNumberField(TEXT("inputs_added"), InputsAdded);
 	Root->SetNumberField(TEXT("outputs_added"), OutputsAdded);
+	return FMonolithActionResult::Success(Root);
+}
+
+// --- remove_function_param ---
+
+FMonolithActionResult FMonolithBlueprintGraphActions::HandleRemoveFunctionParam(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	UBlueprint* BP = MonolithBlueprintInternal::LoadBlueprintFromParams(Params, AssetPath);
+	if (!BP)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	}
+
+	const FString FuncName = Params->GetStringField(TEXT("function_name"));
+	const FString ParamNameStr = Params->GetStringField(TEXT("param_name"));
+	if (FuncName.IsEmpty()) return FMonolithActionResult::Error(TEXT("Missing required parameter: function_name"));
+	if (ParamNameStr.IsEmpty()) return FMonolithActionResult::Error(TEXT("Missing required parameter: param_name"));
+
+	FString Direction = TEXT("any");
+	Params->TryGetStringField(TEXT("direction"), Direction);
+	Direction = Direction.ToLower();
+	if (Direction != TEXT("any") && Direction != TEXT("input") && Direction != TEXT("output"))
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Invalid direction '%s'. Use 'input', 'output' or 'any'."), *Direction));
+	}
+
+	UEdGraph* Graph = MonolithGraphActionsFindFunctionGraph(BP, FuncName);
+	if (!Graph)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Function not found: %s. Function graphs: %s"),
+			*FuncName, *MonolithGraphActionsListFunctionGraphs(BP)));
+	}
+
+	UK2Node_FunctionEntry* EntryNode = MonolithGraphActionsFindFunctionEntry(Graph);
+	UK2Node_FunctionResult* FirstResult = nullptr;
+	for (UEdGraphNode* Node : Graph->Nodes)
+	{
+		FirstResult = Cast<UK2Node_FunctionResult>(Node);
+		if (FirstResult) break;
+	}
+	if (!EntryNode)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("No FunctionEntry node found in: %s"), *FuncName));
+	}
+
+	// Case-insensitive match against the declared parameters, resolving the
+	// stored spelling so FName comparisons downstream use the real name.
+	auto FindUserPin = [&ParamNameStr](const UK2Node_EditablePinBase* Node) -> TSharedPtr<FUserPinInfo>
+	{
+		if (!Node) return nullptr;
+		for (const TSharedPtr<FUserPinInfo>& Info : Node->UserDefinedPins)
+		{
+			if (Info.IsValid() && Info->PinName.ToString().Equals(ParamNameStr, ESearchCase::IgnoreCase))
+			{
+				return Info;
+			}
+		}
+		return nullptr;
+	};
+
+	TSharedPtr<FUserPinInfo> InputInfo;
+	TSharedPtr<FUserPinInfo> OutputInfo;
+	if (Direction != TEXT("output"))
+	{
+		InputInfo = FindUserPin(EntryNode);
+	}
+	if (Direction != TEXT("input") && !InputInfo.IsValid())
+	{
+		OutputInfo = FindUserPin(FirstResult);
+	}
+	if (!InputInfo.IsValid() && !OutputInfo.IsValid())
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Parameter '%s' not found on function '%s' (direction: %s). Inputs: %s. Outputs: %s."),
+			*ParamNameStr, *FuncName, *Direction,
+			*MonolithGraphActionsListUserPins(EntryNode), *MonolithGraphActionsListUserPins(FirstResult)));
+	}
+
+	const bool bIsInput = InputInfo.IsValid();
+	const FName ParamName = bIsInput ? InputInfo->PinName : OutputInfo->PinName;
+
+	// Get/Set nodes bound to the input inside the function (local member scope,
+	// no guid -- see add_node VariableGet, issue #159) become invalid once the
+	// parameter is gone. Like the editor, they are left in place and reported.
+	TArray<TSharedPtr<FJsonValue>> DanglingVarNodes;
+	TArray<TSharedPtr<FJsonValue>> LinkedDanglingVarNodes;
+	if (bIsInput)
+	{
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			const UK2Node_Variable* VarNode = Cast<UK2Node_Variable>(Node);
+			if (VarNode && VarNode->VariableReference.IsLocalScope() &&
+				VarNode->VariableReference.GetMemberName() == ParamName &&
+				!VarNode->VariableReference.GetMemberGuid().IsValid())
+			{
+				DanglingVarNodes.Add(MakeShared<FJsonValueString>(VarNode->GetName()));
+				// Unconnected Get/Set nodes are pruned before compile and are harmless;
+				// only connected ones reference the missing parameter in compiled code.
+				const bool bWired = VarNode->Pins.ContainsByPredicate([](const UEdGraphPin* Pin)
+				{
+					return Pin && Pin->LinkedTo.Num() > 0;
+				});
+				if (bWired)
+				{
+					LinkedDanglingVarNodes.Add(MakeShared<FJsonValueString>(VarNode->GetName()));
+				}
+			}
+		}
+	}
+
+	if (bIsInput)
+	{
+		EntryNode->Modify();
+		EntryNode->RemoveUserDefinedPinByName(ParamName);
+		MonolithGraphActionsApplySignatureChange(EntryNode);
+	}
+	else
+	{
+		// Every return node of the function carries the same outputs; the details
+		// panel edits all of them together (GatherAllResultNodes).
+		for (UK2Node_FunctionResult* ResultNode : FirstResult->GetAllResultNodes())
+		{
+			if (!ResultNode) continue;
+			ResultNode->Modify();
+			ResultNode->RemoveUserDefinedPinByName(ParamName);
+			MonolithGraphActionsApplySignatureChange(ResultNode);
+		}
+	}
+
+	TArray<TSharedPtr<FJsonValue>> CleanedCallSites;
+	MonolithGraphActionsDropStaleCallSitePins(BP, FName(*FuncName), ParamName, CleanedCallSites);
+
+	FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("function_name"), FuncName);
+	Root->SetStringField(TEXT("removed_param"), ParamName.ToString());
+	Root->SetStringField(TEXT("direction"), bIsInput ? TEXT("input") : TEXT("output"));
+	Root->SetStringField(TEXT("inputs"), MonolithGraphActionsListUserPins(EntryNode));
+	Root->SetStringField(TEXT("outputs"), MonolithGraphActionsListUserPins(FirstResult));
+	Root->SetArrayField(TEXT("call_sites_cleaned"), CleanedCallSites);
+	if (DanglingVarNodes.Num() > 0)
+	{
+		Root->SetArrayField(TEXT("dangling_parameter_nodes"), DanglingVarNodes);
+		Root->SetArrayField(TEXT("linked_dangling_parameter_nodes"), LinkedDanglingVarNodes);
+		if (LinkedDanglingVarNodes.Num() > 0)
+		{
+			Root->SetStringField(TEXT("warning"), FString::Printf(
+				TEXT("%d of %d Get/Set node(s) for the removed parameter are still connected (listed in linked_dangling_parameter_nodes); the function will not compile until they are removed with remove_node or rewired. Unconnected ones are ignored by the compiler."),
+				LinkedDanglingVarNodes.Num(), DanglingVarNodes.Num()));
+		}
+		else
+		{
+			Root->SetStringField(TEXT("warning"),
+				TEXT("Unconnected Get/Set nodes for the removed parameter remain in the function graph. They do not affect compilation; remove them with remove_node to tidy the graph."));
+		}
+	}
+	return FMonolithActionResult::Success(Root);
+}
+
+// --- reorder_function_params ---
+
+FMonolithActionResult FMonolithBlueprintGraphActions::HandleReorderFunctionParams(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	UBlueprint* BP = MonolithBlueprintInternal::LoadBlueprintFromParams(Params, AssetPath);
+	if (!BP)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	}
+
+	const FString FuncName = Params->GetStringField(TEXT("function_name"));
+	if (FuncName.IsEmpty()) return FMonolithActionResult::Error(TEXT("Missing required parameter: function_name"));
+
+	FString Direction = TEXT("input");
+	Params->TryGetStringField(TEXT("direction"), Direction);
+	Direction = Direction.ToLower();
+	if (Direction == TEXT("inputs")) Direction = TEXT("input");
+	if (Direction == TEXT("outputs")) Direction = TEXT("output");
+	if (Direction != TEXT("input") && Direction != TEXT("output"))
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Invalid direction '%s'. Use 'input' or 'output'."), *Direction));
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* OrderArray = nullptr;
+	if (!Params->TryGetArrayField(TEXT("order"), OrderArray) || !OrderArray || OrderArray->Num() == 0)
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: order (array of parameter names)"));
+	}
+
+	UEdGraph* Graph = MonolithGraphActionsFindFunctionGraph(BP, FuncName);
+	if (!Graph)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Function not found: %s. Function graphs: %s"),
+			*FuncName, *MonolithGraphActionsListFunctionGraphs(BP)));
+	}
+
+	TArray<UK2Node_EditablePinBase*> TargetNodes;
+	if (Direction == TEXT("input"))
+	{
+		if (UK2Node_FunctionEntry* EntryNode = MonolithGraphActionsFindFunctionEntry(Graph))
+		{
+			TargetNodes.Add(EntryNode);
+		}
+	}
+	else
+	{
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (UK2Node_FunctionResult* ResultNode = Cast<UK2Node_FunctionResult>(Node))
+			{
+				for (UK2Node_FunctionResult* R : ResultNode->GetAllResultNodes())
+				{
+					if (R) TargetNodes.AddUnique(R);
+				}
+				break;
+			}
+		}
+	}
+	if (TargetNodes.Num() == 0)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Function '%s' has no %s node"),
+			*FuncName, Direction == TEXT("input") ? TEXT("entry") : TEXT("result")));
+	}
+
+	// Names listed move to the front in the given order; unlisted parameters
+	// keep their relative order after them.
+	const UK2Node_EditablePinBase* Reference = TargetNodes[0];
+	TArray<FName> RequestedOrder;
+	for (const TSharedPtr<FJsonValue>& Val : *OrderArray)
+	{
+		FString Name;
+		if (!Val.IsValid() || !Val->TryGetString(Name) || Name.IsEmpty())
+		{
+			return FMonolithActionResult::Error(TEXT("order must be an array of non-empty parameter name strings"));
+		}
+		FName Resolved = NAME_None;
+		for (const TSharedPtr<FUserPinInfo>& Info : Reference->UserDefinedPins)
+		{
+			if (Info.IsValid() && Info->PinName.ToString().Equals(Name, ESearchCase::IgnoreCase))
+			{
+				Resolved = Info->PinName;
+				break;
+			}
+		}
+		if (Resolved.IsNone())
+		{
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Parameter '%s' is not an %s of '%s'. Current %ss: %s"),
+				*Name, *Direction, *FuncName, *Direction, *MonolithGraphActionsListUserPins(Reference)));
+		}
+		if (RequestedOrder.Contains(Resolved))
+		{
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Parameter '%s' is listed more than once in order"), *Name));
+		}
+		RequestedOrder.Add(Resolved);
+	}
+
+	bool bChanged = false;
+	for (UK2Node_EditablePinBase* Node : TargetNodes)
+	{
+		TArray<TSharedPtr<FUserPinInfo>> Reordered;
+		for (const FName& Name : RequestedOrder)
+		{
+			for (const TSharedPtr<FUserPinInfo>& Info : Node->UserDefinedPins)
+			{
+				if (Info.IsValid() && Info->PinName == Name)
+				{
+					Reordered.Add(Info);
+					break;
+				}
+			}
+		}
+		for (const TSharedPtr<FUserPinInfo>& Info : Node->UserDefinedPins)
+		{
+			if (!Reordered.Contains(Info))
+			{
+				Reordered.Add(Info);
+			}
+		}
+		if (Reordered == Node->UserDefinedPins)
+		{
+			continue;
+		}
+		Node->Modify();
+		Node->UserDefinedPins = MoveTemp(Reordered);
+		MonolithGraphActionsApplySignatureChange(Node);
+		bChanged = true;
+	}
+
+	if (bChanged)
+	{
+		FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("function_name"), FuncName);
+	Root->SetStringField(TEXT("direction"), Direction);
+	Root->SetBoolField(TEXT("changed"), bChanged);
+	TArray<TSharedPtr<FJsonValue>> FinalOrder;
+	for (const TSharedPtr<FUserPinInfo>& Info : TargetNodes[0]->UserDefinedPins)
+	{
+		if (Info.IsValid()) FinalOrder.Add(MakeShared<FJsonValueString>(Info->PinName.ToString()));
+	}
+	Root->SetArrayField(TEXT("order"), FinalOrder);
 	return FMonolithActionResult::Success(Root);
 }
 
