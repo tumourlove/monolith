@@ -10,6 +10,7 @@
 #include "MonolithBlueprintStructActions.h"
 #include "MonolithBlueprintDataTableActions.h"
 #include "MonolithBlueprintCurveTableActions.h"
+#include "MonolithBlueprintCurveAssetActions.h"
 #include "MonolithBlueprintStringTableActions.h"
 #include "MonolithBlueprintBuildActions.h"
 #include "MonolithBlueprintDiffActions.h"
@@ -17,6 +18,7 @@
 #include "MonolithBlueprintGraphExportActions.h"
 #include "MonolithBlueprintLayoutActions.h"
 #include "MonolithBlueprintSpawnActions.h"
+#include "MonolithBlueprintEventActions.h"
 #include "MonolithMotionMatchingScaffoldActions.h"
 #include "MonolithBlueprintBulkFillAdapter.h"
 #include "MonolithToolRegistry.h"
@@ -41,6 +43,7 @@ void FMonolithBlueprintModule::StartupModule()
 	FMonolithBlueprintStructActions::RegisterActions(Registry);
 	FMonolithBlueprintDataTableActions::RegisterActions(Registry);
 	FMonolithBlueprintCurveTableActions::RegisterActions(Registry);
+	FMonolithBlueprintCurveAssetActions::RegisterActions(Registry);
 	FMonolithBlueprintStringTableActions::RegisterActions(Registry);
 	FMonolithBlueprintBuildActions::RegisterActions(Registry);
 	FMonolithBlueprintDiffActions::RegisterActions(Registry);
@@ -48,6 +51,7 @@ void FMonolithBlueprintModule::StartupModule()
 	FMonolithBlueprintGraphExportActions::RegisterActions(Registry);
 	FMonolithBlueprintLayoutActions::RegisterActions(Registry);
 	FMonolithBlueprintSpawnActions::RegisterActions(Registry);
+	FMonolithBlueprintEventActions::RegisterActions(Registry);
 
 	// Sprint 5 — Motion Matching Action Pack (Pillar D): character/actor BP scaffolding.
 	FMonolithMotionMatchingScaffoldActions::RegisterActions(Registry);

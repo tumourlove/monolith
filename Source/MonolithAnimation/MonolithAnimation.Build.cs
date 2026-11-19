@@ -85,6 +85,8 @@ public class MonolithAnimation : ModuleRules
 			"RigVMDeveloper",
 			"PoseSearchEditor",    // UAnimGraphNode_MotionMatching (Wave 7 ABP graph wiring)
 			"BlendStackEditor",    // UAnimGraphNode_BlendStack_Base (Sprint 4 BoundGraph-node spawn fix)
+			"PhysicsUtilities",    // FPhysicsAssetUtils (physics asset structural authoring). Engine Developer module, always present.
+			"MeshUtilitiesEngine", // FMeshUtilitiesEngine::CalcBoneVertInfos (add_physics_body shape fitting). Re-exports MeshUtilitiesCommon (FBoneVertInfo).
 		});
 
 		// --- Conditional: Chooser (UChooserTable authoring) ---

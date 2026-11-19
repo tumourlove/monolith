@@ -5,7 +5,7 @@
 
 /**
  * Control Rig graph read/write action handlers for Monolith.
- * 3 actions: graph reading, node spawning, pin wiring.
+ * Graph reading, node spawning/removal, pin wiring/unwiring, pin defaults, member variables.
  */
 class MONOLITHANIMATION_API FMonolithControlRigWriteActions
 {
@@ -17,4 +17,8 @@ private:
 	static FMonolithActionResult HandleGetControlRigGraph(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleAddControlRigNode(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleConnectControlRigPins(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleRemoveControlRigNode(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleBreakControlRigLink(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSetControlRigPinDefault(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleAddControlRigVariable(const TSharedPtr<FJsonObject>& Params);
 };
