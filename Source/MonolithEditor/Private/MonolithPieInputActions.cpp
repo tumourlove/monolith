@@ -17,6 +17,16 @@
 #include "AssetRegistry/IAssetRegistry.h"
 #include "UObject/UObjectGlobals.h"
 
+// pie_inject_key: raw key events through APlayerController::InputKey(const FInputKeyEventArgs&).
+// The FInputKeyEventArgs overload and FInputKeyEventArgs::CreateSimulated have the same
+// signatures in UE 5.7 and 5.8, so no ENGINE_MINOR_VERSION gate is needed.
+#include "InputKeyEventArgs.h"
+#include "InputCoreTypes.h"
+#include "GameFramework/InputSettings.h"
+#include "GameFramework/PlayerInput.h"
+#include "GenericPlatform/GenericPlatformInputDeviceMapper.h"
+#include "HAL/PlatformTime.h"
+
 #include "InputAction.h"
 #include "InputActionValue.h"
 #include "EnhancedInputSubsystems.h"
@@ -307,6 +317,176 @@ namespace
 	};
 }
 
+// =============================================================================
+//  Raw key sequences (pie_inject_key)
+// =============================================================================
+//
+// A raw key injection is a short ordered sequence of key events (modifier presses, the key
+// itself, the release, modifier releases). Each step may require a minimum number of engine
+// frames and a minimum wall-clock time since the previous step, so a press and its release never
+// land in the same frame and chord modifiers are down before the chorded key is pressed. Steps
+// that are ready run immediately in the handler; the rest run from a shared FTSTicker that
+// self-unregisters when no sequences remain and is cleared on PIE end.
+
+namespace
+{
+	// Frames between ordered steps. Two frames (not one) guarantee that at least one full PIE
+	// world tick (PlayerTick -> ProcessPlayerInput) runs between the steps regardless of whether
+	// the handler / core ticker ran before or after the world tick in the frame that queued them.
+	constexpr int32 PieKeyOrderedStepFrameGap = 2;
+
+	struct FPieKeyStep
+	{
+		FKey Key;
+		EInputEvent Event = IE_Pressed;
+		float Amount = 1.0f;
+		int32 MinFrameGap = 0;          // engine frames required since the previous step
+		double MinSecondsSincePrev = 0; // wall-clock seconds required since the previous step
+		bool bRepeatAxisWhileWaiting = false; // while waiting, re-inject RepeatAmount on Key each frame (IE_Axis)
+		float RepeatAmount = 0.0f;
+	};
+
+	struct FPieKeySequence
+	{
+		TWeakObjectPtr<APlayerController> Controller;
+		TArray<FPieKeyStep> Steps;
+		int32 NextStep = 0;
+		uint64 LastStepFrame = 0;
+		double LastStepTime = 0.0;
+	};
+
+	// The input device to stamp on injected events: the primary device of the controller's
+	// platform user, so APlayerController::InputKey's bFilterInputByPlatformUser check accepts it.
+	// Falls back to the mapper's default device when the user has no mapped device.
+	FInputDeviceId PieKeyResolveInputDevice(const APlayerController* PC)
+	{
+		IPlatformInputDeviceMapper& Mapper = IPlatformInputDeviceMapper::Get();
+		FInputDeviceId Device = Mapper.GetPrimaryInputDeviceForUser(PC->GetPlatformUserId());
+		if (!Device.IsValid())
+		{
+			Device = Mapper.GetDefaultInputDevice();
+		}
+		return Device;
+	}
+
+	// Send one key event to the controller. Returns APlayerController::InputKey's result
+	// (true when some input handler consumed it).
+	bool PieKeySendEvent(APlayerController* PC, const FKey& Key, EInputEvent Event, float Amount)
+	{
+		const FInputKeyEventArgs Args = FInputKeyEventArgs::CreateSimulated(
+			Key, Event, Amount, /*InNumSamplesOverride=*/-1, PieKeyResolveInputDevice(PC));
+		return PC->InputKey(Args);
+	}
+
+	// Run every ready step of a sequence. Returns true when the sequence is finished (all steps
+	// ran, or the controller is gone). OutExecuted / bOutAnyConsumed report on this call only.
+	bool PieKeyAdvanceSequence(FPieKeySequence& Seq, int32& OutExecuted, bool& bOutAnyConsumed)
+	{
+		APlayerController* PC = Seq.Controller.Get();
+		if (!PC || !PC->GetWorld() || PC->GetWorld()->bIsTearingDown)
+		{
+			return true;
+		}
+
+		while (Seq.NextStep < Seq.Steps.Num())
+		{
+			const FPieKeyStep& Step = Seq.Steps[Seq.NextStep];
+			const uint64 FramesSince = GFrameCounter - Seq.LastStepFrame;
+			const double SecondsSince = FPlatformTime::Seconds() - Seq.LastStepTime;
+			if (FramesSince < static_cast<uint64>(Step.MinFrameGap) || SecondsSince < Step.MinSecondsSincePrev)
+			{
+				if (Step.bRepeatAxisWhileWaiting && FramesSince > 0)
+				{
+					PieKeySendEvent(PC, Step.Key, IE_Axis, Step.RepeatAmount);
+				}
+				return false;
+			}
+
+			bOutAnyConsumed |= PieKeySendEvent(PC, Step.Key, Step.Event, Step.Amount);
+			++OutExecuted;
+			Seq.LastStepFrame = GFrameCounter;
+			Seq.LastStepTime = FPlatformTime::Seconds();
+			++Seq.NextStep;
+		}
+		return true;
+	}
+
+	class FPieKeySequenceRegistry
+	{
+	public:
+		static FPieKeySequenceRegistry& Get()
+		{
+			static FPieKeySequenceRegistry Singleton;
+			return Singleton;
+		}
+
+		void Add(FPieKeySequence&& Seq)
+		{
+			Sequences.Add(MoveTemp(Seq));
+			EnsureTicker();
+		}
+
+		int32 NumPending() const { return Sequences.Num(); }
+
+		// Drop all pending sequences and remove the ticker (PIE end + module shutdown). The
+		// RemoveTicker matters for the same reason as FPieInputHoldRegistry::ClearAll: the ticker
+		// is bound CreateRaw to this singleton.
+		void ClearAll()
+		{
+			Sequences.Reset();
+			if (TickerHandle.IsValid())
+			{
+				FTSTicker::RemoveTicker(TickerHandle);
+				TickerHandle.Reset();
+			}
+		}
+
+	private:
+		FPieKeySequenceRegistry() = default;
+
+		void EnsureTicker()
+		{
+			if (!TickerHandle.IsValid())
+			{
+				TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
+					FTickerDelegate::CreateRaw(this, &FPieKeySequenceRegistry::OnTick), 0.0f);
+			}
+		}
+
+		bool OnTick(float /*DeltaTime*/)
+		{
+			UWorld* PieWorld = GetPieWorld();
+			if (!PieWorld || PieWorld->bIsTearingDown)
+			{
+				// Returning false auto-removes the ticker; only clear the cached handle.
+				Sequences.Reset();
+				TickerHandle.Reset();
+				return false;
+			}
+
+			for (int32 Index = Sequences.Num() - 1; Index >= 0; --Index)
+			{
+				int32 Executed = 0;
+				bool bConsumed = false;
+				if (PieKeyAdvanceSequence(Sequences[Index], Executed, bConsumed))
+				{
+					Sequences.RemoveAt(Index);
+				}
+			}
+
+			if (Sequences.Num() == 0)
+			{
+				TickerHandle.Reset();
+				return false;
+			}
+			return true;
+		}
+
+		TArray<FPieKeySequence> Sequences;
+		FTSTicker::FDelegateHandle TickerHandle;
+	};
+}
+
 // Drop all per-session input/spectator state on PIE end so the re-apply ticker never touches a
 // torn-down PIE world.
 namespace
@@ -315,6 +495,7 @@ namespace
 	{
 		FPieInputHoldRegistry::Get().ClearAll();
 		FPieSpectatorRegistry::Get().ClearAll();
+		FPieKeySequenceRegistry::Get().ClearAll();
 	}
 
 	// A single PIE-end hook. PrePIEEnded fires earlier in teardown than EndPIE (before the world
@@ -495,7 +676,28 @@ void FMonolithPieInputActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("player_index"), TEXT("number"), TEXT("Local player index (default 0)."), TEXT("0"))
 			.Build());
 
-	UE_LOG(LogMonolithPieInput, Log, TEXT("MonolithEditor: registered 3 PIE input/control actions"));
+	Registry.RegisterAction(TEXT("editor"), TEXT("pie_inject_key"),
+		TEXT("Inject a raw key event into a live PIE player controller through APlayerController::InputKey, stamped with the primary input device of "
+		     "the controller's platform user. Unlike pie_inject_input_action this goes through the normal key path, so Enhanced Input mappings "
+		     "(including chorded actions and modifiers/triggers), legacy key bindings and Blueprint Debug Key events all see it. MUTATES LIVE PIE STATE. "
+		     "key is an FKey name (EKeys), e.g. SpaceBar, W, LeftShift, LeftMouseButton, Gamepad_FaceButton_Bottom, MouseX, Gamepad_LeftX. "
+		     "event: pressed (key down, stays down until a released call), released, tap (press now, release on a later frame after hold_seconds), "
+		     "axis (analog keys only: send axis_value; with hold_seconds > 0 the value is re-sent every frame for that long and then zeroed). "
+		     "modifiers: keys held around the main key; they are pressed first, the main key follows at least two frames later, and they are released "
+		     "at least two frames after the main key's release (for pressed: modifiers then key; for released: key then modifiers). "
+		     "A press and its release are never sent in the same frame. Pending steps are dropped on PIE end. "
+		     "No-ops with a clean error when PIE is not running or a key name is not a valid FKey."),
+		FMonolithActionHandler::CreateStatic(&HandleInjectKey),
+		FParamSchemaBuilder()
+			.Required(TEXT("key"), TEXT("string"), TEXT("FKey name, e.g. SpaceBar, E, LeftShift, LeftMouseButton, Gamepad_FaceButton_Bottom, MouseX, Gamepad_LeftX."))
+			.Optional(TEXT("event"), TEXT("string"), TEXT("pressed | released | tap | axis (default tap)."), TEXT("tap"))
+			.Optional(TEXT("axis_value"), TEXT("number"), TEXT("Value for event=axis (default 1.0). Ignored for other events."), TEXT("1.0"))
+			.Optional(TEXT("hold_seconds"), TEXT("number"), TEXT("tap: time the key stays down before release (default 0 = released two frames later). axis: time to keep re-sending the value before zeroing it (default 0 = single sample, no auto-zero). Max 60."), TEXT("0"))
+			.Optional(TEXT("modifiers"), TEXT("array"), TEXT("Digital keys to hold around the main key, e.g. [\"LeftShift\", \"LeftControl\"]. A comma-separated string is also accepted."))
+			.Optional(TEXT("player_index"), TEXT("number"), TEXT("Local player index (default 0)."), TEXT("0"))
+			.Build());
+
+	UE_LOG(LogMonolithPieInput, Log, TEXT("MonolithEditor: registered 4 PIE input/control actions"));
 }
 
 // =============================================================================
@@ -697,5 +899,273 @@ FMonolithActionResult FMonolithPieInputActions::HandlePossessSpectatorFree(const
 
 	Root->SetStringField(TEXT("repossessed_pawn"), OriginalPawn->GetName());
 	Root->SetBoolField(TEXT("spectating"), PC->IsInState(NAME_Spectating));
+	return FMonolithActionResult::Success(Root);
+}
+
+// =============================================================================
+//  pie_inject_key
+// =============================================================================
+
+namespace
+{
+	// Parse an FKey name and validate it against the registered EKeys details.
+	bool PieKeyParseKey(const FString& Name, FKey& OutKey, FString& OutError)
+	{
+		const FString Trimmed = Name.TrimStartAndEnd();
+		if (Trimmed.IsEmpty())
+		{
+			OutError = TEXT("key name is empty");
+			return false;
+		}
+		OutKey = FKey(FName(*Trimmed));
+		if (!OutKey.IsValid())
+		{
+			OutError = FString::Printf(
+				TEXT("'%s' is not a valid FKey name. Use EKeys names such as SpaceBar, E, LeftShift, LeftMouseButton, Gamepad_FaceButton_Bottom, MouseX, Gamepad_LeftX."),
+				*Trimmed);
+			return false;
+		}
+		return true;
+	}
+}
+
+FMonolithActionResult FMonolithPieInputActions::HandleInjectKey(const TSharedPtr<FJsonObject>& Params)
+{
+	UWorld* PieWorld = GetPieWorld();
+	if (!PieWorld)
+	{
+		return FMonolithActionResult::Error(TEXT("PIE not running — start Play-In-Editor first"));
+	}
+
+	FString KeyName;
+	if (!Params->TryGetStringField(TEXT("key"), KeyName) || KeyName.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("pie_inject_key requires 'key' (an FKey name, e.g. SpaceBar)"));
+	}
+
+	FKey Key;
+	FString KeyError;
+	if (!PieKeyParseKey(KeyName, Key, KeyError))
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("pie_inject_key 'key': %s"), *KeyError));
+	}
+
+	FString EventName = TEXT("tap");
+	Params->TryGetStringField(TEXT("event"), EventName);
+	EventName = EventName.TrimStartAndEnd().ToLower();
+	const bool bPressed = EventName == TEXT("pressed") || EventName == TEXT("press");
+	const bool bReleased = EventName == TEXT("released") || EventName == TEXT("release");
+	const bool bTap = EventName == TEXT("tap");
+	const bool bAxis = EventName == TEXT("axis");
+	if (!bPressed && !bReleased && !bTap && !bAxis)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("pie_inject_key 'event' must be pressed, released, tap or axis (got '%s')"), *EventName));
+	}
+
+	if (Key.IsAxis2D() || Key.IsAxis3D())
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Key '%s' is a 2D/3D axis key; inject its 1D component keys instead (e.g. MouseX / MouseY, Gamepad_LeftX / Gamepad_LeftY)."),
+			*Key.ToString()));
+	}
+	if (bAxis && !Key.IsAnalog())
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("event=axis needs an analog key; '%s' is digital. Use pressed / released / tap for digital keys."), *Key.ToString()));
+	}
+	if (!bAxis && Key.IsAnalog())
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("'%s' is an analog key; use event=axis with axis_value (or the digital variant of the key, e.g. Gamepad_LeftTrigger instead of Gamepad_LeftTriggerAxis)."),
+			*Key.ToString()));
+	}
+
+	double AxisValue = 1.0;
+	Params->TryGetNumberField(TEXT("axis_value"), AxisValue);
+
+	double HoldSeconds = 0.0;
+	Params->TryGetNumberField(TEXT("hold_seconds"), HoldSeconds);
+	HoldSeconds = FMath::Clamp(HoldSeconds, 0.0, 60.0);
+
+	int32 PlayerIndex = 0;
+	{
+		double Idx = 0.0;
+		if (Params->TryGetNumberField(TEXT("player_index"), Idx)) { PlayerIndex = static_cast<int32>(Idx); }
+	}
+
+	// Modifiers: a JSON array of key names, or a comma-separated string (array params can
+	// arrive stringified through some MCP transports).
+	TArray<FString> ModifierNames;
+	{
+		const TArray<TSharedPtr<FJsonValue>>* ModArr = nullptr;
+		FString ModString;
+		if (Params->TryGetArrayField(TEXT("modifiers"), ModArr) && ModArr)
+		{
+			for (const TSharedPtr<FJsonValue>& Val : *ModArr)
+			{
+				FString S;
+				if (!Val.IsValid() || !Val->TryGetString(S))
+				{
+					return FMonolithActionResult::Error(TEXT("pie_inject_key 'modifiers' entries must be key-name strings"));
+				}
+				ModifierNames.Add(S);
+			}
+		}
+		else if (Params->TryGetStringField(TEXT("modifiers"), ModString) && !ModString.TrimStartAndEnd().IsEmpty())
+		{
+			FString Body = ModString.TrimStartAndEnd();
+			Body.RemoveFromStart(TEXT("["));
+			Body.RemoveFromEnd(TEXT("]"));
+			Body.ParseIntoArray(ModifierNames, TEXT(","), /*InCullEmpty=*/true);
+			for (FString& S : ModifierNames)
+			{
+				S = S.TrimStartAndEnd().TrimQuotes();
+			}
+		}
+	}
+
+	TArray<FKey> Modifiers;
+	for (const FString& Name : ModifierNames)
+	{
+		FKey Mod;
+		FString ModError;
+		if (!PieKeyParseKey(Name, Mod, ModError))
+		{
+			return FMonolithActionResult::Error(FString::Printf(TEXT("pie_inject_key 'modifiers': %s"), *ModError));
+		}
+		if (Mod.IsAnalog())
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("pie_inject_key 'modifiers': '%s' is an analog key; modifiers must be digital keys"), *Mod.ToString()));
+		}
+		if (Mod == Key)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("pie_inject_key 'modifiers': '%s' is the main key; list only the keys held around it"), *Mod.ToString()));
+		}
+		Modifiers.AddUnique(Mod);
+	}
+
+	APlayerController* PC = ResolvePlayerController(PieWorld, PlayerIndex);
+	if (!PC)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("No player controller at player_index %d in the running PIE world"), PlayerIndex));
+	}
+	if (!PC->PlayerInput)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Player controller at player_index %d has no PlayerInput (not a local player controller?)"), PlayerIndex));
+	}
+
+	// Build the ordered step list.
+	const bool bHasModifiers = Modifiers.Num() > 0;
+	TArray<FPieKeyStep> Steps;
+	auto AddStep = [&Steps](const FKey& InKey, EInputEvent InEvent, float InAmount, int32 InGap, double InSeconds,
+		bool bInRepeat = false, float InRepeatAmount = 0.0f)
+	{
+		FPieKeyStep& Step = Steps.AddDefaulted_GetRef();
+		Step.Key = InKey;
+		Step.Event = InEvent;
+		Step.Amount = InAmount;
+		Step.MinFrameGap = InGap;
+		Step.MinSecondsSincePrev = InSeconds;
+		Step.bRepeatAxisWhileWaiting = bInRepeat;
+		Step.RepeatAmount = InRepeatAmount;
+	};
+	auto AddModifierPresses = [&]()
+	{
+		for (const FKey& Mod : Modifiers) { AddStep(Mod, IE_Pressed, 1.0f, 0, 0.0); }
+	};
+	auto AddModifierReleases = [&](int32 FirstGap)
+	{
+		for (int32 Index = Modifiers.Num() - 1; Index >= 0; --Index)
+		{
+			AddStep(Modifiers[Index], IE_Released, 0.0f, Index == Modifiers.Num() - 1 ? FirstGap : 0, 0.0);
+		}
+	};
+	const int32 KeyGap = bHasModifiers ? PieKeyOrderedStepFrameGap : 0;
+
+	if (bPressed)
+	{
+		AddModifierPresses();
+		AddStep(Key, IE_Pressed, 1.0f, KeyGap, 0.0);
+	}
+	else if (bReleased)
+	{
+		AddStep(Key, IE_Released, 0.0f, 0, 0.0);
+		AddModifierReleases(PieKeyOrderedStepFrameGap);
+	}
+	else if (bTap)
+	{
+		AddModifierPresses();
+		AddStep(Key, IE_Pressed, 1.0f, KeyGap, 0.0);
+		AddStep(Key, IE_Released, 0.0f, PieKeyOrderedStepFrameGap, HoldSeconds);
+		AddModifierReleases(PieKeyOrderedStepFrameGap);
+	}
+	else // axis
+	{
+		AddModifierPresses();
+		AddStep(Key, IE_Axis, static_cast<float>(AxisValue), KeyGap, 0.0);
+		if (HoldSeconds > 0.0)
+		{
+			// Re-send the value every frame while held, then zero it.
+			AddStep(Key, IE_Axis, 0.0f, PieKeyOrderedStepFrameGap, HoldSeconds, /*bInRepeat=*/true, static_cast<float>(AxisValue));
+		}
+		if (bHasModifiers)
+		{
+			AddModifierReleases(PieKeyOrderedStepFrameGap);
+		}
+	}
+
+	FPieKeySequence Seq;
+	Seq.Controller = PC;
+	Seq.Steps = MoveTemp(Steps);
+	Seq.LastStepFrame = GFrameCounter;
+	Seq.LastStepTime = FPlatformTime::Seconds();
+	const int32 TotalSteps = Seq.Steps.Num();
+
+	int32 ExecutedNow = 0;
+	bool bConsumedNow = false;
+	const bool bFinished = PieKeyAdvanceSequence(Seq, ExecutedNow, bConsumedNow);
+	if (!bFinished)
+	{
+		FPieKeySequenceRegistry::Get().Add(MoveTemp(Seq));
+	}
+
+	// Report the device / user the events were stamped with, and whether InputKey's
+	// platform-user filter could reject them.
+	const FInputDeviceId Device = PieKeyResolveInputDevice(PC);
+	const FPlatformUserId ControllerUser = PC->GetPlatformUserId();
+	const FPlatformUserId DeviceUser = IPlatformInputDeviceMapper::Get().GetUserForInputDevice(Device);
+	const bool bFilterByUser = GetDefault<UInputSettings>()->bFilterInputByPlatformUser;
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("key"), Key.ToString());
+	Root->SetStringField(TEXT("event"), EventName);
+	Root->SetNumberField(TEXT("player_index"), PlayerIndex);
+	if (bAxis) { Root->SetNumberField(TEXT("axis_value"), AxisValue); }
+	Root->SetNumberField(TEXT("hold_seconds"), HoldSeconds);
+	TArray<TSharedPtr<FJsonValue>> ModJson;
+	for (const FKey& Mod : Modifiers) { ModJson.Add(MakeShared<FJsonValueString>(Mod.ToString())); }
+	Root->SetArrayField(TEXT("modifiers"), ModJson);
+	Root->SetNumberField(TEXT("input_device_id"), Device.GetId());
+	Root->SetNumberField(TEXT("platform_user_id"), ControllerUser.GetInternalId());
+	Root->SetNumberField(TEXT("total_steps"), TotalSteps);
+	Root->SetNumberField(TEXT("steps_sent_now"), ExecutedNow);
+	Root->SetNumberField(TEXT("steps_scheduled"), TotalSteps - ExecutedNow);
+	Root->SetBoolField(TEXT("consumed_now"), bConsumedNow);
+	Root->SetBoolField(TEXT("completed"), bFinished);
+	if (bFilterByUser && DeviceUser != ControllerUser)
+	{
+		Root->SetStringField(TEXT("warning"),
+			TEXT("bFilterInputByPlatformUser is on and the resolved input device does not belong to this controller's platform user; APlayerController::InputKey will drop these events."));
+	}
+	if (bAxis && HoldSeconds <= 0.0)
+	{
+		Root->SetStringField(TEXT("note"),
+			TEXT("Single axis sample with no auto-zero. Gamepad axes can keep the last value; pass hold_seconds to send a value for a duration and zero it afterwards."));
+	}
 	return FMonolithActionResult::Success(Root);
 }

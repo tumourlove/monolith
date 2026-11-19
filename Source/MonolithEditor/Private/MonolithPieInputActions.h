@@ -13,6 +13,8 @@ class FJsonObject;
 //   pie_inject_input_action    — inject a UInputAction value through the EnhancedInput local-player
 //                                subsystem (InjectInputForAction), optionally repeated for N frames.
 //   pie_possess_spectator_free — detach the PlayerController to a free-fly spectator pawn and back.
+//   pie_inject_key             — raw key events through APlayerController::InputKey (press /
+//                                release / tap / axis, chord modifiers), scheduled across frames.
 //
 // All game-thread-only. The held-rotation / repeated-input re-apply runs from a single shared
 // FTSTicker that self-unregisters when no holds remain and clears on PIE end, so a torn-down PIE
@@ -31,4 +33,5 @@ public:
 	static FMonolithActionResult HandleSetControlRotation(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleInjectInputAction(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandlePossessSpectatorFree(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleInjectKey(const TSharedPtr<FJsonObject>& Params);
 };

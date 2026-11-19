@@ -17,6 +17,8 @@ public class MonolithEditor : ModuleRules
 		{
 			"MonolithCore",
 			"MonolithIndex",
+			"InputCore",
+			"ApplicationCore",
 			"SQLiteCore",
 			"MonolithSource",
 			"UnrealEd",
