@@ -67,7 +67,6 @@
 #include "Materials/MaterialExpressionDynamicParameter.h"
 #include "Editor.h"
 #include "Misc/PackageName.h"
-#include "UObject/SavePackage.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -76,6 +75,15 @@
 #include "Serialization/JsonWriter.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogMonolithNiagara, Log, All);
+
+namespace
+{
+	/** Asset-taking shorthand over FMonolithAssetUtils::SaveAssetPackage. See that function. */
+	bool SaveAssetPackage(UObject* Asset, FString& OutError)
+	{
+		return FMonolithAssetUtils::SaveAssetPackage((nullptr != Asset) ? Asset->GetPackage() : nullptr, &OutError);
+	}
+}
 
 #if WITH_NIAGARA_WIZARD_PRIVATE
 // Engine-PRIVATE NiagaraEditor node headers — resolvable only when WITH_NIAGARA_WIZARD_PRIVATE=1
@@ -3898,14 +3906,10 @@ FMonolithActionResult FMonolithNiagaraActions::HandleAddEmitter(const TSharedPtr
 
 	// Save the package to disk immediately. Without this, the Niagara editor may reload from disk
 	// (which has the old/empty state) and the added emitter will appear to vanish.
-	UPackage* SystemPkg = System->GetPackage();
-	FString PackageFilename;
-	if (SystemPkg && FPackageName::TryConvertLongPackageNameToFilename(SystemPkg->GetName(), PackageFilename, FPackageName::GetAssetPackageExtension()))
+	FString SaveError;
+	if (!SaveAssetPackage(System, SaveError))
 	{
-		FSavePackageArgs SaveArgs;
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		SaveArgs.Error = GWarn; // GError is fatal on a failed save (e.g. read-only file)
-		UPackage::SavePackage(SystemPkg, System, *PackageFilename, SaveArgs);
+		return FMonolithActionResult::Error(SaveError);
 	}
 
 	// RequestCompile(false) intentionally removed: AddEmitterToSystem already triggers graph rebuild,
@@ -4199,13 +4203,10 @@ FMonolithActionResult FMonolithNiagaraActions::HandleCreateSystem(const TSharedP
 
 	// Save to disk immediately so the .uasset file exists. Without this, the Niagara editor will
 	// either fail to open the asset or reload from a missing disk file and show an empty system.
-	FString PackageFilename;
-	if (FPackageName::TryConvertLongPackageNameToFilename(Pkg->GetName(), PackageFilename, FPackageName::GetAssetPackageExtension()))
+	FString SaveError;
+	if (!SaveAssetPackage(NS, SaveError))
 	{
-		FSavePackageArgs SaveArgs;
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		SaveArgs.Error = GWarn; // GError is fatal on a failed save (e.g. read-only file)
-		UPackage::SavePackage(Pkg, NS, *PackageFilename, SaveArgs);
+		return FMonolithActionResult::Error(SaveError);
 	}
 
 	return NA_SuccessStr(NS->GetPathName());
@@ -4252,13 +4253,10 @@ FMonolithActionResult FMonolithNiagaraActions::HandleCreateStatelessEmitter(cons
 	Pkg->MarkPackageDirty();
 
 	// Save to disk immediately so the .uasset file exists. Mirrors HandleCreateSystem.
-	FString PackageFilename;
-	if (FPackageName::TryConvertLongPackageNameToFilename(Pkg->GetName(), PackageFilename, FPackageName::GetAssetPackageExtension()))
+	FString SaveError;
+	if (!SaveAssetPackage(Emitter, SaveError))
 	{
-		FSavePackageArgs SaveArgs;
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		SaveArgs.Error = GWarn; // GError is fatal on a failed save (e.g. read-only file)
-		UPackage::SavePackage(Pkg, Emitter, *PackageFilename, SaveArgs);
+		return FMonolithActionResult::Error(SaveError);
 	}
 
 	return NA_SuccessStr(Emitter->GetPathName());
@@ -6277,13 +6275,10 @@ FMonolithActionResult FMonolithNiagaraActions::CreateScriptFromHLSL(const TShare
 	FAssetRegistryModule::AssetCreated(Script);
 	Pkg->MarkPackageDirty();
 
-	FString PackageFilename;
-	if (FPackageName::TryConvertLongPackageNameToFilename(Pkg->GetName(), PackageFilename, FPackageName::GetAssetPackageExtension()))
+	FString SaveError;
+	if (!SaveAssetPackage(Script, SaveError))
 	{
-		FSavePackageArgs SaveArgs;
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		SaveArgs.Error = GWarn; // GError is fatal on a failed save (e.g. read-only file)
-		UPackage::SavePackage(Pkg, Script, *PackageFilename, SaveArgs);
+		return FMonolithActionResult::Error(SaveError);
 	}
 
 	// === Build response ===
@@ -12406,13 +12401,10 @@ FMonolithActionResult FMonolithNiagaraActions::HandleCreateNPC(const TSharedPtr<
 	FAssetRegistryModule::AssetCreated(NPC);
 	Pkg->MarkPackageDirty();
 
-	FString PackageFilename;
-	if (FPackageName::TryConvertLongPackageNameToFilename(Pkg->GetName(), PackageFilename, FPackageName::GetAssetPackageExtension()))
+	FString SaveError;
+	if (!SaveAssetPackage(NPC, SaveError))
 	{
-		FSavePackageArgs SaveArgs;
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		SaveArgs.Error = GWarn; // GError is fatal on a failed save (e.g. read-only file)
-		UPackage::SavePackage(Pkg, NPC, *PackageFilename, SaveArgs);
+		return FMonolithActionResult::Error(SaveError);
 	}
 
 	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
@@ -12764,13 +12756,10 @@ FMonolithActionResult FMonolithNiagaraActions::HandleCreateEffectType(const TSha
 	FAssetRegistryModule::AssetCreated(ET);
 	Pkg->MarkPackageDirty();
 
-	FString PackageFilename;
-	if (FPackageName::TryConvertLongPackageNameToFilename(Pkg->GetName(), PackageFilename, FPackageName::GetAssetPackageExtension()))
+	FString SaveError;
+	if (!SaveAssetPackage(ET, SaveError))
 	{
-		FSavePackageArgs SaveArgs;
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		SaveArgs.Error = GWarn; // GError is fatal on a failed save (e.g. read-only file)
-		UPackage::SavePackage(Pkg, ET, *PackageFilename, SaveArgs);
+		return FMonolithActionResult::Error(SaveError);
 	}
 
 	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
@@ -14367,15 +14356,11 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSaveEmitterAsTemplate(const
 
 	// Mark dirty and save
 	NewPackage->MarkPackageDirty();
-	FString PackageFilename = FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetAssetPackageExtension());
-
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-	bool bSaved = UPackage::SavePackage(NewPackage, NewEmitter, *PackageFilename, SaveArgs);
-
-	if (!bSaved)
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Package save failed: %s"), *PackageFilename));
+	FString SaveError;
+	if (!SaveAssetPackage(NewEmitter, SaveError))
+	{
+		return FMonolithActionResult::Error(SaveError);
+	}
 
 	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
 	R->SetBoolField(TEXT("success"), true);
@@ -14575,11 +14560,12 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSaveSystem(const TSharedPtr
 		return NA_SuccessObj(ResultJson);
 	}
 
-	FString PackageFilename = FPackageName::LongPackageNameToFilename(Pkg->GetName(), FPackageName::GetAssetPackageExtension());
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	SaveArgs.TopLevelFlags = RF_Standalone;
-	bool bSaved = UPackage::SavePackage(Pkg, LoadedAsset, *PackageFilename, SaveArgs);
+	FString SaveError;
+	const bool bSaved = SaveAssetPackage(LoadedAsset, SaveError);
+	if (!bSaved)
+	{
+		return FMonolithActionResult::Error(SaveError);
+	}
 
 	auto ResultJson = MakeShared<FJsonObject>();
 	ResultJson->SetStringField(TEXT("asset_path"), AssetPath);

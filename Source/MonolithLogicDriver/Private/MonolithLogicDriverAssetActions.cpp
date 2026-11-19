@@ -16,6 +16,7 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "EditorAssetLibrary.h"
 #include "UObject/GarbageCollection.h"
+#include "MonolithAssetUtils.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogMonolithLDAsset, Log, All);
 
@@ -46,12 +47,7 @@ namespace
 	{
 		if (!Asset) return false;
 		UPackage* Package = Asset->GetPackage();
-		FString PackageFilename = FPackageName::LongPackageNameToFilename(
-			Package->GetName(), FPackageName::GetAssetPackageExtension());
-		FSavePackageArgs SaveArgs;
-		SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		return UPackage::SavePackage(Package, Asset, *PackageFilename, SaveArgs);
+		return FMonolithAssetUtils::SaveAssetPackage(Package);
 	}
 }
 

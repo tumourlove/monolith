@@ -554,11 +554,7 @@ FMonolithActionResult FMonolithMeshQualityActions::GenerateProxyMesh(const TShar
 	if (MergedMesh)
 	{
 		// Save the package
-		FString PackageFilename = FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetAssetPackageExtension());
-		FSavePackageArgs SaveArgs;
-		SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		UPackage::SavePackage(Package, MergedMesh, *PackageFilename, SaveArgs);
+		FMonolithAssetUtils::SaveAssetPackage(Package);
 
 		Result->SetStringField(TEXT("status"), TEXT("success"));
 		Result->SetStringField(TEXT("merged_mesh_path"), SavePath);
@@ -664,11 +660,7 @@ FMonolithActionResult FMonolithMeshQualityActions::SetupHlod(const TSharedPtr<FJ
 	HLODLayer->MarkPackageDirty();
 	FAssetRegistryModule::AssetCreated(HLODLayer);
 
-	FString PackageFilename = FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetAssetPackageExtension());
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-	UPackage::SavePackage(Package, HLODLayer, *PackageFilename, SaveArgs);
+	FMonolithAssetUtils::SaveAssetPackage(Package);
 
 	auto Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("status"), TEXT("success"));

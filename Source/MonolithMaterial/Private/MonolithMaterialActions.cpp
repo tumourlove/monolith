@@ -59,6 +59,7 @@
 #include "Materials/MaterialParameterCollection.h"
 #include "MaterialGraph/MaterialGraphNode.h"
 #include "IMonolithGraphFormatter.h"
+#include "MonolithAssetUtils.h"
 
 // ============================================================================
 // Pin name normalization — UE's GetShortenPinName converts raw names to
@@ -2802,11 +2803,7 @@ FMonolithActionResult FMonolithMaterialActions::CreateMaterial(const TSharedPtr<
 	NewMat->PostEditChange();
 
 	// Save to disk so LoadAsset can find it later
-	FString PackageFilename = FPackageName::LongPackageNameToFilename(AssetPath, FPackageName::GetAssetPackageExtension());
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-	UPackage::SavePackage(Pkg, NewMat, *PackageFilename, SaveArgs);
+	FMonolithAssetUtils::SaveAssetPackage(Pkg);
 
 	auto ResultJson = MakeShared<FJsonObject>();
 	ResultJson->SetStringField(TEXT("asset_path"), NewMat->GetPathName());
@@ -6573,11 +6570,7 @@ FMonolithActionResult FMonolithMaterialActions::CreateMaterialFunction(const TSh
 	Pkg->MarkPackageDirty();
 
 	// Save to disk
-	FString PackageFilename = FPackageName::LongPackageNameToFilename(AssetPath, FPackageName::GetAssetPackageExtension());
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-	UPackage::SavePackage(Pkg, NewFunc, *PackageFilename, SaveArgs);
+	FMonolithAssetUtils::SaveAssetPackage(Pkg);
 
 	auto ResultJson = MakeShared<FJsonObject>();
 	ResultJson->SetStringField(TEXT("asset_path"), NewFunc->GetPathName());
@@ -8488,11 +8481,7 @@ FMonolithActionResult FMonolithMaterialActions::CreatePbrMaterialFromDisk(const 
 	UMaterialEditingLibrary::RecompileMaterial(NewMat);
 
 	// Save to disk
-	FString PackageFilename = FPackageName::LongPackageNameToFilename(MaterialPath, FPackageName::GetAssetPackageExtension());
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-	UPackage::SavePackage(Pkg, NewMat, *PackageFilename, SaveArgs);
+	FMonolithAssetUtils::SaveAssetPackage(Pkg);
 
 	// Get compilation stats
 	FMaterialStatistics Stats = UMaterialEditingLibrary::GetStatistics(NewMat);

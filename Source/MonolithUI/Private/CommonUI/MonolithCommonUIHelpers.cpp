@@ -15,6 +15,7 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Engine/World.h"
 #include "Editor.h"
+#include "MonolithAssetUtils.h"
 
 namespace MonolithCommonUI
 {
@@ -67,13 +68,7 @@ namespace MonolithCommonUI
 
 		if (!bSkipSave)
 		{
-			FSavePackageArgs SaveArgs;
-			SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-			SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-			UPackage::SavePackage(
-				Package, NewAsset,
-				*FPackageName::LongPackageNameToFilename(FullPath, FPackageName::GetAssetPackageExtension()),
-				SaveArgs);
+			FMonolithAssetUtils::SaveAssetPackage(Package);
 		}
 
 		OutAsset = NewAsset;
@@ -143,14 +138,8 @@ namespace MonolithCommonUI
 		UPackage* Package = Wbp->GetOutermost();
 		Package->MarkPackageDirty();
 
-		FSavePackageArgs SaveArgs;
-		SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
 		const FString PackageName = Package->GetName();
-		UPackage::SavePackage(
-			Package, Wbp,
-			*FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetAssetPackageExtension()),
-			SaveArgs);
+		FMonolithAssetUtils::SaveAssetPackage(Package);
 
 		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetStringField(TEXT("wbp_path"), PackageName);

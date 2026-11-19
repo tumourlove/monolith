@@ -47,4 +47,22 @@ public:
 
 	/** Get display-friendly name from an asset path */
 	static FString GetAssetName(const FString& AssetPath);
+
+	/**
+	 * Saves a package through the editor's check-out-and-save path. Use this instead of calling
+	 * UPackage::SavePackage directly.
+	 *
+	 * UPackage::SavePackage lives in CoreUObject and knows nothing about source control: with a
+	 * provider that keeps files read-only until checked out, the save fails, and without one the
+	 * file changes on disk while source control still reports it untouched.
+	 *
+	 * UEditorLoadingAndSavingUtils::SavePackages checks the package out first, marks a new file
+	 * for add after it is written, never shows a dialog, routes save errors to its own output
+	 * device rather than GError, and returns a result. UEditorAssetSubsystem::SaveLoadedAsset
+	 * uses the same call.
+	 *
+	 * @param OutError  Optional reason on failure, suitable for an action error payload.
+	 * @return          True when the package reached disk.
+	 */
+	static bool SaveAssetPackage(UPackage* Package, FString* OutError = nullptr);
 };

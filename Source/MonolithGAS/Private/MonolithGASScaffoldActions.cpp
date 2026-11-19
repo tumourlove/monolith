@@ -26,6 +26,7 @@
 #include "HAL/PlatformFileManager.h"
 #include "UObject/SavePackage.h"
 #include "Interfaces/IPluginManager.h"
+#include "MonolithAssetUtils.h"
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1117,12 +1118,7 @@ FMonolithActionResult FMonolithGASScaffoldActions::HandleScaffoldDamagePipeline(
 		Package->MarkPackageDirty();
 		FAssetRegistryModule::AssetCreated(NewBP);
 
-		FSavePackageArgs SaveArgs;
-		SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		FString PackageFilename = FPackageName::LongPackageNameToFilename(
-			Package->GetName(), FPackageName::GetAssetPackageExtension());
-		bool bSaved = UPackage::SavePackage(Package, NewBP, *PackageFilename, SaveArgs);
+		bool bSaved = FMonolithAssetUtils::SaveAssetPackage(Package);
 
 		TSharedPtr<FJsonObject> Info = MakeShared<FJsonObject>();
 		Info->SetStringField(TEXT("asset_path"), GEPath);
@@ -1356,12 +1352,7 @@ FMonolithActionResult FMonolithGASScaffoldActions::HandleScaffoldStatusEffect(co
 	Package->MarkPackageDirty();
 	FAssetRegistryModule::AssetCreated(NewBP);
 
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-	FString PackageFilename = FPackageName::LongPackageNameToFilename(
-		Package->GetName(), FPackageName::GetAssetPackageExtension());
-	bool bSaved = UPackage::SavePackage(Package, NewBP, *PackageFilename, SaveArgs);
+	bool bSaved = FMonolithAssetUtils::SaveAssetPackage(Package);
 
 	TSharedPtr<FJsonObject> StatusResult = MakeShared<FJsonObject>();
 	StatusResult->SetStringField(TEXT("asset_path"), SavePath);
@@ -1516,12 +1507,7 @@ FMonolithActionResult FMonolithGASScaffoldActions::HandleScaffoldWeaponAbility(c
 	Package->MarkPackageDirty();
 	FAssetRegistryModule::AssetCreated(NewBP);
 
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-	FString PackageFilename = FPackageName::LongPackageNameToFilename(
-		Package->GetName(), FPackageName::GetAssetPackageExtension());
-	bool bSaved = UPackage::SavePackage(Package, NewBP, *PackageFilename, SaveArgs);
+	bool bSaved = FMonolithAssetUtils::SaveAssetPackage(Package);
 
 	TSharedPtr<FJsonObject> WeaponResult = MakeShared<FJsonObject>();
 	WeaponResult->SetStringField(TEXT("asset_path"), SavePath);

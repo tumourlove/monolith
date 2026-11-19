@@ -743,11 +743,7 @@ FMonolithActionResult FMonolithBlueprintCDOActions::HandleSetPropertyAtPath(cons
 		{
 			const FString PackageFilename = FPackageName::LongPackageNameToFilename(
 				Package->GetName(), FPackageName::GetAssetPackageExtension());
-			FSavePackageArgs SaveArgs;
-			SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-			SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-			SaveArgs.SaveFlags = SAVE_NoError;
-			bSaved = UPackage::SavePackage(Package, nullptr, *PackageFilename, SaveArgs);
+			bSaved = FMonolithAssetUtils::SaveAssetPackage(Package);
 			if (!bSaved)
 			{
 				SaveError = FString::Printf(TEXT("SavePackage failed for %s"), *PackageFilename);

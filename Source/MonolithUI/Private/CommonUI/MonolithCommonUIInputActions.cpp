@@ -32,6 +32,7 @@
 #include "Engine/LocalPlayer.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
+#include "MonolithAssetUtils.h"
 
 namespace MonolithCommonUIInput
 {
@@ -60,14 +61,8 @@ namespace MonolithCommonUIInput
 
 		// Save now that RowStruct is set.
 		UPackage* Pkg = DT->GetOutermost();
-		FSavePackageArgs SaveArgs;
-		SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
 		const FString PackageName = Pkg->GetName();
-		UPackage::SavePackage(
-			Pkg, DT,
-			*FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetAssetPackageExtension()),
-			SaveArgs);
+		FMonolithAssetUtils::SaveAssetPackage(Pkg);
 
 		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetStringField(TEXT("asset_path"), PackageName);
@@ -125,13 +120,7 @@ namespace MonolithCommonUIInput
 
 		// Save
 		UPackage* Pkg = DT->GetOutermost();
-		FSavePackageArgs SaveArgs;
-		SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		UPackage::SavePackage(
-			Pkg, DT,
-			*FPackageName::LongPackageNameToFilename(Pkg->GetName(), FPackageName::GetAssetPackageExtension()),
-			SaveArgs);
+		FMonolithAssetUtils::SaveAssetPackage(Pkg);
 
 		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetStringField(TEXT("table_path"), TablePath);

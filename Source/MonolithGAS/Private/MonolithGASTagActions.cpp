@@ -15,6 +15,7 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Misc/FileHelper.h"
 #include "UObject/SavePackage.h"
+#include "MonolithAssetUtils.h"
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -332,11 +333,7 @@ FMonolithActionResult FMonolithGASTagActions::HandleAddGameplayTags(const TShare
 				DataTable->GetPackage()->GetName(), PackageFileName,
 				FPackageName::GetAssetPackageExtension()))
 			{
-				FSavePackageArgs SaveArgs;
-				SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-				SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-				UPackage::SavePackage(DataTable->GetPackage(), DataTable,
-					*PackageFileName, SaveArgs);
+				FMonolithAssetUtils::SaveAssetPackage(DataTable->GetPackage());
 			}
 
 			// Refresh tags

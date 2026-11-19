@@ -25,6 +25,7 @@
 #include "Misc/PackageName.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
+#include "MonolithAssetUtils.h"
 
 namespace
 {
@@ -409,13 +410,7 @@ UClass* FMonolithUIStyleService::CreateNewStyleAsset(
     FAssetRegistryModule::AssetCreated(BP);
     Package->MarkPackageDirty();
 
-    FSavePackageArgs SaveArgs;
-    SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-    SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-    UPackage::SavePackage(
-        Package, BP,
-        *FPackageName::LongPackageNameToFilename(FinalPackageName, FPackageName::GetAssetPackageExtension()),
-        SaveArgs);
+    FMonolithAssetUtils::SaveAssetPackage(Package);
 
     return BP->GeneratedClass;
 }

@@ -2107,14 +2107,8 @@ FMonolithActionResult FMonolithAINavigationActions::HandleRebuildNavigation(cons
 					continue;
 				}
 
-				const FString PackageFilename = FPackageName::LongPackageNameToFilename(
-					PackageName, FPackageName::GetAssetPackageExtension());
 
-				FSavePackageArgs SaveArgs;
-				SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-				SaveArgs.TopLevelFlags = RF_NoFlags;
-				SaveArgs.SaveFlags = SAVE_NoError;
-				const bool bSaved = UPackage::SavePackage(Pkg, nullptr, *PackageFilename, SaveArgs);
+				const bool bSaved = FMonolithAssetUtils::SaveAssetPackage(Pkg);
 
 				auto PkgObj = MakeShared<FJsonObject>();
 				PkgObj->SetStringField(TEXT("package"), PackageName);

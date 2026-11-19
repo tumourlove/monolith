@@ -34,6 +34,7 @@ TSharedPtr<FJsonObject> UMonolithMeshHandlePool::ListHandles() const { return Ma
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "MonolithAssetUtils.h"
 
 using namespace UE::Geometry;
 
@@ -193,7 +194,6 @@ bool UMonolithMeshHandlePool::SaveHandle(const FString& HandleName, const FStrin
 	// That package may be partially loaded (e.g., from asset registry scan or a prior failed save),
 	// which causes "cannot be saved as it has only been partially loaded" errors.
 	// We must fully unload any existing package before creating a fresh one.
-	FString PackageFileName = FPackageName::LongPackageNameToFilename(PackagePath, FPackageName::GetAssetPackageExtension());
 
 	UPackage* ExistingPackage = FindPackage(nullptr, *PackagePath);
 	if (ExistingPackage)
@@ -300,10 +300,7 @@ bool UMonolithMeshHandlePool::SaveHandle(const FString& HandleName, const FStrin
 	}
 
 	// Save the package
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-	UPackage::SavePackage(Package, StaticMesh, *PackageFileName, SaveArgs);
+	FMonolithAssetUtils::SaveAssetPackage(Package);
 
 	// Notify asset registry
 	FAssetRegistryModule::AssetCreated(StaticMesh);

@@ -24,6 +24,7 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "UObject/SavePackage.h"
 #include "UObject/Package.h"
+#include "MonolithAssetUtils.h"
 
 // ============================================================================
 // Helpers
@@ -1854,10 +1855,7 @@ FMonolithActionResult FMonolithMeshAudioActions::CreateSurfaceDataTable(const TS
 
 	// Save the package
 	FString FilePath = FPackageName::LongPackageNameToFilename(PackagePath, FPackageName::GetAssetPackageExtension());
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-	UPackage::SavePackage(Package, DataTable, *FilePath, SaveArgs);
+	FMonolithAssetUtils::SaveAssetPackage(Package);
 
 	auto Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("datatable_path"), SavePath);

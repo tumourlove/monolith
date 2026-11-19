@@ -1488,12 +1488,7 @@ FMonolithActionResult FMonolithMeshAdvancedLevelActions::CreateBlueprintPrefab(c
 	FAssetRegistryModule::AssetCreated(BP);
 	Package->MarkPackageDirty();
 
-	FString PackageFilename = FPackageName::LongPackageNameToFilename(
-		SavePath, FPackageName::GetAssetPackageExtension());
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-	UPackage::SavePackage(Package, BP, *PackageFilename, SaveArgs);
+	FMonolithAssetUtils::SaveAssetPackage(Package);
 
 	// Build result
 	auto Result = MakeShared<FJsonObject>();

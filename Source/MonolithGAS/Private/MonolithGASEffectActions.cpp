@@ -31,6 +31,7 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Misc/PackageName.h"
 #include "ObjectTools.h"
+#include "MonolithAssetUtils.h"
 
 // LogMonolithGAS defined in MonolithGASModule.cpp
 
@@ -114,12 +115,7 @@ void MarkModified_Effect(UBlueprint* BP)
 	UPackage* OuterPackage = BP->GetOutermost();
 	if (OuterPackage)
 	{
-		const FString PackageFilename = FPackageName::LongPackageNameToFilename(
-			OuterPackage->GetName(), FPackageName::GetAssetPackageExtension());
-		FSavePackageArgs SaveArgs;
-		SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-		SaveArgs.TopLevelFlags = RF_Standalone;
-		UPackage::SavePackage(OuterPackage, BP, *PackageFilename, SaveArgs);
+		FMonolithAssetUtils::SaveAssetPackage(OuterPackage);
 	}
 }
 
@@ -1005,12 +1001,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleCreateGameplayEffect(cons
 	FAssetRegistryModule::AssetCreated(NewBP);
 
 	// Save to disk
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-	FSavePackageResultStruct SaveResult = UPackage::Save(Package, NewBP,
-		*FPackageName::LongPackageNameToFilename(SavePath, FPackageName::GetAssetPackageExtension()), SaveArgs);
-	bool bSaved = (SaveResult.Result == ESavePackageResult::Success);
+	const bool bSaved = FMonolithAssetUtils::SaveAssetPackage(Package);
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("asset_path"), SavePath);
@@ -2277,12 +2268,8 @@ namespace
 		Package->MarkPackageDirty();
 		FAssetRegistryModule::AssetCreated(BP);
 
-		FSavePackageArgs SaveArgs;
-		SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		FSavePackageResultStruct SaveResult = UPackage::Save(Package, BP,
-			*FPackageName::LongPackageNameToFilename(SavePath, FPackageName::GetAssetPackageExtension()), SaveArgs);
-		return SaveResult.Result == ESavePackageResult::Success;
+		const bool bSaveOk = FMonolithAssetUtils::SaveAssetPackage(Package);
+		return bSaveOk;
 	}
 
 	/** Helper: Add a modifier to a GE CDO from def struct. Attribute string empty = use template's convention. */

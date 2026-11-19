@@ -19,6 +19,7 @@
 #include "UObject/SavePackage.h"
 #include "Factories/Factory.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "MonolithAssetUtils.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogMonolithLDSpec, Log, All);
 
@@ -400,12 +401,7 @@ FMonolithActionResult FMonolithLogicDriverSpecActions::HandleBuildSMFromSpec(con
 		MonolithLD::SetNodeName(Pair.Value, Pair.Key);
 	}
 
-	FString PackageFilename = FPackageName::LongPackageNameToFilename(
-		Package->GetName(), FPackageName::GetAssetPackageExtension());
-	FSavePackageArgs SaveArgs;
-	SaveArgs.Error = GWarn; // GError (the default) is fatal on a failed save
-	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-	bool bSaved = UPackage::SavePackage(Package, NewAsset, *PackageFilename, SaveArgs);
+	bool bSaved = FMonolithAssetUtils::SaveAssetPackage(Package);
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("asset_path"), SavePath);
