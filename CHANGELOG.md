@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The level indexer no longer crashes the editor on Linux and macOS.** `FMonolithMemoryHelper::GetCurrentMemoryUsageMB` called `FPlatformProcess::GetApplicationMemoryUsage`, which only Windows implements; on every other platform the generic version is a fatal error (`not implemented on this platform`), so the first memory snapshot of the level pass took the editor down. Non-Windows platforms now read the process's resident memory from `FPlatformMemory::GetStats().UsedPhysical`, the same figure `ShouldThrottle` already uses.
+
 ## [0.24.0] - 2026-10-18
 
 > **Action count is approximate.** **~1,400+ actions across 26 in-tree namespaces** — query `monolith_discover()` for the live figure.

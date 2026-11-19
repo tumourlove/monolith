@@ -50,12 +50,17 @@ namespace
 
 SIZE_T FMonolithMemoryHelper::GetCurrentMemoryUsageMB()
 {
+#if PLATFORM_WINDOWS
 	SIZE_T ProcessMemoryBytes = 0;
 	if (!FPlatformProcess::GetApplicationMemoryUsage(FPlatformProcess::GetCurrentProcessId(), &ProcessMemoryBytes))
 	{
 		return 0;
 	}
 	return ProcessMemoryBytes / BytesPerMB;
+#else
+	// GetApplicationMemoryUsage is Windows-only; the generic fallback is a fatal error on Linux/Mac.
+	return FPlatformMemory::GetStats().UsedPhysical / BytesPerMB;
+#endif
 }
 
 SIZE_T FMonolithMemoryHelper::GetAvailableMemoryMB()
