@@ -1249,8 +1249,8 @@ No conditional-gate `WITH_*` macros — the module loads unconditionally and con
 
 ## 12. Configuration
 
-**Editor location:** Editor Preferences → Plugins → "Monolith Reflection Intel"
-**INI file:** `Config/MonolithSettings.ini`
+**Editor location:** Project Settings → Engine → "Monolith Reflection Intel"
+**INI file:** `<Project>/Config/DefaultMonolithSettings.ini` (`config=MonolithSettings, defaultconfig`). This is a separate branch from core `UMonolithSettings` (`config=Monolith`, plugin defaults in `Config/DefaultMonolith.ini`); the plugin's `Config/` folder ships no `DefaultMonolithSettings.ini`, so these settings take their C++ defaults until changed in Project Settings or written to the project file.
 **Section:** `[/Script/MonolithReflectionIntel.MonolithReflectionIntelSettings]`
 
 | Setting | Default | Category | Description |

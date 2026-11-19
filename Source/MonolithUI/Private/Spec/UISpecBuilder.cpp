@@ -823,9 +823,8 @@ namespace MonolithUI::SpecBuilderInternal
     }
 
     /**
-     * Save a freshly-built or freshly-modified WBP to disk. Mirrors the
-     * SavePackage shape used by the legacy create_widget_blueprint path so
-     * downstream tooling sees identical results.
+     * Save a freshly-built or freshly-modified WBP to disk through the shared
+     * FMonolithAssetUtils::SaveAssetPackage path.
      */
     static bool SaveWBP(UWidgetBlueprint* WBP, const FString& AssetPath, FString& OutError)
     {
@@ -838,12 +837,10 @@ namespace MonolithUI::SpecBuilderInternal
         FAssetRegistryModule::AssetCreated(WBP);
         WBP->GetPackage()->MarkPackageDirty();
 
-        const FString PackageFilename = FPackageName::LongPackageNameToFilename(
-            AssetPath, FPackageName::GetAssetPackageExtension());
-
-        if (!FMonolithAssetUtils::SaveAssetPackage(WBP->GetPackage()))
+        FString SaveError;
+        if (!FMonolithAssetUtils::SaveAssetPackage(WBP->GetPackage(), &SaveError))
         {
-            OutError = FString::Printf(TEXT("UPackage::SavePackage failed for '%s'."), *AssetPath);
+            OutError = FString::Printf(TEXT("'%s' was built in memory but not saved to disk: %s"), *AssetPath, *SaveError);
             return false;
         }
         return true;

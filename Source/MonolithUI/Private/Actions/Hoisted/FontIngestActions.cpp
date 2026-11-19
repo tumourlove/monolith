@@ -270,15 +270,13 @@ FMonolithActionResult MonolithUI::FFontIngestActions::HandleImportFontFamily(con
 
         if (bSave)
         {
-            const FString FacePackageFilename = FPackageName::LongPackageNameToFilename(
-                FacePackage->GetName(), FPackageName::GetAssetPackageExtension());
-
-            const bool bSaved = FMonolithAssetUtils::SaveAssetPackage(FacePackage);
+            FString SaveError;
+            const bool bSaved = FMonolithAssetUtils::SaveAssetPackage(FacePackage, &SaveError);
             if (!bSaved)
             {
                 Warnings.Add(FString::Printf(
-                    TEXT("faces[%d] ('%s'): SavePackage failed for '%s' -- face in-memory but not on disk"),
-                    i, *Spec.Typeface, *FacePackageFilename));
+                    TEXT("faces[%d] ('%s'): face created in memory but not saved to disk: %s"),
+                    i, *Spec.Typeface, *SaveError));
             }
         }
 
@@ -346,14 +344,12 @@ FMonolithActionResult MonolithUI::FFontIngestActions::HandleImportFontFamily(con
 
     if (bSave)
     {
-        const FString FamilyPackageFilename = FPackageName::LongPackageNameToFilename(
-            FamilyPackage->GetName(), FPackageName::GetAssetPackageExtension());
-
-        const bool bSaved = FMonolithAssetUtils::SaveAssetPackage(FamilyPackage);
+        FString SaveError;
+        const bool bSaved = FMonolithAssetUtils::SaveAssetPackage(FamilyPackage, &SaveError);
         if (!bSaved)
         {
             return FMonolithActionResult::Error(
-                FString::Printf(TEXT("UPackage::SavePackage failed for family '%s'"), *FamilyPackageFilename),
+                FString::Printf(TEXT("Font family created in memory but not saved to disk: %s"), *SaveError),
                 -32603);
         }
     }

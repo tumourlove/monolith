@@ -15,7 +15,7 @@ Monolith is a developer tool. The MCP HTTP server runs locally inside the Unreal
 
 **In scope:**
 
-- Cross-origin browser exploitation against `localhost:9316`
+- Cross-origin browser exploitation against `127.0.0.1:9316`
 - Auto-update supply-chain integrity
 - Any code path where attacker-controlled input from a remote source reaches the editor
 

@@ -1,17 +1,13 @@
 #include "MonolithGameplayTagsModule.h"
 #include "MonolithGameplayTagsActions.h"
 #include "MonolithGameplayTagsWriteActions.h"
+#include "MonolithGameplayTagsInternal.h"
 #include "MonolithSettings.h"
 #include "MonolithToolRegistry.h"
 
 #define LOCTEXT_NAMESPACE "FMonolithGameplayTagsModule"
 
 DEFINE_LOG_CATEGORY(LogMonolithGameplayTags);
-
-namespace
-{
-	const TCHAR* const TagsNamespace = TEXT("gameplay_tags");
-}
 
 void FMonolithGameplayTagsModule::StartupModule()
 {
@@ -37,15 +33,15 @@ void FMonolithGameplayTagsModule::StartupModule()
 	Annotations.bDestructiveHint = true;
 	Annotations.bIdempotentHint = false;
 	Annotations.Title = TEXT("Gameplay Tags");
-	Registry.SetDispatcherAnnotations(TagsNamespace, Annotations);
+	Registry.SetDispatcherAnnotations(MonolithGameplayTags::TagsNamespace, Annotations);
 
 	UE_LOG(LogMonolithGameplayTags, Log, TEXT("MonolithGameplayTags: Loaded (%d actions)"),
-		Registry.GetActions(TagsNamespace).Num());
+		Registry.GetActions(MonolithGameplayTags::TagsNamespace).Num());
 }
 
 void FMonolithGameplayTagsModule::ShutdownModule()
 {
-	FMonolithToolRegistry::Get().UnregisterNamespace(TagsNamespace);
+	FMonolithToolRegistry::Get().UnregisterNamespace(MonolithGameplayTags::TagsNamespace);
 }
 
 #undef LOCTEXT_NAMESPACE

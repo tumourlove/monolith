@@ -73,6 +73,8 @@
 
 **DB Location:** `Plugins/Monolith/Saved/ProjectIndex.db` when the plugin sits inside the project; `<Project>/Saved/Monolith/ProjectIndex.db` when the plugin is mounted from outside the project (engine plugin, or a shared `AdditionalPluginDirectories` folder). `DatabasePathOverride` (relative = from the project directory) overrides both.
 
+**Offline tools read the plugin `Saved/` DB only.** `monolith_query.exe` and `monolith_offline.py` locate `ProjectIndex.db` relative to their own location (`<plugin>/Saved/`); they do not read `UMonolithSettings` and do not know about the per-project `<Project>/Saved/Monolith/` location or `DatabasePathOverride`. When the editor writes the index elsewhere, the offline tools see a stale or missing DB. `monolith_query.exe` accepts `--project-db <path>` (and `--db <dir>`) to point at the real file; `monolith_offline.py` has no override yet.
+
 ### `asset_class` filter (v0.23.0)
 
 `search` accepts an optional `asset_class`: a bare string (`"Blueprint"`) or an array (`["Blueprint","WidgetBlueprint"]`). Matching is case-insensitive, the list is de-duplicated, and it is capped at 32 entries. Absent means unfiltered. Responses echo the applied filter as `asset_class_filter`.

@@ -19,8 +19,6 @@ using namespace MonolithGameplayTags;
 
 namespace
 {
-	const TCHAR* const TagsNamespace = TEXT("gameplay_tags");
-
 	constexpr int32 DefaultReferencerLimit = 200;
 	constexpr int32 MaxReferencerLimit = 5000;
 	constexpr int32 DefaultListLimit = 500;
@@ -333,7 +331,7 @@ void FMonolithGameplayTagsActions::RegisterActions(FMonolithToolRegistry& Regist
 			.Build());
 
 	Registry.RegisterAction(TagsNamespace, TEXT("list"),
-		TEXT("List gameplay tags known to the tag manager with their parent, direct-child count, declaring sources and dev comment. Live data, no reindex involved. Narrow with prefix."),
+		TEXT("List gameplay tags known to the tag manager with their parent, direct-child count, declaring sources and dev comment. Live data, no reindex involved. Narrow with prefix. See also gas_query get_tag_hierarchy (nested tree form)."),
 		FMonolithActionHandler::CreateStatic(&FMonolithGameplayTagsActions::List),
 		FParamSchemaBuilder()
 			.Optional(TEXT("prefix"), TEXT("string"), TEXT("Only tags equal to this or below it, e.g. \"Ability.Combat\". Empty lists every tag."))

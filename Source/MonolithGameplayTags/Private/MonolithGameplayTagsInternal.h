@@ -9,6 +9,9 @@ class UGameplayTagsManager;
 /** Helpers shared by the read and write halves of the `gameplay_tags` namespace. */
 namespace MonolithGameplayTags
 {
+	/** Dispatcher namespace every action of this module registers under. */
+	inline constexpr const TCHAR* TagsNamespace = TEXT("gameplay_tags");
+
 	/**
 	 * The identifier shape the engine writes for a tag reference: the FGameplayTag
 	 * script struct as the referenced object, the tag name as the value. Mirrors

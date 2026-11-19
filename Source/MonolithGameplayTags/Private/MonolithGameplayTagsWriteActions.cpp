@@ -21,8 +21,6 @@ using namespace MonolithGameplayTags;
 
 namespace
 {
-	const TCHAR* const TagsNamespace = TEXT("gameplay_tags");
-
 	/** Referencing packages named per blocked tag; the count is always complete. */
 	constexpr int32 MaxListedReferencers = 20;
 
@@ -281,7 +279,7 @@ void FMonolithGameplayTagsWriteActions::RegisterActions(FMonolithToolRegistry& R
 			.Build());
 
 	Registry.RegisterAction(TagsNamespace, TEXT("add"),
-		TEXT("Declare one or more gameplay tags in an ini source, as the Add New Gameplay Tag button does. Parents are implied by the dotted name and need no declaration. A tag that already exists explicitly is reported, not duplicated; adding an implicit parent makes it explicit. Every name is validated first and an invalid one comes back with the engine's reason and a suggested fix. The ini is checked out through source control when that is enabled."),
+		TEXT("Declare one or more gameplay tags in an ini source, as the Add New Gameplay Tag button does. Parents are implied by the dotted name and need no declaration. A tag that already exists explicitly is reported, not duplicated; adding an implicit parent makes it explicit. Every name is validated first and an invalid one comes back with the engine's reason and a suggested fix. The ini is checked out through source control when that is enabled. See also gas_query add_gameplay_tags."),
 		FMonolithActionHandler::CreateStatic(&FMonolithGameplayTagsWriteActions::Add),
 		FParamSchemaBuilder()
 			.Required(TEXT("tags"), TEXT("array"), TEXT("Tag names, e.g. [\"Audio.Ambience.Wind\"]. A single string is accepted too."))
@@ -301,7 +299,7 @@ void FMonolithGameplayTagsWriteActions::RegisterActions(FMonolithToolRegistry& R
 			.Build());
 
 	Registry.RegisterAction(TagsNamespace, TEXT("remove"),
-		TEXT("Delete ini-declared tags. A tag is refused while anything still uses it: an asset (Asset Registry SearchableName graph, the check the editor itself makes), a C++ string literal or a (TagName=\"...\") config setting in the project. Implicit parents that would be left without children disappear with it and are checked the same way. A tag with children of its own stays as an implicit parent. dry_run reports the verdict without writing."),
+		TEXT("Delete ini-declared tags. A tag is refused while anything still uses it: an asset (Asset Registry SearchableName graph, the check the editor itself makes), a C++ string literal or a (TagName=\"...\") config setting in the project. Implicit parents that would be left without children disappear with it and are checked the same way. A tag with children of its own stays as an implicit parent. dry_run reports the verdict without writing. See also gas_query remove_gameplay_tags."),
 		FMonolithActionHandler::CreateStatic(&FMonolithGameplayTagsWriteActions::Remove),
 		FParamSchemaBuilder()
 			.Required(TEXT("tags"), TEXT("array"), TEXT("Tag names to delete. A single string is accepted too."))
@@ -309,7 +307,7 @@ void FMonolithGameplayTagsWriteActions::RegisterActions(FMonolithToolRegistry& R
 			.Build());
 
 	Registry.RegisterAction(TagsNamespace, TEXT("rename"),
-		TEXT("Rename an ini-declared tag, by default with its whole subtree, as Rename does in Project Settings. The engine declares the new name, deletes the old one and writes a GameplayTagRedirect old->new; assets are NOT rewritten - they keep the old name on disk and load as the new one through the redirect until they are resaved. The response lists those assets, plus C++ literals and config settings that still spell the old name, which no redirect fixes in text. The editor asks for a restart for redirects to take full effect. dry_run reports the plan without writing."),
+		TEXT("Rename an ini-declared tag, by default with its whole subtree, as Rename does in Project Settings. The engine declares the new name, deletes the old one and writes a GameplayTagRedirect old->new; assets are NOT rewritten - they keep the old name on disk and load as the new one through the redirect until they are resaved. The response lists those assets, plus C++ literals and config settings that still spell the old name, which no redirect fixes in text. The editor asks for a restart for redirects to take full effect. dry_run reports the plan without writing. See also gas_query rename_tag, which rewrites tag references inside GAS assets instead."),
 		FMonolithActionHandler::CreateStatic(&FMonolithGameplayTagsWriteActions::Rename),
 		FParamSchemaBuilder()
 			.Required(TEXT("old_tag"), TEXT("string"), TEXT("Current full tag name"))
@@ -692,14 +690,31 @@ FMonolithActionResult FMonolithGameplayTagsWriteActions::Update(const TSharedPtr
 	}
 
 	TArray<FString> SavedFiles;
+	TArray<FString> FailedFiles;
 	for (const TPair<UObject*, FString>& Entry : ListsToSave)
 	{
 		PrepareConfigForWrite(Entry.Value);
-		Entry.Key->TryUpdateDefaultConfigFile(Entry.Value);
+		const FString DisplayPath = ToProjectRelative(FPaths::ConvertRelativePathToFull(Entry.Value));
+		if (Entry.Key->TryUpdateDefaultConfigFile(Entry.Value))
+		{
+			SavedFiles.Add(DisplayPath);
+		}
+		else
+		{
+			FailedFiles.Add(DisplayPath);
+		}
 		GConfig->LoadFile(Entry.Value);
-		SavedFiles.Add(ToProjectRelative(FPaths::ConvertRelativePathToFull(Entry.Value)));
 	}
 	TagManager.EditorRefreshGameplayTagTree();
+
+	if (FailedFiles.Num() > 0)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("%s was updated in memory but could not be written to %s (file read-only or not checked out?)%s"),
+			*Tag,
+			*FString::Join(FailedFiles, TEXT(", ")),
+			SavedFiles.Num() > 0 ? *FString::Printf(TEXT("; written: %s"), *FString::Join(SavedFiles, TEXT(", "))) : TEXT("")));
+	}
 
 	const FTagDeclaration After = ReadDeclaration(TagManager, TagName);
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();

@@ -58,7 +58,9 @@ SIZE_T FMonolithMemoryHelper::GetCurrentMemoryUsageMB()
 	}
 	return ProcessMemoryBytes / BytesPerMB;
 #else
-	// GetApplicationMemoryUsage is Windows-only; the generic fallback is a fatal error on Linux/Mac.
+	// GetApplicationMemoryUsage is implemented only on Windows; elsewhere the generic version is a Fatal error, which
+	// killed every Linux editor the moment the level pass took a memory snapshot. This process's own physical memory
+	// (the resident set on Linux and the footprint on Mac) is the same measure ShouldThrottle uses.
 	return FPlatformMemory::GetStats().UsedPhysical / BytesPerMB;
 #endif
 }

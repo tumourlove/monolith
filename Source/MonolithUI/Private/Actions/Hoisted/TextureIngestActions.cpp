@@ -346,14 +346,12 @@ FMonolithActionResult MonolithUI::FTextureIngestActions::HandleImportTextureFrom
 
     if (bSave)
     {
-        const FString PackageFilename = FPackageName::LongPackageNameToFilename(
-            Package->GetName(), FPackageName::GetAssetPackageExtension());
-
-        const bool bSaved = FMonolithAssetUtils::SaveAssetPackage(Package);
+        FString SaveError;
+        const bool bSaved = FMonolithAssetUtils::SaveAssetPackage(Package, &SaveError);
         if (!bSaved)
         {
             return FMonolithActionResult::Error(
-                FString::Printf(TEXT("UPackage::SavePackage failed for '%s'"), *PackageFilename),
+                FString::Printf(TEXT("Texture created in memory but not saved to disk: %s"), *SaveError),
                 -32603);
         }
     }

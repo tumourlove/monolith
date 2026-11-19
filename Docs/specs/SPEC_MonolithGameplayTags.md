@@ -85,4 +85,5 @@ Engine behaviours the write actions work around, all confirmed live:
 ### Conventions notes
 
 - Native and DataTable declarations are outside what an ini edit can change; write actions refuse them and name the place to edit instead.
-- The `gas` namespace keeps its own tag actions (`add_gameplay_tags`, `search_tag_usage`, ...), gated behind `bEnableGAS` and reading Asset Registry metadata. This module does not change them.
+- The `gas` namespace keeps its own tag actions (`add_gameplay_tags`, `search_tag_usage`, ...), gated behind `bEnableGAS` and reading Asset Registry metadata. Their behaviour is unchanged; the overlapping pairs (`add_gameplay_tags`, `remove_gameplay_tags`, `rename_tag`, `get_tag_hierarchy` and their `gameplay_tags` counterparts) cross-reference each other in their action descriptions.
+- `update` checks the result of `TryUpdateDefaultConfigFile` and returns an error naming the ini files that could not be written (and any that were), instead of reporting success on a read-only or not-checked-out file.

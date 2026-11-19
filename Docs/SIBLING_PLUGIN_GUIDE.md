@@ -453,7 +453,7 @@ The in-tree optional modules (`MonolithBABridge`, `MonolithComboGraph`, `Monolit
 3. **`monolith_discover()`** should list your namespace in the response when `WITH_THIRDPARTY=1`, and *not* list it when `=0`.
 4. **Round-trip an MCP call:**
    ```
-   curl -sS -X POST http://localhost:9316/mcp \
+   curl -sS -X POST http://127.0.0.1:9316/mcp \
      -H "Content-Type: application/json" \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
           "params":{"name":"myns_query",

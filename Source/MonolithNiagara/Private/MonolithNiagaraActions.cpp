@@ -3909,7 +3909,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleAddEmitter(const TSharedPtr
 	FString SaveError;
 	if (!SaveAssetPackage(System, SaveError))
 	{
-		return FMonolithActionResult::Error(SaveError);
+		return FMonolithActionResult::Error(FString::Printf(TEXT("The emitter was added to the system in memory but the system was not saved: %s"), *SaveError));
 	}
 
 	// RequestCompile(false) intentionally removed: AddEmitterToSystem already triggers graph rebuild,
@@ -4206,7 +4206,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleCreateSystem(const TSharedP
 	FString SaveError;
 	if (!SaveAssetPackage(NS, SaveError))
 	{
-		return FMonolithActionResult::Error(SaveError);
+		return FMonolithActionResult::Error(FString::Printf(TEXT("The system was created in memory but not saved to disk: %s"), *SaveError));
 	}
 
 	return NA_SuccessStr(NS->GetPathName());
@@ -4256,7 +4256,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleCreateStatelessEmitter(cons
 	FString SaveError;
 	if (!SaveAssetPackage(Emitter, SaveError))
 	{
-		return FMonolithActionResult::Error(SaveError);
+		return FMonolithActionResult::Error(FString::Printf(TEXT("The emitter was created in memory but not saved to disk: %s"), *SaveError));
 	}
 
 	return NA_SuccessStr(Emitter->GetPathName());
@@ -6278,7 +6278,7 @@ FMonolithActionResult FMonolithNiagaraActions::CreateScriptFromHLSL(const TShare
 	FString SaveError;
 	if (!SaveAssetPackage(Script, SaveError))
 	{
-		return FMonolithActionResult::Error(SaveError);
+		return FMonolithActionResult::Error(FString::Printf(TEXT("The script was created in memory but not saved to disk: %s"), *SaveError));
 	}
 
 	// === Build response ===
@@ -12404,7 +12404,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleCreateNPC(const TSharedPtr<
 	FString SaveError;
 	if (!SaveAssetPackage(NPC, SaveError))
 	{
-		return FMonolithActionResult::Error(SaveError);
+		return FMonolithActionResult::Error(FString::Printf(TEXT("The parameter collection was created in memory but not saved to disk: %s"), *SaveError));
 	}
 
 	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
@@ -12759,7 +12759,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleCreateEffectType(const TSha
 	FString SaveError;
 	if (!SaveAssetPackage(ET, SaveError))
 	{
-		return FMonolithActionResult::Error(SaveError);
+		return FMonolithActionResult::Error(FString::Printf(TEXT("The effect type was created in memory but not saved to disk: %s"), *SaveError));
 	}
 
 	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
@@ -14359,7 +14359,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSaveEmitterAsTemplate(const
 	FString SaveError;
 	if (!SaveAssetPackage(NewEmitter, SaveError))
 	{
-		return FMonolithActionResult::Error(SaveError);
+		return FMonolithActionResult::Error(FString::Printf(TEXT("The template emitter was created in memory but not saved to disk: %s"), *SaveError));
 	}
 
 	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
@@ -14564,7 +14564,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSaveSystem(const TSharedPtr
 	const bool bSaved = SaveAssetPackage(LoadedAsset, SaveError);
 	if (!bSaved)
 	{
-		return FMonolithActionResult::Error(SaveError);
+		return FMonolithActionResult::Error(FString::Printf(TEXT("The system was not saved; in-memory edits are kept: %s"), *SaveError));
 	}
 
 	auto ResultJson = MakeShared<FJsonObject>();

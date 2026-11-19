@@ -842,7 +842,8 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.Optional(TEXT("mode"), TEXT("string"), TEXT("Execution mode: execute_file (default — multi-statement script or file with args), execute_statement (single stmt, prints result), evaluate_statement (single expr, returns result in 'result')."), TEXT("execute_file"))
 			.Optional(TEXT("unattended"), TEXT("bool"), TEXT("Set GIsRunningUnattendedScript=true to suppress UI dialogs."), TEXT("false"))
 			.Optional(TEXT("file_scope"), TEXT("string"), TEXT("Scope for execute_file when command is a .py path: private (isolated locals/globals — default), public (shared with REPL console). Inline code always runs in the shared console globals."), TEXT("private"))
-			.Optional(TEXT("keep_globals"), TEXT("bool"), TEXT("Keep the top-level names this call creates in the shared console globals. By default they are removed after the call, builtins._ is cleared and gc.collect() runs, so UObjects (and their worlds) referenced from those names can be garbage collected. Names stored elsewhere, such as module attributes, are never removed."), TEXT("false"))
+			.Optional(TEXT("clean_globals"), TEXT("bool"), TEXT("Remove the top-level names this call creates from the shared console globals afterwards, clear builtins._ and run gc.collect(), so UObjects (and their worlds) referenced only from those names can be garbage collected. Off by default: globals persist across run_python calls, which multi-call workflows and self-unregistering slate tick callbacks rely on. Names stored elsewhere, such as module attributes, are never removed. pie_smoke python stages always clean up."), TEXT("false"))
+			.Optional(TEXT("keep_globals"), TEXT("bool"), TEXT("Legacy inverse of clean_globals (keep_globals=false == clean_globals=true). Ignored when clean_globals is passed."))
 			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("load_level"),
@@ -4653,8 +4654,17 @@ FMonolithActionResult FMonolithEditorActions::HandleRunPython(const TSharedPtr<F
 	bool bUnattended = false;
 	Params->TryGetBoolField(TEXT("unattended"), bUnattended);
 
-	bool bKeepGlobals = false;
-	Params->TryGetBoolField(TEXT("keep_globals"), bKeepGlobals);
+	// Globals persist by default; clean_globals opts in to the cleanup. keep_globals is the
+	// earlier inverse spelling and is honoured when clean_globals is absent.
+	bool bCleanGlobals = false;
+	if (!Params->TryGetBoolField(TEXT("clean_globals"), bCleanGlobals))
+	{
+		bool bKeepGlobals = true;
+		if (Params->TryGetBoolField(TEXT("keep_globals"), bKeepGlobals))
+		{
+			bCleanGlobals = !bKeepGlobals;
+		}
+	}
 
 	FString ScopeStr = TEXT("private");
 	Params->TryGetStringField(TEXT("file_scope"), ScopeStr);
@@ -4699,7 +4709,7 @@ FMonolithActionResult FMonolithEditorActions::HandleRunPython(const TSharedPtr<F
 
 	bool bOk = false;
 	{
-		FMonolithPythonGlobalsScope GlobalsScope(*Python, !bKeepGlobals);
+		FMonolithPythonGlobalsScope GlobalsScope(*Python, bCleanGlobals);
 		bOk = Python->ExecPythonCommandEx(Cmd);
 	}
 
