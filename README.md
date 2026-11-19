@@ -85,7 +85,7 @@ Details: [wiki Tool Reference](https://github.com/tumourlove/monolith/wiki/Tool-
 
 ## Auto-updater
 
-Off by default as of v0.14.6. Opt in via **Auto Update Enabled** in Editor Preferences > Plugins > Monolith — checks GitHub Releases on editor startup, verifies the downloaded zip's SHA256 against the release-notes marker, swaps the plugin on editor exit (after a Y/N prompt). See [Auto-Updater wiki](https://github.com/tumourlove/monolith/wiki/Auto-Updater).
+Off by default as of v0.14.6. Opt in via **Auto Update Enabled** in Project Settings > Plugins > Monolith — checks GitHub Releases on editor startup, verifies the downloaded zip's SHA256 against the release-notes marker, swaps the plugin on editor exit (after a Y/N prompt). See [Auto-Updater wiki](https://github.com/tumourlove/monolith/wiki/Auto-Updater).
 
 ---
 
@@ -93,7 +93,7 @@ Off by default as of v0.14.6. Opt in via **Auto Update Enabled** in Editor Prefe
 
 Monolith starts a local HTTP server on port 9316 to receive MCP traffic. UE's `FHttpServerModule` does **not** expose a bind-address parameter, so the listener is reachable on all network interfaces, not just `127.0.0.1`. CORS is restricted to localhost origins (which blocks browser-based cross-origin reads) but does **not** block direct HTTP requests from other devices on the same LAN.
 
-If you work on an untrusted network: either add a Windows Firewall rule blocking inbound TCP on port 9316 from non-loopback addresses, or untick **MCP Server Enabled** in Editor Preferences > Plugins > Monolith and restart the editor.
+If you work on an untrusted network: either add a Windows Firewall rule blocking inbound TCP on port 9316 from non-loopback addresses, or untick **MCP Server Enabled** in Project Settings > Plugins > Monolith and restart the editor.
 
 See [SECURITY.md](SECURITY.md) for the full threat model and disclosure policy.
 

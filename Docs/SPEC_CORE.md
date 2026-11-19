@@ -332,15 +332,15 @@ All skills follow a common structure: YAML frontmatter, Discovery section, Asset
 
 ## 7. Configuration
 
-**Settings location:** Editor Preferences > Plugins > Monolith
-**Config file:** `Config/MonolithSettings.ini` section `[/Script/MonolithCore.MonolithSettings]`
+**Settings location:** Project Settings > Plugins > Monolith
+**Config file:** `Config/DefaultMonolith.ini` section `[/Script/MonolithCore.MonolithSettings]`. `UMonolithSettings` is `config=Monolith`, so the engine reads the plugin's `Config/DefaultMonolith.ini` and then the project's `Config/DefaultMonolith.ini`, which is also where Project Settings writes (`defaultconfig`).
 
 Setting names below match the actual `UMonolithSettings` UPROPERTY identifiers in `Source/MonolithCore/Public/MonolithSettings.h` (verified 2026-04-26 audit). The convention is `bEnable<Module>` for module toggles, `bEnableProceduralTownGen` for experimental sub-features.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | ServerPort | 9316 | MCP HTTP server port |
-| bAutoUpdateEnabled | True | GitHub Releases auto-check on startup |
+| bAutoUpdateEnabled | False | GitHub Releases auto-check on startup |
 | DatabasePathOverride | (empty) | Override default DB path (Plugins/Monolith/Saved/) |
 | EngineSourceDBPathOverride | (empty) | Override engine source DB path |
 | EngineSourcePath | (empty) | Override engine source directory |
@@ -391,7 +391,7 @@ YourProject/Plugins/Monolith/
   ATTRIBUTION.md                   (Credits: Codeturion concept, tumourlove originals)
   .gitignore
   Config/
-    MonolithSettings.ini
+    DefaultMonolith.ini
   Docs/
     plans/
       2026-03-06-monolith-design.md
