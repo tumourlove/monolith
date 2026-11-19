@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`IMonolithGraphFormatter` has a virtual destructor.** Neither it nor `IModularFeature` declared one, so deleting `FMonolithBAFormatterImpl` through its `TUniquePtr` failed to compile with clang's `-Wdelete-non-virtual-dtor` ("delete called on non-final 'FMonolithBAFormatterImpl' that has virtual functions but non-virtual destructor") in projects that build with Blueprint Assist and warnings as errors. Any formatter implementation is covered.
+
 ## [0.25.0] - 2026-11-20
 
 > **Action count is approximate.** **~1,500+ actions across 27 in-tree namespaces** - query `monolith_discover()` for the live figure.
