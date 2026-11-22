@@ -68,6 +68,11 @@
 			"Optional": true
 		},
 		{
+			"Name": "CommonConversation",
+			"Enabled": true,
+			"Optional": true
+		},
+		{
 			"Name": "GameplayAbilities",
 			"Enabled": true
 		},
@@ -212,6 +217,11 @@
 		},
 		{
 			"Name": "MonolithLogicDriver",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "MonolithConversation",
 			"Type": "Editor",
 			"LoadingPhase": "Default"
 		},
