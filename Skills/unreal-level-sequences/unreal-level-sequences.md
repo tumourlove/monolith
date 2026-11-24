@@ -1,11 +1,14 @@
 ---
 name: unreal-level-sequences
-description: Use when inspecting Unreal Level Sequences via Monolith MCP — listing every binding inside a sequence (legacy Possessables/Spawnables and UE 5.7 UMovieSceneCustomBinding subclasses like MovieSceneSpawnableActorBinding), reading Director Blueprint functions and variables when a Director is present, walking event-track bindings, and reverse-looking-up which sections fire a given director function across the project. Triggers on level sequence, sequencer, cinematic, possessable, spawnable, custom binding, MovieSceneSpawnableActorBinding, BindingReferences, director blueprint, event track, FMovieSceneEvent.
+description: Use when reading or editing Unreal Level Sequences via Monolith MCP — dumping a sequence's tracks, sections and keys, inserting or removing time (retime), adding or retiming animation sections, keying transforms, blending animations with easing, fixing camera cuts, marked frames; listing every binding inside a sequence (legacy Possessables/Spawnables and UE 5.7 UMovieSceneCustomBinding subclasses like MovieSceneSpawnableActorBinding), reading Director Blueprint functions and variables when a Director is present, walking event-track bindings, and reverse-looking-up which sections fire a given director function across the project. Triggers on level sequence, sequencer, cinematic, retime, keyframe, camera cut, animation section, possessable, spawnable, custom binding, MovieSceneSpawnableActorBinding, BindingReferences, director blueprint, event track, FMovieSceneEvent.
 ---
 
 # Unreal Level Sequence Workflows
 
-**7 inspection actions** via `level_sequence_query()`. Discover with `monolith_discover({ namespace: "level_sequence" })`.
+Via `level_sequence_query()`. Discover with `monolith_discover({ namespace: "level_sequence" })`. Two families:
+
+- **Index-backed inspection** (bindings, Director, event wiring): the tables below.
+- **Live-asset contents and edits** (tracks, sections, keys, retime, markers, ranges): see [Reading and editing a sequence](#reading-and-editing-a-sequence).
 
 Indexes **every** Level Sequence — including those with no Director. Each binding is classified by inspecting both the legacy `UMovieScene` structures (`FMovieScenePossessable` / `FMovieSceneSpawnable`) and the UE 5.7 `UMovieSceneSequence::GetBindingReferences()` chain, so modern custom bindings (`MovieSceneSpawnableActorBinding`, `MovieSceneReplaceableActorBinding`, etc.) report as `spawnable` / `replaceable` rather than the upgrade-stub `possessable`. Director Blueprint introspection layers on top: own functions (including synthetic `SequenceEvent__ENTRYPOINT<DirBP>_N` UFunctions UE generates for "Quick Bind" event entries), variables, and event-track wiring.
 
@@ -74,9 +77,35 @@ blueprint_query({ action: "get_graph_summary", params: { asset_path: "...:LS_Int
 ```
 `level_sequence_query` covers Sequencer-side metadata (bindings, event-track structure); `blueprint_query` covers BP graph-level details.
 
+## Reading and editing a sequence
+
+These actions load the asset (always current, unlike the index). **Frames are display frames** (what Sequencer shows); keys also take an optional `sub_frame` in [0, 1). Every response carries `display_rate` and `tick_resolution`.
+
+| Action | Key params | Purpose |
+|--------|-----------|---------|
+| `get_sequence_contents` | `asset_path`, `binding?`, `track_class?`, `include_keys?`, `max_keys?` (40, 0 = all) | Rates, playback / view / work ranges, marked frames, sequence tracks, then each binding (kind, template class, skeletal mesh, children nested) with tracks, sections (range, row, active, easing, animation + offsets, camera binding, subsequence) and channel keys (frame, value, interp, tangents) or default |
+| `retime` | `at`, `frames` (N > 0 inserts, N < 0 removes the frames before `at`), `move_whole_classes?`, `dry_run?` (default **true**) | Insert or remove time across the whole sequence: keys, sections, marked frames, ranges. Reports every move, deletion and leftover |
+| `add_track` / `remove_track` | `binding?`, `track_class`, `track_index?` | Add or remove a track on a binding or on the sequence (camera cut track: one per sequence) |
+| `add_section` / `set_section` / `remove_section` | track target + `section_index?`, `start`, `end`, `row`, `active`, `ease_in` / `ease_out` (+ `_type`), typed fields | Typed fields: skeletal animation `animation`, `first_loop_start_offset`, `start_offset`, `end_offset`, `play_rate`, `slot`; camera cut `camera_binding`; subsequence `sequence`. `set_section` `move_by` moves the section **with its keys**; `start` / `end` change the range only |
+| `set_keys` / `remove_keys` / `set_channel_default` | section target + `channel` (`Location.X`, `Weight`, or `#index`) | Upsert keys by frame (float, double, bool, integer, byte/enum); remove keys at frames; set or clear the no-key default |
+| `set_marked_frames` | `op` add / set / remove / clear | Timeline markers, kept sorted by frame |
+| `set_playback_range` | `start?`, `end?`, `view_*?`, `work_*?` | Playback, view and working ranges |
+| `refresh_current_sequence` | — | Refresh the open Sequencer after writes; returns the open sequence's path or null |
+
+**Targeting.** `binding` is a GUID or display name (an ambiguous name errors with the candidate GUIDs); omit it for sequence tracks (camera cuts, audio, subsequences). A track is `track_class` (exact class, e.g. `MovieSceneSkeletalAnimationTrack`, `MovieScene3DTransformTrack`) + `track_index` among tracks of that class; a section is `section_index` in its track. `get_sequence_contents` prints all of these: read it first.
+
+**Writes** run in a transaction (Ctrl+Z in the editor) and save unless `save: false`. In an open editor where the user reviews in Sequencer, pass `save: false`, then call `refresh_current_sequence`. Writes don't reindex: the index-backed actions catch up on the next index pass.
+
+### Workflows
+
+- **Cut a pause:** `retime` with `at` = the frame after the pause and `frames` = −length; read the dry-run report (keys left in the removed range, sections ending inside it), then rerun with `dry_run: false`. Keep a sound in sync with what follows with `move_whole_classes: ["MovieSceneAudioSection"]` (or the project's audio section class).
+- **Blend two animations:** put the incoming section on another `row`, overlapping the outgoing one, and give the overlap as `ease_in` on the incoming and `ease_out` on the outgoing section.
+- **Where two motions meet** (e.g. lifted, then walking): an auto tangent carries the first motion's speed into the second. Flatten that key: `set_keys` with `interp: "cubic"`, `tangent_mode: "user"`, `arrive: 0`, `leave: 0`. A hold until the next key is `interp: "constant"`.
+- **Rotation keys are Euler** (`Rotation.X` roll, `.Y` pitch, `.Z` yaw) and interpolate per channel: pick the equivalent form that interpolates simply from the previous key.
+- **Time a reaction to another character's hit:** sample the attacker's hand bone per frame with `animation_query get_animated_bone_transform`; the impact is where the hand stops right after its speed peak. Animation length is `animation_length` in the dump (frames).
+
 ## Rules
 
-- **Read-only namespace.** No write actions in this MVP — purely inspection.
 - **Path format strict.** Pass the full object path returned by `ULevelSequence::GetPathName()` (e.g. `/Module/.../File.File`), not just `/Module/.../File`. Errors include a hint.
 - **`list_bindings` ≠ `list_event_bindings`.** `list_bindings` is the full binding inventory of one LS regardless of event tracks (use it to see scene composition and spot modern custom bindings). `list_event_bindings` filters to event-bound rows and joins them to the Director functions they fire.
 - **UE 5.7 binding kinds.** Modern custom bindings classify by their UCLASS hierarchy: `UMovieSceneSpawnableBindingBase` → `spawnable`, `UMovieSceneReplaceableBindingBase` → `replaceable`, anything else inheriting `UMovieSceneCustomBinding` → `custom`. Plain possessables remain `possessable`. The `custom_binding_class` field carries the exact UCLASS name when present.
