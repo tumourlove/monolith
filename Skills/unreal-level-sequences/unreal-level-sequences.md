@@ -92,7 +92,7 @@ These actions load the asset (always current, unlike the index). **Frames are di
 | `set_playback_range` | `start?`, `end?`, `view_*?`, `work_*?` | Playback, view and working ranges |
 | `refresh_current_sequence` | — | Refresh the open Sequencer after writes; returns the open sequence's path or null |
 
-**Targeting.** `binding` is a GUID or display name (an ambiguous name errors with the candidate GUIDs); omit it for sequence tracks (camera cuts, audio, subsequences). A track is `track_class` (exact class, e.g. `MovieSceneSkeletalAnimationTrack`, `MovieScene3DTransformTrack`) + `track_index` among tracks of that class; a section is `section_index` in its track. `get_sequence_contents` prints all of these: read it first.
+**Targeting.** `binding` is a GUID (hyphenated or 32 hex digits) or display name (an ambiguous name errors with the candidate GUIDs); omit it for sequence tracks (camera cuts, audio, subsequences). A track is `track_class` (exact class, e.g. `MovieSceneSkeletalAnimationTrack`, `MovieScene3DTransformTrack`) + `track_index` among tracks of that class; a section is `section_index` in its track. A section's only channel, when the engine leaves it unnamed (spawn, visibility), is named after its track. Other section types (audio, Wwise, plugin sections) list what they play under `references`. `get_sequence_contents` prints all of these: read it first.
 
 **Writes** run in a transaction (Ctrl+Z in the editor) and save unless `save: false`. In an open editor where the user reviews in Sequencer, pass `save: false`, then call `refresh_current_sequence`. Writes don't reindex: the index-backed actions catch up on the next index pass.
 

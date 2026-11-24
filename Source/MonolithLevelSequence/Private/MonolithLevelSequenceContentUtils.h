@@ -92,6 +92,11 @@ namespace MonolithLevelSequence::Content
 		FMovieSceneChannel* Channel = nullptr;
 		FName TypeName;
 		FString Name;
+		/**
+		 * Empty when Name is the channel's metadata name. "display_text" when the channel has no name and its display
+		 * text stands in; "track" when the section's only channel is unnamed and the track's display name stands in.
+		 */
+		FString NameSource;
 		/** Position across every channel of the section, in proxy order. */
 		int32 Index = 0;
 	};

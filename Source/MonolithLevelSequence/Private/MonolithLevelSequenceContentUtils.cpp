@@ -23,6 +23,9 @@
 #include "Sections/MovieSceneSubSection.h"
 #include "Tracks/MovieSceneCameraCutTrack.h"
 #include "Animation/AnimSequenceBase.h"
+#include "UObject/UnrealType.h"
+#include "UObject/SoftObjectPtr.h"
+#include "UObject/SoftObjectPath.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
@@ -232,6 +235,99 @@ namespace MonolithLevelSequence::Content
 			}
 		}
 
+		/** Path of a referenced object, or "<subobject Class>" for an object the section owns (easing functions, instanced data). */
+		FString DescribeReference(const UObject* Object, const UObject* Owner)
+		{
+			if (Object->IsIn(Owner))
+			{
+				return FString::Printf(TEXT("<subobject %s>"), *Object->GetClass()->GetName());
+			}
+			return Object->GetPathName();
+		}
+
+		void CollectValue(const FProperty* Property, const void* Value, const UObject* Owner, const FString& Path, int32 Depth, const TSharedPtr<FJsonObject>& Out);
+
+		/**
+		 * Non-null object references (hard, soft, class, FSoftObjectPath) among the properties of Struct below SkipBase,
+		 * descending into structs and arrays. Channel structs (keys) and transient / deprecated properties are skipped.
+		 * Keys are property paths: Event, Params.Sound, Overrides[2].Material.
+		 */
+		void CollectReferences(const UStruct* SkipBase, const UStruct* Struct, const void* Container, const UObject* Owner,
+			const FString& Prefix, int32 Depth, const TSharedPtr<FJsonObject>& Out)
+		{
+			if (Depth > 3 || Out->Values.Num() >= 64)
+			{
+				return;
+			}
+			for (TFieldIterator<FProperty> It(Struct); It; ++It)
+			{
+				const FProperty* Property = *It;
+				if (Property->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated))
+				{
+					continue;
+				}
+				if (SkipBase && SkipBase->IsChildOf(Property->GetOwnerStruct()))
+				{
+					continue;   // declared on UMovieSceneSection or above: range, easing, row... are reported elsewhere
+				}
+				const FString Path = Prefix + Property->GetName();
+				for (int32 ArrayIndex = 0; ArrayIndex < Property->ArrayDim; ++ArrayIndex)
+				{
+					const FString ElementPath = Property->ArrayDim > 1 ? FString::Printf(TEXT("%s[%d]"), *Path, ArrayIndex) : Path;
+					const void* Value = Property->ContainerPtrToValuePtr<void>(Container, ArrayIndex);
+					CollectValue(Property, Value, Owner, ElementPath, Depth, Out);
+				}
+			}
+		}
+
+		void CollectValue(const FProperty* Property, const void* Value, const UObject* Owner, const FString& Path, int32 Depth, const TSharedPtr<FJsonObject>& Out)
+		{
+			if (const FSoftObjectProperty* Soft = CastField<FSoftObjectProperty>(Property))
+			{
+				const FSoftObjectPtr& Ptr = *static_cast<const FSoftObjectPtr*>(Value);
+				if (!Ptr.IsNull())
+				{
+					Out->SetStringField(Path, Ptr.ToSoftObjectPath().ToString());
+				}
+			}
+			else if (const FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property))
+			{
+				if (const UObject* Object = ObjectProperty->GetObjectPropertyValue(Value))
+				{
+					Out->SetStringField(Path, DescribeReference(Object, Owner));
+				}
+			}
+			else if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
+			{
+				const UScriptStruct* Struct = StructProperty->Struct;
+				if (Struct == TBaseStructure<FSoftObjectPath>::Get())
+				{
+					const FSoftObjectPath& SoftPath = *static_cast<const FSoftObjectPath*>(Value);
+					if (!SoftPath.IsNull())
+					{
+						Out->SetStringField(Path, SoftPath.ToString());
+					}
+				}
+				else if (!Struct->IsChildOf(FMovieSceneChannel::StaticStruct()))
+				{
+					CollectReferences(nullptr, Struct, Value, Owner, Path + TEXT("."), Depth + 1, Out);
+				}
+			}
+			else if (const FArrayProperty* ArrayProperty = CastField<FArrayProperty>(Property))
+			{
+				const FProperty* Inner = ArrayProperty->Inner;
+				if (Inner->IsA<FObjectPropertyBase>() || Inner->IsA<FStructProperty>())
+				{
+					FScriptArrayHelper Helper(ArrayProperty, Value);
+					const int32 Count = FMath::Min(Helper.Num(), 32);
+					for (int32 i = 0; i < Count && Depth <= 3; ++i)
+					{
+						CollectValue(Inner, Helper.GetRawPtr(i), Owner, FString::Printf(TEXT("%s[%d]"), *Path, i), Depth + 1, Out);
+					}
+				}
+			}
+		}
+
 		void WriteTypedSectionFields(const FSequenceContext& Ctx, UMovieSceneSection* Section, const TSharedPtr<FJsonObject>& Out)
 		{
 			if (const UMovieSceneSkeletalAnimationSection* Anim = Cast<UMovieSceneSkeletalAnimationSection>(Section))
@@ -276,6 +372,17 @@ namespace MonolithLevelSequence::Content
 			{
 				const UMovieSceneSequence* SubSequence = Sub->GetSequence();
 				Out->SetStringField(TEXT("sequence"), SubSequence ? SubSequence->GetPathName() : FString());
+			}
+			else
+			{
+				// Any other section type (audio, Wwise events, materials, plugin sections...): report what it
+				// references through its own UPROPERTYs, so the dump says which sound / asset plays.
+				TSharedPtr<FJsonObject> References = MakeShared<FJsonObject>();
+				CollectReferences(UMovieSceneSection::StaticClass(), Section->GetClass(), Section, Section, FString(), 0, References);
+				if (References->Values.Num() > 0)
+				{
+					Out->SetObjectField(TEXT("references"), References);
+				}
 			}
 		}
 	}
@@ -323,16 +430,22 @@ namespace MonolithLevelSequence::Content
 	{
 		const UMovieScene* MovieScene = Ctx.MovieScene;
 
-		FGuid Parsed;
-		if (FGuid::Parse(Ref, Parsed))
+		// Hex GUID formats only. FGuid::Parse also accepts EGuidFormats::Short (22 base64url characters) and
+		// Base36Encoded, which read ordinary actor names such as BP_Demo_Tree_Waterable as GUIDs. A parsed GUID
+		// that matches no binding still falls through to the name search: a name may look like a GUID too.
+		static const EGuidFormats HexFormats[] =
 		{
-			if (MovieScene->FindBinding(Parsed))
+			EGuidFormats::DigitsWithHyphens, EGuidFormats::Digits, EGuidFormats::DigitsWithHyphensInBraces,
+			EGuidFormats::DigitsWithHyphensInParentheses, EGuidFormats::HexValuesInBraces, EGuidFormats::UniqueObjectGuid
+		};
+		for (const EGuidFormats Format : HexFormats)
+		{
+			FGuid Parsed;
+			if (FGuid::ParseExact(Ref, Format, Parsed) && MovieScene->FindBinding(Parsed))
 			{
 				OutGuid = Parsed;
 				return true;
 			}
-			OutError = FString::Printf(TEXT("No binding with GUID %s in %s"), *Ref, *Ctx.AssetPath);
-			return false;
 		}
 
 		TArray<FGuid> Matches;
@@ -378,7 +491,7 @@ namespace MonolithLevelSequence::Content
 			All.SetNum(40);
 			All.Add(TEXT("..."));
 		}
-		OutError = FString::Printf(TEXT("No binding named '%s'. Bindings: %s"), *Ref, All.Num() ? *FString::Join(All, TEXT(", ")) : TEXT("(none)"));
+		OutError = FString::Printf(TEXT("No binding with GUID or name '%s' in %s. Bindings: %s"), *Ref, *Ctx.AssetPath, All.Num() ? *FString::Join(All, TEXT(", ")) : TEXT("(none)"));
 		return false;
 	}
 
@@ -555,9 +668,25 @@ namespace MonolithLevelSequence::Content
 				if (MetaData.IsValidIndex(i))
 				{
 					Ref.Name = MetaData[i].Name.IsNone() ? FString() : MetaData[i].Name.ToString();
+					if (Ref.Name.IsEmpty() && !MetaData[i].DisplayText.IsEmpty())
+					{
+						Ref.Name = MetaData[i].DisplayText.ToString();
+						Ref.NameSource = TEXT("display_text");
+					}
 				}
 #endif
 				Result.Add(Ref);
+			}
+		}
+
+		// Single-channel sections (spawn, visibility, bool / integer property tracks...) often leave the channel
+		// unnamed: call it after its track, so callers can pass the name they see in the dump.
+		if (Result.Num() == 1 && Result[0].Name.IsEmpty())
+		{
+			if (const UMovieSceneTrack* Track = Section->GetTypedOuter<UMovieSceneTrack>())
+			{
+				Result[0].Name = Track->GetDisplayName().ToString();
+				Result[0].NameSource = TEXT("track");
 			}
 		}
 		return Result;
@@ -626,6 +755,10 @@ namespace MonolithLevelSequence::Content
 	{
 		TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
 		Out->SetStringField(TEXT("name"), Ref.Name);
+		if (!Ref.NameSource.IsEmpty())
+		{
+			Out->SetStringField(TEXT("name_from"), Ref.NameSource);
+		}
 		Out->SetNumberField(TEXT("index"), Ref.Index);
 		const FString Type = GetChannelTypeLabel(Ref.TypeName);
 		Out->SetStringField(TEXT("type"), Type);

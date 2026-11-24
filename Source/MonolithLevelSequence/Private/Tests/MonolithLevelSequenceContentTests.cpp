@@ -15,6 +15,9 @@
 #include "Misc/Guid.h"
 #include "MonolithToolRegistry.h"
 #include "MovieScene.h"
+#include "MovieSceneTrack.h"
+#include "Sections/MovieSceneAudioSection.h"
+#include "Sound/SoundWave.h"
 #include "UObject/Package.h"
 
 namespace MonolithLevelSequenceContentTestDetail
@@ -520,6 +523,91 @@ bool FMonolithLevelSequenceSequenceEditsTest::RunTest(const FString& Parameters)
 #else
 	TestFalse(TEXT("refresh_current_sequence reports the missing plugin"), Refresh.bSuccess);
 #endif
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMonolithLevelSequenceNamesAndReferencesTest,
+	"Monolith.LevelSequence.Content.NamesAndReferences",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMonolithLevelSequenceNamesAndReferencesTest::RunTest(const FString& Parameters)
+{
+	FSequenceSandbox Box;
+	UMovieScene* MS = Box.Sequence->GetMovieScene();
+
+	// A 22-character [A-Za-z0-9_-] name parses as a Short GUID with FGuid::Parse: it must still resolve as a name.
+	const FString TreeName = TEXT("BP_Demo_Tree_Waterable");
+	const FGuid Tree = MS->AddPossessable(TreeName, AActor::StaticClass());
+	TSharedPtr<FJsonObject> P = Box.Params();
+	P->SetStringField(TEXT("binding"), TreeName);
+	P->SetStringField(TEXT("track_class"), TEXT("MovieSceneSpawnTrack"));
+	const FMonolithActionResult AddTrack = Run(TEXT("add_track"), P);
+	if (!TestTrue(TEXT("binding named like a Short GUID resolves by name"), AddTrack.bSuccess))
+	{
+		AddError(AddTrack.ErrorMessage);
+		return false;
+	}
+	TestEqual(TEXT("track added to that binding"), AddTrack.Result->GetStringField(TEXT("binding")), Tree.ToString(EGuidFormats::DigitsWithHyphens));
+	P->SetStringField(TEXT("binding"), Tree.ToString(EGuidFormats::Digits));
+	P->SetNumberField(TEXT("start"), 0);
+	P->SetNumberField(TEXT("end"), 100);
+	TestTrue(TEXT("binding by Digits GUID"), Run(TEXT("add_section"), P).bSuccess);
+
+	// The spawn section's only channel is unnamed: it takes the track's display name, which set_keys accepts.
+	TSharedPtr<FJsonObject> R = Box.ReadParams();
+	R->SetStringField(TEXT("binding"), TreeName);
+	const FMonolithActionResult Contents = Run(TEXT("get_sequence_contents"), R);
+	const TSharedPtr<FJsonObject> Spawn = Contents.bSuccess ? FirstSection(Contents, TEXT("MovieSceneSpawnTrack")) : nullptr;
+	if (TestNotNull(TEXT("spawn section listed"), Spawn.Get()))
+	{
+		const TSharedPtr<FJsonObject> Channel = Spawn->GetArrayField(TEXT("channels"))[0]->AsObject();
+		const FString ChannelName = Channel->GetStringField(TEXT("name"));
+		TestFalse(TEXT("single channel named"), ChannelName.IsEmpty());
+		TestEqual(TEXT("named after the track"), Channel->GetStringField(TEXT("name_from")), FString(TEXT("track")));
+
+		TSharedPtr<FJsonObject> K = Box.Params();
+		K->SetStringField(TEXT("binding"), TreeName);
+		K->SetStringField(TEXT("track_class"), TEXT("MovieSceneSpawnTrack"));
+		K->SetStringField(TEXT("channel"), ChannelName);
+		TSharedPtr<FJsonObject> Spawned = MakeShared<FJsonObject>();
+		Spawned->SetNumberField(TEXT("frame"), 10);
+		Spawned->SetBoolField(TEXT("value"), true);
+		K->SetArrayField(TEXT("keys"), Keys({ Spawned }));
+		const FMonolithActionResult SetKeys = Run(TEXT("set_keys"), K);
+		TestTrue(TEXT("set_keys by the track-derived channel name"), SetKeys.bSuccess);
+		if (!SetKeys.bSuccess)
+		{
+			AddError(SetKeys.ErrorMessage);
+		}
+	}
+
+	// An audio section's sound is reported through reflection.
+	TSharedPtr<FJsonObject> A = Box.Params();
+	A->SetStringField(TEXT("track_class"), TEXT("MovieSceneAudioTrack"));
+	TestTrue(TEXT("add audio track"), Run(TEXT("add_track"), A).bSuccess);
+	A->SetNumberField(TEXT("start"), 0);
+	A->SetNumberField(TEXT("end"), 60);
+	TestTrue(TEXT("add audio section"), Run(TEXT("add_section"), A).bSuccess);
+	USoundWave* Wave = NewObject<USoundWave>(GetTransientPackage(), TEXT("MonolithLevelSequenceTestWave"), RF_Transient);
+	UMovieSceneAudioSection* AudioSection = nullptr;
+	for (UMovieSceneTrack* Track : MS->GetTracks())
+	{
+		if (Track->GetAllSections().Num() > 0)
+		{
+			AudioSection = Cast<UMovieSceneAudioSection>(Track->GetAllSections()[0]);
+		}
+	}
+	if (TestNotNull(TEXT("audio section created"), AudioSection))
+	{
+		AudioSection->SetSound(Wave);
+		const FMonolithActionResult Dump = Run(TEXT("get_sequence_contents"), Box.ReadParams());
+		const TSharedPtr<FJsonObject> Audio = Dump.bSuccess ? FirstSection(Dump, TEXT("MovieSceneAudioTrack")) : nullptr;
+		const TSharedPtr<FJsonObject>* References = nullptr;
+		if (TestNotNull(TEXT("audio section listed"), Audio.Get()) && TestTrue(TEXT("references reported"), Audio->TryGetObjectField(TEXT("references"), References)))
+		{
+			TestEqual(TEXT("sound path"), (*References)->GetStringField(TEXT("Sound")), Wave->GetPathName());
+		}
+	}
 	return true;
 }
 
