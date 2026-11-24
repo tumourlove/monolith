@@ -132,6 +132,11 @@
 		{
 			"Name": "PythonScriptPlugin",
 			"Enabled": true
+		},
+		{
+			"Name": "LevelSequenceEditor",
+			"Enabled": true,
+			"Optional": true
 		}
 	],
 	"Modules": [

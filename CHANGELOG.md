@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+**Behaviour changes in this release:**
+- New optional plugin reference `LevelSequenceEditor` in `Monolith.uplugin` (for `level_sequence refresh_current_sequence`). It is an engine plugin enabled by default, so nothing changes unless a project has turned it off; the module then builds without it and that one action reports the missing plugin.
+
+### Added
+
+- **Level Sequence contents and edits in the `level_sequence` namespace (13 actions).** Until now the namespace only read the index (bindings, Director, event wiring), so dumping a cinematic, inserting or removing time, adding an animation section or keying a transform needed `run_python`. These actions load the asset, so they see it as it is now. Frames are display frames (UE's Sequencer scripting default, and what UE 5.8's AnimationAssistantToolset uses); keys also take a `sub_frame`.
+  - `get_sequence_contents`: rates, playback / view / work ranges, marked frames, sequence tracks, then every binding (kind from the indexer's classifier, UE 5.7 custom bindings included; template class and skeletal mesh; child possessables nested) with its tracks, sections (range, row, active, easing, animation and offsets, camera binding, subsequence) and every channel's keys (frame, value, interpolation, tangents) or default. Filters: `binding`, `track_class`, `include_keys`, `max_keys`.
+  - `retime`: insert (N > 0) or remove (N < 0) time at a frame across the whole sequence: keys, sections (stretched when they span the frame, or moved whole for `move_whole_classes`), marked frames, playback / view / work ranges. When removing, the key that would land on another is deleted and keys left in the removed range are reported. `dry_run` defaults to true.
+  - `add_track` / `remove_track`, `add_section` / `set_section` / `remove_section` (range, row, active, manual easing for cross-fades, skeletal animation `animation` / offsets / `play_rate` / `slot`, camera cut `camera_binding`, subsequence `sequence`; `move_by` moves a section with its keys), `set_keys` / `remove_keys` / `set_channel_default` (float, double, bool, integer, byte/enum; interpolation and tangents), `set_marked_frames`, `set_playback_range`, and `refresh_current_sequence` (refreshes the open Sequencer, returns its sequence).
+  - Targets: binding by GUID or display name (ambiguous names are refused with the candidate GUIDs), track by class + index, section by index, channel by name (`Location.X`; a section's only unnamed channel, such as a spawn track's, takes the track's name) or `#index`. Sections of other types (audio, Wwise, plugin sections) list their object references (`references`) through reflection. Writes are transacted (undoable) and save unless `save: false`; they don't reindex. Automation tests `Monolith.LevelSequence.Content.*`.
+
 ## [0.25.0] - 2026-11-20
 
 > **Action count is approximate.** **~1,500+ actions across 27 in-tree namespaces** - query `monolith_discover()` for the live figure.

@@ -57,7 +57,7 @@ Each module owns a specific domain:
 | **MonolithAI** | `ai` | Behavior trees, blackboards, EQS, StateTree, SmartObjects, perception, navigation, AI controllers |
 | **MonolithAudio** | `audio` | Sound cues, waves, classes, submixes, attenuation, concurrency, MetaSounds |
 | **MonolithAudioRuntime** | -- | Runtime support for the audio module (registers no MCP actions) |
-| **MonolithLevelSequence** | `level_sequence` | Sequencer inspection: bindings, directors, event bindings |
+| **MonolithLevelSequence** | `level_sequence` | Sequencer: tracks/sections/keys read and edit, retime, markers; bindings, directors, event bindings |
 | **MonolithGameplayTags** | `gameplay_tags` | Gameplay tag references (Asset Registry), unused/broken audits, ini tag editing; independent of GAS |
 | **MonolithReflectionIntel** | `cppreflect`, `reflect`, `decision`, `risk`, `pipeline`, `network` (plus additions to existing namespaces) | Reflection intelligence over project C++ and assets: UCLASS/UPROPERTY/UFUNCTION queries, replication audits, decision records, churn/hotspot analysis, release readiness |
 | **MonolithComboGraph** | `combograph` | Optional ComboGraph integration (gated on `WITH_COMBOGRAPH`) |

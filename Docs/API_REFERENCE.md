@@ -38,7 +38,7 @@ The per-namespace numbers in the Table of Contents and body sections below are k
 | [logicdriver](#logicdriver) | 66 | Logic Driver Pro state machines: graph CRUD, runtime PIE control, scaffolds, dialogue (conditional on `WITH_LOGICDRIVER`) |
 | [audio](#audio) | 98 | Sound Cue + MetaSound graph CRUD + document introspection, attenuation/class/mix/submix/concurrency, batch ops, Sound Cue templates, perception bindings |
 | [gameplay_tags](#gameplay_tags) | 14 | Gameplay tag references from the Asset Registry, unused/broken audits, ini tag declaring/editing/renaming/moving/removing. Independent of `bEnableGAS` |
-| [level_sequence](#level_sequence) | 8 | Level Sequence inspection: binding inventory (legacy + UE 5.7 custom bindings), Director Blueprint functions/variables, event-track bindings, cross-sequence reverse lookup |
+| [level_sequence](#level_sequence) | 21 | Level Sequences: tracks/sections/keys read and edit, retime (insert/remove time), marked frames, ranges; binding inventory (legacy + UE 5.7 custom bindings), Director Blueprint functions/variables, event-track bindings, cross-sequence reverse lookup |
 | [bulk_fill](#bulk_fill) | 2 | Reflection-walker bulk property fill across 12 per-namespace adapters (`apply`, `list_namespaces`) |
 | [describe](#describe) | 3 | Read-only schema introspection for the same 12 adapters (`schema`, `list_targets`, `action_schema`) |
 | [decision](#decision) | 5 | **New v0.17.0.** Reflection Intelligence — architectural decision records mined from markdown corpora |
@@ -1549,7 +1549,7 @@ See `Plugins/Monolith/Docs/specs/SPEC_MonolithGameplayTags.md`.
 
 ## level_sequence
 
-Level Sequence inspection — binding inventory (legacy possessables/spawnables + UE 5.7 custom bindings), Director Blueprint functions/variables, event-track bindings, and cross-sequence reverse lookup. **8 actions.** Backed by a dedicated SQLite indexer (`MonolithLevelSequence` module, PR #45). Read-only.
+Level Sequences — contents read and edit from the asset (tracks, sections, keys, retime, marked frames, ranges), plus index-backed inspection: binding inventory (legacy possessables/spawnables + UE 5.7 custom bindings), Director Blueprint functions/variables, event-track bindings, and cross-sequence reverse lookup. **21 actions.** The inspection actions are backed by a dedicated SQLite indexer (`MonolithLevelSequence` module, PR #45). Frames are display frames; writes are transacted and save unless `save: false`.
 
 | Action | Key params | Notes |
 |--------|-----------|-------|
@@ -1561,6 +1561,14 @@ Level Sequence inspection — binding inventory (legacy possessables/spawnables 
 | `list_event_bindings` | `asset_path` | Event-track bindings grouped by binding GUID (possessable/spawnable/master) + the sections that fire Director functions |
 | `list_bindings` | `asset_path`, `kind?` | **ALL** bindings regardless of event tracks — `possessable`/`spawnable`/`replaceable`/`custom`. Catches UE 5.7 `UMovieSceneCustomBinding` rows that `list_event_bindings` misses |
 | `find_director_function_callers` | `function_name`, `asset_path_filter?` (glob) | Cross-sequence reverse lookup: every event-track section across the project that fires a given Director function |
+| `get_sequence_contents` | `asset_path`, `binding?`, `track_class?`, `include_keys?`, `max_keys?` | Live read: rates, ranges, marked frames, sequence tracks, bindings (nested children) with tracks, sections (range, row, easing, animation, camera binding, subsequence) and channel keys |
+| `refresh_current_sequence` | — | Refresh the open Sequencer after writes; returns the open sequence's path or null (needs LevelSequenceEditor) |
+| `retime` | `asset_path`, `at`, `frames`, `move_whole_classes?`, `dry_run?` (true) | Insert (N > 0) or remove (N < 0) time across the whole sequence: keys, sections, marked frames, playback/view/work ranges |
+| `add_track` / `remove_track` | `asset_path`, `binding?`, `track_class`, `track_index?` | Add or remove a track on a binding or the sequence |
+| `add_section` / `set_section` / `remove_section` | track target, `section_index?`, `start`, `end`, `move_by`, `row`, `active`, `ease_in`/`ease_out`(+`_type`), `animation`, offsets, `play_rate`, `slot`, `camera_binding`, `sequence` | Section CRUD; `move_by` moves keys with the section, `start`/`end` change the range only |
+| `set_keys` / `remove_keys` / `set_channel_default` | section target, `channel`, `keys` / `frames` / `value` | Upsert keys (float, double, bool, integer, byte/enum; interp + tangents), remove keys, set or clear a channel default |
+| `set_marked_frames` | `asset_path`, `op` (add/set/remove/clear), `index?`, `label?`, `frame?`, `new_label?`, `comment?` | Timeline markers |
+| `set_playback_range` | `asset_path`, `start?`, `end?`, `view_start?`, `view_end?`, `work_start?`, `work_end?` | Playback, view and working ranges |
 
 See `Plugins/Monolith/Docs/specs/SPEC_MonolithLevelSequence.md`.
 

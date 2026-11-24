@@ -1,4 +1,5 @@
 #include "MonolithLevelSequenceActions.h"
+#include "MonolithLevelSequenceContentActions.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithParamSchema.h"
 #include "MonolithIndexSubsystem.h"
@@ -72,6 +73,9 @@ void FMonolithLevelSequenceActions::RegisterActions(FMonolithToolRegistry& Regis
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Full Level Sequence asset path"))
 			.Optional(TEXT("kind"), TEXT("string"), TEXT("Filter: possessable | spawnable | replaceable | custom | all (default)"))
 			.Build());
+
+	// Live-asset actions: contents, retime, track / section / key / sequence edits.
+	FMonolithLevelSequenceContentActions::RegisterActions(Registry);
 }
 
 // ============================================================================
