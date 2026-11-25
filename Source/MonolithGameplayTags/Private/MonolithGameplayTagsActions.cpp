@@ -897,80 +897,93 @@ FMonolithActionResult FMonolithGameplayTagsActions::FindBroken(const TSharedPtr<
 	int32 PackagesWithTags = 0;
 	const double ScanStart = FPlatformTime::Seconds();
 
-	TArray<FAssetIdentifier> Dependencies;
+	// Collect the names first, query their dependencies once the enumeration has
+	// returned. EnumerateAllPackages holds the registry's interface read lock for
+	// the whole walk and GetDependencies takes it again. That lock is not
+	// recursive: once the background gatherer queues a write between the two, the
+	// nested read waits on the writer, the writer waits on the outer read, and the
+	// editor hangs for good. Never call back into the registry from an
+	// EnumerateAllPackages callback.
+	TArray<FName> PackageNames;
 	Registry->EnumerateAllPackages(
-		[&](FName PackageName, const FAssetPackageData& PackageData)
+		[&PackageNames, &PathPrefix](FName PackageName, const FAssetPackageData& /*PackageData*/)
 		{
-			const FString PackageString = PackageName.ToString();
-			if (PackageString.StartsWith(TEXT("/Script/")) || PackageString.StartsWith(TEXT("/Temp/")))
+			TStringBuilder<256> PackageString;
+			PackageName.ToString(PackageString);
+			const FStringView PackageView = PackageString.ToView();
+			if (PackageView.StartsWith(TEXT("/Script/")) || PackageView.StartsWith(TEXT("/Temp/")))
 			{
 				return;
 			}
-			if (!PathPrefix.IsEmpty() && !PackageString.StartsWith(PathPrefix))
+			if (!PathPrefix.IsEmpty() && !PackageView.StartsWith(PathPrefix))
 			{
 				return;
 			}
-
-			++PackagesScanned;
-
-			Dependencies.Reset();
-			Registry->GetDependencies(FAssetIdentifier(PackageName), Dependencies,
-				UE::AssetRegistry::EDependencyCategory::SearchableName);
-
-			bool bCarriesTag = false;
-			for (const FAssetIdentifier& Dependency : Dependencies)
-			{
-				if (!IsGameplayTagIdentifier(Dependency))
-				{
-					continue;
-				}
-				bCarriesTag = true;
-
-				const FName TagName = Dependency.ValueName;
-				ETagState State = ETagState::Known;
-
-				if (const ETagState* Cached = TagStates.Find(TagName))
-				{
-					State = *Cached;
-				}
-				else
-				{
-					if (!TagManager.RequestGameplayTag(TagName, /*ErrorIfNotFound=*/false).IsValid())
-					{
-						// Unregistered is not automatically broken: a redirect keeps the
-						// reference working until the asset is resaved under the new name.
-						// A redirect pointing at a tag that is itself gone does not save
-						// anything, so that case stays broken.
-						const FName RedirectTarget = ResolveRedirect(Redirects, TagName);
-						if (!RedirectTarget.IsNone()
-							&& TagManager.RequestGameplayTag(RedirectTarget, /*ErrorIfNotFound=*/false).IsValid())
-						{
-							State = ETagState::Redirected;
-							RedirectTargets.Add(TagName, RedirectTarget.ToString());
-						}
-						else
-						{
-							State = ETagState::Broken;
-						}
-					}
-					TagStates.Add(TagName, State);
-				}
-
-				if (State == ETagState::Broken)
-				{
-					BrokenReferencers.FindOrAdd(TagName).Add(PackageName);
-				}
-				else if (State == ETagState::Redirected)
-				{
-					RedirectedReferencers.FindOrAdd(TagName).Add(PackageName);
-				}
-			}
-
-			if (bCarriesTag)
-			{
-				++PackagesWithTags;
-			}
+			PackageNames.Add(PackageName);
 		});
+	PackagesScanned = PackageNames.Num();
+
+	TArray<FAssetIdentifier> Dependencies;
+	for (const FName PackageName : PackageNames)
+	{
+		Dependencies.Reset();
+		Registry->GetDependencies(FAssetIdentifier(PackageName), Dependencies,
+			UE::AssetRegistry::EDependencyCategory::SearchableName);
+
+		bool bCarriesTag = false;
+		for (const FAssetIdentifier& Dependency : Dependencies)
+		{
+			if (!IsGameplayTagIdentifier(Dependency))
+			{
+				continue;
+			}
+			bCarriesTag = true;
+
+			const FName TagName = Dependency.ValueName;
+			ETagState State = ETagState::Known;
+
+			if (const ETagState* Cached = TagStates.Find(TagName))
+			{
+				State = *Cached;
+			}
+			else
+			{
+				if (!TagManager.RequestGameplayTag(TagName, /*ErrorIfNotFound=*/false).IsValid())
+				{
+					// Unregistered is not automatically broken: a redirect keeps the
+					// reference working until the asset is resaved under the new name.
+					// A redirect pointing at a tag that is itself gone does not save
+					// anything, so that case stays broken.
+					const FName RedirectTarget = ResolveRedirect(Redirects, TagName);
+					if (!RedirectTarget.IsNone()
+						&& TagManager.RequestGameplayTag(RedirectTarget, /*ErrorIfNotFound=*/false).IsValid())
+					{
+						State = ETagState::Redirected;
+						RedirectTargets.Add(TagName, RedirectTarget.ToString());
+					}
+					else
+					{
+						State = ETagState::Broken;
+					}
+				}
+				TagStates.Add(TagName, State);
+			}
+
+			if (State == ETagState::Broken)
+			{
+				BrokenReferencers.FindOrAdd(TagName).Add(PackageName);
+			}
+			else if (State == ETagState::Redirected)
+			{
+				RedirectedReferencers.FindOrAdd(TagName).Add(PackageName);
+			}
+		}
+
+		if (bCarriesTag)
+		{
+			++PackagesWithTags;
+		}
+	}
 
 	const double ScanSeconds = FPlatformTime::Seconds() - ScanStart;
 
