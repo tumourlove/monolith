@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`gameplay_tags find_broken` no longer hangs the editor.** It called `GetDependencies` from inside the `EnumerateAllPackages` callback. Both take the asset registry's interface read lock, which is not recursive, so as soon as the background gatherer queued a write between the two reads the game thread deadlocked (seen on a ~270k-package project with no `path_prefix`: no CPU, no log, editor had to be killed). The walk now collects the package names under the lock and queries each package's dependencies after it is released. Output is unchanged. Automation tests `Monolith.GameplayTags.FindBroken.*`.
+
 ## [0.25.0] - 2026-11-20
 
 > **Action count is approximate.** **~1,500+ actions across 27 in-tree namespaces** - query `monolith_discover()` for the live figure.
