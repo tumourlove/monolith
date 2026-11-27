@@ -31,6 +31,13 @@ struct FMonolithFormatterInfo
 class IMonolithGraphFormatter : public IModularFeature
 {
 public:
+	/**
+	 * Virtual: IModularFeature has no virtual destructor, and implementations are owned and
+	 * deleted through their own type (TUniquePtr<FMonolithBAFormatterImpl>), which clang's
+	 * -Wdelete-non-virtual-dtor rejects under warnings-as-errors.
+	 */
+	virtual ~IMonolithGraphFormatter() = default;
+
 	static FName GetModularFeatureName()
 	{
 		static const FName Name(TEXT("MonolithGraphFormatter"));
